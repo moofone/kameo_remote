@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+dashmap = "6.1.0"
 rand = "0.9.1"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 serde = { version = "1.0", features = ["derive"] }

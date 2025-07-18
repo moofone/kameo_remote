@@ -4,9 +4,10 @@ use std::{
     sync::Arc,
 };
 
+use tokio::sync::{Mutex, RwLock};
+
 use rand::seq::SliceRandom;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -36,8 +37,8 @@ pub struct RegistryDelta {
     pub since_sequence: u64,
     pub current_sequence: u64,
     pub changes: Vec<RegistryChange>,
-    pub sender_addr: String,       // Use String instead of SocketAddr for rkyv compatibility
-    pub wall_clock_time: u64,      // For debugging/monitoring only
+    pub sender_addr: String, // Use String instead of SocketAddr for rkyv compatibility
+    pub wall_clock_time: u64, // For debugging/monitoring only
     pub precise_timing_nanos: u64, // High precision timing for latency measurements
 }
 
@@ -563,7 +564,7 @@ impl GossipRegistry {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        
+
         eprintln!("🔍 RECEIVED_TIMESTAMP: {}ns", received_timestamp);
 
         // Apply changes atomically under write lock
@@ -801,8 +802,14 @@ impl GossipRegistry {
             known_actors.len()
         );
         RegistryMessage::FullSync {
-            local_actors: local_actors.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            known_actors: known_actors.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            local_actors: local_actors
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            known_actors: known_actors
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             sender_addr: self.bind_addr.to_string(),
             sequence,
             wall_clock_time: current_timestamp(),
@@ -817,8 +824,14 @@ impl GossipRegistry {
         sequence: u64,
     ) -> RegistryMessage {
         RegistryMessage::FullSyncResponse {
-            local_actors: local_actors.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            known_actors: known_actors.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            local_actors: local_actors
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            known_actors: known_actors
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             sender_addr: self.bind_addr.to_string(),
             sequence,
             wall_clock_time: current_timestamp(),
@@ -1124,7 +1137,7 @@ impl GossipRegistry {
                 info!(sender = %sender_addr, "Adding sender from full sync response as peer");
                 if let Ok(addr) = sender_addr.parse::<SocketAddr>() {
                     self.add_peer(addr).await;
-                    
+
                     self.merge_full_sync(
                         local_actors.into_iter().collect(),
                         known_actors.into_iter().collect(),
@@ -1194,13 +1207,16 @@ impl GossipRegistry {
 
         // Pre-compute all updates outside the lock to minimize lock hold time
         let mut updates_to_apply = Vec::new();
-        
+
         // STEP 1: Read current state with read lock (fast, non-blocking)
         let (local_actors, known_actors) = {
             let actor_state = self.actor_state.read().await;
-            (actor_state.local_actors.clone(), actor_state.known_actors.clone())
+            (
+                actor_state.local_actors.clone(),
+                actor_state.known_actors.clone(),
+            )
         };
-        
+
         // STEP 2: Compute all updates outside any lock (fast, pure computation)
         // Process remote local actors
         for (name, location) in remote_local {
@@ -1228,7 +1244,7 @@ impl GossipRegistry {
                 }
             }
         }
-        
+
         // Process remote known actors
         for (name, location) in remote_known {
             if local_actors.contains_key(&name) {
@@ -1256,7 +1272,7 @@ impl GossipRegistry {
                 }
             }
         }
-        
+
         // STEP 3: Apply all updates with write lock (fast, minimal work under lock)
         if !updates_to_apply.is_empty() {
             let mut actor_state = self.actor_state.write().await;
@@ -1406,9 +1422,12 @@ impl GossipRegistry {
 
         info!("gossip registry shutdown complete");
     }
-    
+
     /// Get a connection handle for direct communication (for performance testing)
-    pub async fn get_connection(&self, addr: SocketAddr) -> Result<crate::connection_pool::ConnectionHandle> {
+    pub async fn get_connection(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<crate::connection_pool::ConnectionHandle> {
         self.connection_pool.lock().await.get_connection(addr).await
     }
 
@@ -1997,7 +2016,8 @@ mod tests {
         };
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&change).unwrap();
-        let deserialized: RegistryChange = rkyv::from_bytes::<RegistryChange, rkyv::rancor::Error>(&serialized).unwrap();
+        let deserialized: RegistryChange =
+            rkyv::from_bytes::<RegistryChange, rkyv::rancor::Error>(&serialized).unwrap();
 
         match deserialized {
             RegistryChange::ActorAdded { name, .. } => {
@@ -2019,7 +2039,8 @@ mod tests {
         };
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&delta).unwrap();
-        let deserialized: RegistryDelta = rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap();
+        let deserialized: RegistryDelta =
+            rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap();
 
         assert_eq!(deserialized.since_sequence, 10);
         assert_eq!(deserialized.current_sequence, 15);
@@ -2052,7 +2073,8 @@ mod tests {
         };
         let msg = RegistryMessage::DeltaGossip { delta };
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
-        let deserialized: RegistryMessage = rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+        let deserialized: RegistryMessage =
+            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
         match deserialized {
             RegistryMessage::DeltaGossip { .. } => (),
             _ => panic!("Wrong message type"),
@@ -2065,7 +2087,8 @@ mod tests {
             wall_clock_time: 1000,
         };
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
-        let deserialized: RegistryMessage = rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+        let deserialized: RegistryMessage =
+            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
         match deserialized {
             RegistryMessage::FullSyncRequest { sequence, .. } => {
                 assert_eq!(sequence, 10);

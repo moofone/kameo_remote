@@ -1,0 +1,266 @@
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)
+warning: variable does not need to be mutable
+    --> src/registry.rs:1461:17
+     |
+1461 |             let mut pool = self.connection_pool.lock().await;
+     |                 ----^^^^
+     |                 |
+     |                 help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` on by default
+
+warning: unused variable: `current_time_secs`
+   --> src/handle.rs:703:9
+    |
+703 |     let current_time_secs = crate::current_timestamp();
+    |         ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_current_time_secs`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `delay_ms`
+   --> src/handle.rs:714:29
+    |
+714 |                         let delay_ms = delay_nanos as f64 / 1_000_000.0;
+    |                             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_delay_ms`
+
+warning: unused variable: `tcp_elapsed`
+   --> src/handle.rs:753:9
+    |
+753 |     let tcp_elapsed = tcp_start.elapsed();
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tcp_elapsed`
+
+warning: field `buffer_size` is never read
+   --> src/connection_pool.rs:172:5
+    |
+169 | pub struct MessageBufferPool {
+    |            ----------------- field in this struct
+...
+172 |     buffer_size: usize,
+    |     ^^^^^^^^^^^
+    |
+    = note: `MessageBufferPool` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `send_data_async` is never used
+   --> src/connection_pool.rs:913:14
+    |
+799 | impl ConnectionHandle {
+    | --------------------- method in this implementation
+...
+913 |     async fn send_data_async(&self, data: &[u8]) -> Result<()> {
+    |              ^^^^^^^^^^^^^^^
+
+warning: function `start_persistent_connection_reader` is never used
+    --> src/connection_pool.rs:1440:4
+     |
+1440 | fn start_persistent_connection_reader(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_incoming_persistent_connection` is never used
+    --> src/connection_pool.rs:1451:21
+     |
+1451 | pub(crate) async fn handle_incoming_persistent_connection(
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_persistent_connection_impl` is never used
+    --> src/connection_pool.rs:1563:10
+     |
+1563 | async fn handle_persistent_connection_impl(
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_message` is never used
+   --> src/handle.rs:479:10
+    |
+479 | async fn read_message(stream: &mut TcpStream, max_size: usize) -> Result<RegistryMessage> {
+    |          ^^^^^^^^^^^^
+
+warning: function `send_gossip_message_persistent` is never used
+   --> src/handle.rs:672:10
+    |
+672 | async fn send_gossip_message_persistent(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `kameo_remote` (lib) generated 11 warnings (run `cargo fix --lib -p kameo_remote` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running `target/debug/examples/test_manual_a`
+Starting Node A on 127.0.0.1:8001...
+[2m2025-07-18T17:25:27.982928Z[0m [32m INFO[0m [1mnew[0m[1m{[0m[3mbind_addr[0m[2m=[0m127.0.0.1:8001[1m}[0m[2m:[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:8001
+[2m2025-07-18T17:25:27.983485Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:8001
+[2m2025-07-18T17:25:27.983513Z[0m [32m INFO[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m10000 [3mcleanup_interval_secs[0m[2m=[0m60
+[2m2025-07-18T17:25:27.983632Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64083
+[2m2025-07-18T17:25:27.983705Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64083 [3mpeer[0m[2m=[0m127.0.0.1:64083[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:25:27.983756Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64083
+[2m2025-07-18T17:25:27.983783Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m failed to read initial message from incoming connection [3merror[0m[2m=[0mnetwork error: early eof
+[2m2025-07-18T17:25:27.983804Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Incoming direct TCP connection handler exited [3mpeer[0m[2m=[0m127.0.0.1:64083
+[2m2025-07-18T17:25:27.983811Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Cannot handle peer failure - sender address unknown [3mpeer[0m[2m=[0m127.0.0.1:64083
+[2m2025-07-18T17:25:28.085345Z[0m [32m INFO[0m [1mbootstrap_peers[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m starting bootstrap with vector clock support [3mpeer_count[0m[2m=[0m1
+[2m2025-07-18T17:25:28.085450Z[0m [32m INFO[0m [1mbootstrap_peers[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m BOOTSTRAP: Attempting to get connection for bootstrap [3mpeer[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:25:28.085635Z[0m [32m INFO[0m [1mbootstrap_peers[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m bootstrap completed with vector clock support
+[2m2025-07-18T17:25:28.085664Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m bootstrap completed successfully [3mattempt[0m[2m=[0m1
+[2m2025-07-18T17:25:28.085719Z[0m [32m INFO[0m [1mnew[0m[1m{[0m[3mbind_addr[0m[2m=[0m127.0.0.1:8001[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:8001
+Node A started at 127.0.0.1:8001
+Node A is ready to accept connections from Node B
+[2m2025-07-18T17:25:28.085779Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 REGISTERED_ACTOR_IMMEDIATE: Will trigger immediate propagation [3mactor_name[0m[2m=[0mactor_a [3mbind_addr[0m[2m=[0m127.0.0.1:8001 [3mpriority[0m[2m=[0mImmediate [3mregistration_duration_ms[0m[2m=[0m0.007
+[2m2025-07-18T17:25:28.085817Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor actor_a at 127.0.0.1:9001 (priority: Immediate)
+[2m2025-07-18T17:25:28.085847Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.020ms)
+[2m2025-07-18T17:25:28.085850Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after bootstrap
+Registered actor_a on Node A with immediate priority
+[2m2025-07-18T17:25:29.686411Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64088
+[2m2025-07-18T17:25:29.686522Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64088 [3mpeer[0m[2m=[0m127.0.0.1:64088[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:25:29.686576Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64088
+[2m2025-07-18T17:25:29.686668Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64088
+[2m2025-07-18T17:25:29.686916Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m0 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:25:29.686982Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m added new lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64088 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:25:29.687005Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64088
+[2m2025-07-18T17:25:29.687046Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m0 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:25:29.687208Z[0m [31mERROR[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🎯 RECEIVING IMMEDIATE CHANGES: 1 total changes from 127.0.0.1:8002
+🔍 FAST_PATH: Processing immediate priority actor: actor_b propagation_time_ms=0.483ms
+[2m2025-07-18T17:25:29.687242Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m RECEIVED_ACTOR [3mactor_name[0m[2m=[0mactor_b [3mpriority[0m[2m=[0mImmediate [3mpropagation_time_ms[0m[2m=[0m0.483 [3mnetwork_processing_time_ms[0m[2m=[0m0.483 [3mprocessing_only_time_ms[0m[2m=[0m0.0
+[2m2025-07-18T17:25:29.687312Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:25:39.608398Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64089
+[2m2025-07-18T17:25:39.608493Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64089 [3mpeer[0m[2m=[0m127.0.0.1:64089[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:25:39.608544Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64089
+[2m2025-07-18T17:25:39.608591Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64089
+[2m2025-07-18T17:25:39.608609Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:25:39.608743Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64089 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:25:39.608756Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64089
+[2m2025-07-18T17:25:39.608806Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:25:50.332522Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64090
+[2m2025-07-18T17:25:50.332593Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64090 [3mpeer[0m[2m=[0m127.0.0.1:64090[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:25:50.332617Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64090
+[2m2025-07-18T17:25:50.332656Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64090
+[2m2025-07-18T17:25:50.332673Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:25:50.332702Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64090 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:25:50.332713Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64090
+[2m2025-07-18T17:25:50.332763Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:26:00.496654Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64091
+[2m2025-07-18T17:26:00.496743Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64091 [3mpeer[0m[2m=[0m127.0.0.1:64091[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:26:00.496775Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64091
+[2m2025-07-18T17:26:00.496818Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64091
+[2m2025-07-18T17:26:00.496835Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:26:00.496867Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64091 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:26:00.496883Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64091
+[2m2025-07-18T17:26:00.496928Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:26:11.247744Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64092
+[2m2025-07-18T17:26:11.247815Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64092 [3mpeer[0m[2m=[0m127.0.0.1:64092[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:26:11.247849Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64092
+[2m2025-07-18T17:26:11.247891Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64092
+[2m2025-07-18T17:26:11.247907Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:26:11.247940Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64092 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:26:11.247955Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64092
+[2m2025-07-18T17:26:11.247999Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:26:21.519842Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64093
+[2m2025-07-18T17:26:21.519919Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64093 [3mpeer[0m[2m=[0m127.0.0.1:64093[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:26:21.519949Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64093
+[2m2025-07-18T17:26:21.519991Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64093
+[2m2025-07-18T17:26:21.520008Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:26:21.520042Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64093 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:26:21.520054Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64093
+[2m2025-07-18T17:26:21.520110Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:26:32.298937Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64094
+[2m2025-07-18T17:26:32.299012Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64094 [3mpeer[0m[2m=[0m127.0.0.1:64094[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:26:32.299039Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64094
+[2m2025-07-18T17:26:32.299083Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64094
+[2m2025-07-18T17:26:32.299100Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:26:32.299132Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64094 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:26:32.299148Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64094
+[2m2025-07-18T17:26:32.299194Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:26:42.840034Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64095
+[2m2025-07-18T17:26:42.840111Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64095 [3mpeer[0m[2m=[0m127.0.0.1:64095[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:26:42.840137Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64095
+[2m2025-07-18T17:26:42.840173Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64095
+[2m2025-07-18T17:26:42.840191Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:26:42.840220Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64095 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:26:42.840240Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64095
+[2m2025-07-18T17:26:42.840287Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:26:53.617115Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64096
+[2m2025-07-18T17:26:53.617182Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64096 [3mpeer[0m[2m=[0m127.0.0.1:64096[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:26:53.617207Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64096
+[2m2025-07-18T17:26:53.617249Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64096
+[2m2025-07-18T17:26:53.617265Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:26:53.617294Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64096 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:26:53.617311Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64096
+[2m2025-07-18T17:26:53.617352Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:27:03.656260Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64097
+[2m2025-07-18T17:27:03.656358Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64097 [3mpeer[0m[2m=[0m127.0.0.1:64097[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:27:03.656397Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64097
+[2m2025-07-18T17:27:03.656450Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64097
+[2m2025-07-18T17:27:03.656474Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:27:03.656524Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64097 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:27:03.656540Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64097
+[2m2025-07-18T17:27:03.656596Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:27:14.208340Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64098
+[2m2025-07-18T17:27:14.208408Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64098 [3mpeer[0m[2m=[0m127.0.0.1:64098[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:27:14.208432Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64098
+[2m2025-07-18T17:27:14.208469Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64098
+[2m2025-07-18T17:27:14.208486Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:27:14.208514Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64098 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:27:14.208527Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64098
+[2m2025-07-18T17:27:14.208576Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1
+[2m2025-07-18T17:27:25.050432Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:64099
+[2m2025-07-18T17:27:25.050504Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:64099 [3mpeer[0m[2m=[0m127.0.0.1:64099[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2025-07-18T17:27:25.050531Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming direct TCP connection handler [3mpeer[0m[2m=[0m127.0.0.1:64099
+[2m2025-07-18T17:27:25.050575Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming connection sender [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64099
+[2m2025-07-18T17:27:25.050592Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m127.0.0.1:8002 [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m1 [3mknown_actors[0m[2m=[0m0 [3mfailed_peers[0m[2m=[0m0
+[2m2025-07-18T17:27:25.050623Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m updated existing lock-free connection for incoming sender [3mpeer[0m[2m=[0m127.0.0.1:64099 [3mlistening[0m[2m=[0m127.0.0.1:8002
+[2m2025-07-18T17:27:25.050635Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming connection to pool for bidirectional use [3mlistening_addr[0m[2m=[0m127.0.0.1:8002 [3mpeer_addr[0m[2m=[0m127.0.0.1:64099
+[2m2025-07-18T17:27:25.050683Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m Completed immediate gossip round after incoming connection [3mpeer[0m[2m=[0m127.0.0.1:8002
+Node A - Active peers: 1, Failed peers: 0, Known actors: 1

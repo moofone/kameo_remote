@@ -15,7 +15,7 @@ pub use actor_location::ActorLocation;
 pub use config::GossipConfig;
 pub use handle::GossipRegistryHandle;
 pub use priority::{ConsistencyLevel, RegistrationPriority};
-pub use connection_pool::{DelegatedReplySender, StreamHandle, ZeroCopyStreamHandle, UltimateStreamHandle, LockFreeStreamHandle, StreamFrameHeader, StreamFrameType, StreamFrameFlags, ChannelId};
+pub use connection_pool::{DelegatedReplySender, LockFreeStreamHandle, StreamFrameType, ChannelId};
 
 /// Errors that can occur in the gossip registry
 #[derive(Error, Debug)]

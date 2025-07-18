@@ -299,9 +299,8 @@ async fn handle_connection(
 ) {
     info!("🔌 HANDLE_CONNECTION: Starting to handle new incoming connection");
 
-    // Split stream for direct TCP access - NO CHANNELS
+    // Split stream for direct TCP access
     let (reader, writer) = stream.into_split();
-    let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
     // Get registry reference for the handler
     let registry_weak = Some(Arc::downgrade(&registry));
@@ -335,7 +334,7 @@ async fn handle_connection(
 /// Handle an incoming direct TCP connection - processes all messages and manages the connection pool
 async fn handle_incoming_connection_direct_tcp(
     mut reader: tokio::net::tcp::OwnedReadHalf,
-    writer: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    writer: tokio::net::tcp::OwnedWriteHalf,
     peer_addr: SocketAddr,
     registry: Arc<GossipRegistry>,
     registry_weak: Option<std::sync::Weak<GossipRegistry>>,
@@ -370,10 +369,11 @@ async fn handle_incoming_connection_direct_tcp(
         }
     }
 
-    // Add this connection to the pool
+    // Add this connection to the pool - LOCK-FREE
     {
         let mut pool = registry.connection_pool.lock().await;
-        if pool.add_connection_sender(sender_addr.parse::<SocketAddr>().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()), peer_addr, writer.clone()) {
+        // Pass writer directly - no mutex needed
+        if pool.add_connection_sender(sender_addr.parse::<SocketAddr>().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()), peer_addr, writer) {
             info!(listening_addr = %sender_addr, peer_addr = %peer_addr,
                   "Added incoming connection to pool for bidirectional use");
         } else {
