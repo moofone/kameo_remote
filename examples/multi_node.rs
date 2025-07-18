@@ -2,7 +2,7 @@
 // Run with: cargo run --example multi_node
 
 use anyhow::Result;
-use kameo_remote::{GossipConfig, GossipRegistryHandle, NodeId};
+use kameo_remote::{GossipConfig, GossipRegistryHandle};
 use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
@@ -18,9 +18,7 @@ async fn main() -> Result<()> {
 
     // Start bootstrap node (node1)
     println!("🚀 Starting bootstrap node (node1) on 127.0.0.1:8000");
-    let node1_id = NodeId::new();
     let node1 = GossipRegistryHandle::new(
-        node1_id,
         "127.0.0.1:8000".parse().unwrap(),
         vec![], // No bootstrap peers for first node
         Some(config.clone()),
@@ -31,7 +29,6 @@ async fn main() -> Result<()> {
     node1
         .register(
             "user_service".to_string(),
-            node1_id,
             "127.0.0.1:9001".parse().unwrap(),
         )
         .await?;
@@ -39,7 +36,6 @@ async fn main() -> Result<()> {
     node1
         .register(
             "auth_service".to_string(),
-            node1_id,
             "127.0.0.1:9002".parse().unwrap(),
         )
         .await?;
@@ -50,9 +46,7 @@ async fn main() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     println!("🚀 Starting node2 on 127.0.0.1:8001 (connecting to node1)");
-    let node2_id = NodeId::new();
     let node2 = GossipRegistryHandle::new(
-        node2_id,
         "127.0.0.1:8001".parse().unwrap(),
         vec!["127.0.0.1:8000".parse().unwrap()], // Bootstrap from node1
         Some(config.clone()),
@@ -63,7 +57,6 @@ async fn main() -> Result<()> {
     node2
         .register(
             "payment_service".to_string(),
-            node2_id,
             "127.0.0.1:9003".parse().unwrap(),
         )
         .await?;
@@ -71,7 +64,6 @@ async fn main() -> Result<()> {
     node2
         .register(
             "notification_service".to_string(),
-            node2_id,
             "127.0.0.1:9004".parse().unwrap(),
         )
         .await?;
@@ -82,9 +74,7 @@ async fn main() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
 
     println!("🚀 Starting node3 on 127.0.0.1:8002 (connecting to node1)");
-    let node3_id = NodeId::new();
     let node3 = GossipRegistryHandle::new(
-        node3_id,
         "127.0.0.1:8002".parse().unwrap(),
         vec!["127.0.0.1:8000".parse().unwrap()], // Bootstrap from node1
         Some(config.clone()),
@@ -95,7 +85,6 @@ async fn main() -> Result<()> {
     node3
         .register(
             "order_service".to_string(),
-            node3_id,
             "127.0.0.1:9005".parse().unwrap(),
         )
         .await?;
@@ -103,7 +92,6 @@ async fn main() -> Result<()> {
     node3
         .register(
             "inventory_service".to_string(),
-            node3_id,
             "127.0.0.1:9006".parse().unwrap(),
         )
         .await?;
