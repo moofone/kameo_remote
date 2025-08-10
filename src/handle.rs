@@ -381,6 +381,10 @@ async fn handle_incoming_connection_direct_tcp(
                 // Use a default identifier or extract from actor_id if it contains node info
                 format!("actor_message_sender_{}", actor_id)
             },
+            RegistryMessage::ImmediateAck { actor_name, .. } => {
+                // For ACK messages, use actor name as identifier
+                format!("ack_sender_{}", actor_name)
+            },
         },
         Err(err) => {
             warn!(error = %err, "failed to read initial message from incoming connection");

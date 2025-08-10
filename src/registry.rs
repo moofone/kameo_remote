@@ -1,7 +1,9 @@
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
+    io,
     net::SocketAddr,
     sync::Arc,
+    time::Duration,
 };
 
 use tokio::sync::{Mutex, RwLock};
@@ -12,7 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     connection_pool::ConnectionPool, current_timestamp, RemoteActorLocation, GossipConfig, GossipError,
-    RegistrationPriority, Result, PeerId,
+    RegistrationPriority, Result,
 };
 
 /// Callback trait for handling incoming actor messages
@@ -110,6 +112,11 @@ pub enum RegistryMessage {
         reporter: crate::PeerId,
         peer_statuses: Vec<(String, PeerHealthStatus)>, // Use Vec instead of HashMap for rkyv compatibility
         timestamp: u64,
+    },
+    /// Lightweight ACK for immediate registrations
+    ImmediateAck {
+        actor_name: String,
+        success: bool,
     },
     /// Query for peer health consensus
     PeerHealthQuery {
@@ -229,6 +236,9 @@ pub struct GossipRegistry {
     
     // Stream assembly state
     pub stream_assemblies: Arc<Mutex<HashMap<u64, StreamAssembly>>>,
+    
+    // Pending ACKs for synchronous registrations
+    pub pending_acks: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
 
 /// State for assembling streamed messages
@@ -281,6 +291,7 @@ impl GossipRegistry {
             connection_pool: Arc::new(Mutex::new(connection_pool)),
             actor_message_handler: Arc::new(Mutex::new(None)),
             stream_assemblies: Arc::new(Mutex::new(HashMap::new())),
+            pending_acks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         registry
@@ -454,6 +465,75 @@ impl GossipRegistry {
     pub async fn register_actor(&self, name: String, location: RemoteActorLocation) -> Result<()> {
         self.register_actor_with_priority(name, location, RegistrationPriority::Normal)
             .await
+    }
+    
+    /// Register actor with confirmation from at least one peer
+    /// Returns when first peer ACKs or timeout
+    pub async fn register_actor_sync(
+        &self,
+        name: String,
+        location: RemoteActorLocation,
+        timeout: Duration,
+    ) -> Result<()> {
+        // Step 1: Check if we have any healthy peers
+        let peer_count = {
+            let gossip_state = self.gossip_state.lock().await;
+            gossip_state.peers.iter()
+                .filter(|(_, info)| info.failures < self.config.max_peer_failures)
+                .count()
+        };
+        
+        if peer_count == 0 {
+            // No peers - just do local registration and return
+            self.register_actor_with_priority(
+                name,
+                location,
+                RegistrationPriority::Immediate
+            ).await?;
+            
+            info!("Sync registration completed immediately (no peers to confirm)");
+            return Ok(());
+        }
+        
+        // Have peers - wait for ACK from at least one
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        
+        // Store pending ACK handler
+        {
+            let mut pending = self.pending_acks.lock().await;
+            pending.insert(name.clone(), ack_tx);
+        }
+        
+        // Register with immediate priority (triggers instant gossip to peers)
+        self.register_actor_with_priority(
+            name.clone(),
+            location,
+            RegistrationPriority::Immediate
+        ).await?;
+        
+        // Wait for first ACK or timeout
+        match tokio::time::timeout(timeout, ack_rx).await {
+            Ok(Ok(success)) if success => {
+                info!("Sync registration confirmed by peer for actor '{}'", name);
+                Ok(())
+            }
+            Ok(Ok(_)) => {
+                warn!("Sync registration failed according to peer for actor '{}'", name);
+                Err(GossipError::Network(io::Error::new(io::ErrorKind::Other, "Peer rejected registration")))
+            }
+            Ok(Err(_)) => {
+                // Channel closed unexpectedly
+                warn!("ACK channel closed for actor '{}'", name);
+                self.pending_acks.lock().await.remove(&name);
+                Ok(())
+            }
+            Err(_) => {
+                // Timeout - maybe peer is slow or disconnected
+                warn!("Sync registration timed out waiting for peer ACK for actor '{}', continuing anyway", name);
+                self.pending_acks.lock().await.remove(&name);
+                Ok(()) // Still return Ok - gossip will eventually propagate
+            }
+        }
     }
     
     /// Get the current number of actors in the registry (both local and known)
@@ -2427,6 +2507,7 @@ impl GossipRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
