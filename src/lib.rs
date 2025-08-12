@@ -406,12 +406,19 @@ impl Peer {
             let mut gossip_state = self.registry.gossip_state.lock().await;
             let current_time = crate::current_timestamp();
             let peers_before = gossip_state.peers.len();
+            
+            // Convert PeerId to NodeId for TLS
+            let node_id = crate::migration::migrate_peer_id_to_node_id(&self.peer_id).ok();
+            if node_id.is_some() {
+                tracing::debug!("🔐 Converted PeerId {} to NodeId for TLS", self.peer_id);
+            }
+            
             gossip_state.peers.insert(
                 *addr,
                 crate::registry::PeerInfo {
                     address: *addr,
                     peer_address: None,
-                    node_id: None,
+                    node_id,  // Set the NodeId for TLS verification
                     failures: 0,  // Start with 0 failures
                     last_attempt: current_time,  // Set last_attempt to now
                     last_success: 0,

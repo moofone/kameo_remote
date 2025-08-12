@@ -10,6 +10,12 @@ use rustls::{ClientConfig, DigitallySignedStruct, DistinguishedName, Error, Serv
 use std::sync::Arc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+/// Ensure the rustls CryptoProvider is installed (required for TLS)
+/// This uses the ring provider which is enabled in kameo_remote's Cargo.toml
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// TLS configuration for the gossip protocol
 pub struct TlsConfig {
     /// Our secret key for this node

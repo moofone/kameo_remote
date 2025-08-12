@@ -2078,8 +2078,12 @@ impl ConnectionPool {
         
         debug!("CONNECTION POOL: Creating new connection to node '{}' at {}", node_id, addr);
         
+        // Convert PeerId to NodeId for TLS
+        let node_id_for_tls = crate::migration::migrate_peer_id_to_node_id(&peer_id).ok();
+        
         // Create the connection and store it by node ID
-        let handle = self.get_connection(addr).await?;
+        // Pass the NodeId so TLS can work even if gossip state doesn't have it yet
+        let handle = self.get_connection_with_node_id(addr, node_id_for_tls).await?;
         
         // After successful connection, ensure it's indexed by node ID
         if let Some(conn) = self.connections.get(&addr) {
@@ -2092,6 +2096,10 @@ impl ConnectionPool {
     }
 
     pub async fn get_connection(&mut self, addr: SocketAddr) -> Result<ConnectionHandle> {
+        self.get_connection_with_node_id(addr, None).await
+    }
+    
+    pub async fn get_connection_with_node_id(&mut self, addr: SocketAddr, node_id: Option<crate::NodeId>) -> Result<ConnectionHandle> {
         let _current_time = current_timestamp();
         // Debug logging removed for performance - these logs were too verbose
         // debug!("CONNECTION POOL: get_connection called on pool at {:p} for {}", self as *const _, addr);
@@ -2170,8 +2178,11 @@ impl ConnectionPool {
                 // TLS is enabled - perform handshake as client
                 debug!("CONNECTION POOL: TLS enabled, checking for peer NodeId");
                 
-                // Look up the peer's NodeId from the registry's peer info
-                let peer_node_id = {
+                // Use provided NodeId if available, otherwise look it up from gossip state
+                let peer_node_id = if node_id.is_some() {
+                    node_id
+                } else {
+                    // Look up the peer's NodeId from the registry's peer info
                     let gossip_state = registry_arc.gossip_state.lock().await;
                     gossip_state.peers.get(&addr)
                         .and_then(|peer_info| peer_info.node_id)
@@ -2215,23 +2226,32 @@ impl ConnectionPool {
                         }
                     }
                 } else {
-                    // No NodeId available - can't do TLS
-                    panic!("🔥 TLS is configured but no NodeId provided for peer {}. Cannot establish secure connection!", addr);
-                    let (read_half, write_half) = stream.into_split();
-                    (Box::pin(read_half) as Pin<Box<dyn AsyncRead + Send>>, 
-                     Box::pin(write_half) as Pin<Box<dyn AsyncWrite + Send>>)
+                    // No NodeId available - can't do TLS, return error instead of panic
+                    error!("❌ TLS is configured but no NodeId available for peer {}. Cannot establish secure connection.", addr);
+                    return Err(GossipError::TlsError(format!(
+                        "Cannot establish TLS connection to {} without NodeId. Peer may not have connected yet.", 
+                        addr
+                    )));
+                    // COMMENTED OUT: Plain TCP fallback - migrating to TLS-only
+                    // let (read_half, write_half) = stream.into_split();
+                    // (Box::pin(read_half) as Pin<Box<dyn AsyncRead + Send>>, 
+                    //  Box::pin(write_half) as Pin<Box<dyn AsyncWrite + Send>>)
                 }
             } else {
-                // No TLS - use plain TCP
-                let (read_half, write_half) = stream.into_split();
-                (Box::pin(read_half) as Pin<Box<dyn AsyncRead + Send>>, 
-                 Box::pin(write_half) as Pin<Box<dyn AsyncWrite + Send>>)
+                // No TLS configured - panic to enforce TLS-only
+                panic!("🔥 TLS is NOT configured but is required! Cannot establish plain TCP connection to {}", addr);
+                // COMMENTED OUT: Plain TCP path - migrating to TLS-only
+                // let (read_half, write_half) = stream.into_split();
+                // (Box::pin(read_half) as Pin<Box<dyn AsyncRead + Send>>, 
+                //  Box::pin(write_half) as Pin<Box<dyn AsyncWrite + Send>>)
             }
         } else {
-            // No registry reference - use plain TCP
-            let (read_half, write_half) = stream.into_split();
-            (Box::pin(read_half) as Pin<Box<dyn AsyncRead + Send>>, 
-             Box::pin(write_half) as Pin<Box<dyn AsyncWrite + Send>>)
+            // No registry reference - panic to enforce TLS requirement
+            panic!("🔥 No registry reference available - TLS cannot be verified! Cannot establish connection to {}", addr);
+            // COMMENTED OUT: Plain TCP fallback - migrating to TLS-only
+            // let (read_half, write_half) = stream.into_split();
+            // (Box::pin(read_half) as Pin<Box<dyn AsyncRead + Send>>, 
+            //  Box::pin(write_half) as Pin<Box<dyn AsyncWrite + Send>>)
         };
         
         // Create lock-free connection for receiving

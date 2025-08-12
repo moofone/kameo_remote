@@ -1579,8 +1579,18 @@ impl GossipRegistry {
         // STEP 3: Apply all updates with write lock (fast, minimal work under lock)
         if !updates_to_apply.is_empty() {
             let mut actor_state = self.actor_state.write().await;
-            for (name, location) in updates_to_apply {
-                actor_state.known_actors.insert(name, location);
+            for (name, location) in &updates_to_apply {
+                // Also ensure the peer's NodeId is in the gossip state for TLS
+                if let Ok(addr) = location.address.parse::<SocketAddr>() {
+                    // Convert PeerId to NodeId for TLS
+                    let node_id = crate::migration::migrate_peer_id_to_node_id(&location.peer_id).ok();
+                    if node_id.is_some() {
+                        // This will be used later when we need to connect to this peer for TLS
+                        self.add_peer_with_node_id(addr, node_id).await;
+                        debug!(actor = %name, peer_addr = %addr, "Added NodeId to gossip state for actor's host");
+                    }
+                }
+                actor_state.known_actors.insert(name.clone(), location.clone());
             }
         }
 

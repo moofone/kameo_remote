@@ -397,36 +397,37 @@ async fn handle_connection(
         // No TLS - panic for now to ensure we're using TLS
         panic!("⚠️ TLS DISABLED: Server attempted to accept plain TCP connection from {}. TLS is required!", peer_addr);
         
-        // Split stream for direct TCP access
-        let (reader, writer) = stream.into_split();
+        // COMMENTED OUT: Non-TLS TCP path - migrating to TLS-only
+        // // Split stream for direct TCP access
+        // let (reader, writer) = stream.into_split();
 
-        // Get registry reference for the handler
-        let registry_weak = Some(Arc::downgrade(&registry));
+        // // Get registry reference for the handler
+        // let registry_weak = Some(Arc::downgrade(&registry));
 
-        // Start the incoming persistent connection handler immediately
-        // It will handle ALL messages including the first one
-        tokio::spawn(async move {
-            debug!(peer = %peer_addr, "HANDLE.RS: Starting incoming direct TCP connection handler");
-            let sender_node_id = handle_incoming_connection_direct_tcp(
-                reader,
-                writer,
-                peer_addr,
-                registry.clone(),
-                registry_weak,
-            )
-            .await;
-            debug!(peer = %peer_addr, "HANDLE.RS: Incoming direct TCP connection handler exited");
-            
-            // Handle peer failure when connection is lost
-            if let Some(failed_node_id) = sender_node_id {
-                debug!(node_id = %failed_node_id, "HANDLE.RS: Triggering peer failure handling for node");
-                if let Err(e) = registry.handle_peer_connection_failure_by_node_id(&failed_node_id).await {
-                    warn!(error = %e, node_id = %failed_node_id, "HANDLE.RS: Failed to handle peer connection failure");
-                }
-            } else {
-                warn!(peer = %peer_addr, "HANDLE.RS: Cannot handle peer failure - sender node ID unknown");
-            }
-        });
+        // // Start the incoming persistent connection handler immediately
+        // // It will handle ALL messages including the first one
+        // tokio::spawn(async move {
+        //     debug!(peer = %peer_addr, "HANDLE.RS: Starting incoming direct TCP connection handler");
+        //     let sender_node_id = handle_incoming_connection_direct_tcp(
+        //         reader,
+        //         writer,
+        //         peer_addr,
+        //         registry.clone(),
+        //         registry_weak,
+        //     )
+        //     .await;
+        //     debug!(peer = %peer_addr, "HANDLE.RS: Incoming direct TCP connection handler exited");
+        //     
+        //     // Handle peer failure when connection is lost
+        //     if let Some(failed_node_id) = sender_node_id {
+        //         debug!(node_id = %failed_node_id, "HANDLE.RS: Triggering peer failure handling for node");
+        //         if let Err(e) = registry.handle_peer_connection_failure_by_node_id(&failed_node_id).await {
+        //             warn!(error = %e, node_id = %failed_node_id, "HANDLE.RS: Failed to handle peer connection failure");
+        //         }
+        //     } else {
+        //         warn!(peer = %peer_addr, "HANDLE.RS: Cannot handle peer failure - sender node ID unknown");
+        //     }
+        // });
     }
 }
 
@@ -511,6 +512,16 @@ where
     };
     
     debug!(peer_addr = %peer_addr, node_id = %sender_node_id, "Identified incoming TLS connection from node");
+    
+    // Update the gossip state with the NodeId for this peer
+    // This is critical for bidirectional TLS connections
+    {
+        let node_id = crate::migration::migrate_peer_id_to_node_id(&crate::PeerId::new(&sender_node_id)).ok();
+        if let Some(node_id) = node_id {
+            registry.add_peer_with_node_id(peer_addr, Some(node_id)).await;
+            debug!(peer_addr = %peer_addr, "Updated gossip state with NodeId for incoming TLS connection");
+        }
+    }
     
     // Process the initial message
     if let Ok(msg) = msg_result {
