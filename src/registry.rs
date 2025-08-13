@@ -29,7 +29,7 @@ pub trait ActorMessageHandler: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Vec<u8>>>> + Send + '_>>;
 }
 
-/// Registry change types for delta tracking
+/// Registry change types for delta tracking with vector clocks
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone)]
 pub enum RegistryChange {
     /// Actor was added or updated
@@ -41,6 +41,8 @@ pub enum RegistryChange {
     /// Actor was removed
     ActorRemoved {
         name: String,
+        vector_clock: crate::VectorClock,
+        removing_node_id: crate::NodeId,  // Node that performed the removal
         priority: RegistrationPriority,
     },
 }
@@ -590,7 +592,7 @@ impl GossipRegistry {
         location.wall_clock_time = current_timestamp();
         location.priority = priority;
 
-        // Single write lock acquisition for actor state
+        // Single write lock acquisition for actor state - atomic operation
         {
             let mut actor_state = self.actor_state.write().await;
             if actor_state.local_actors.contains_key(&name)
@@ -598,6 +600,10 @@ impl GossipRegistry {
             {
                 return Err(GossipError::ActorAlreadyExists(name));
             }
+            
+            // Increment vector clock inside the lock for atomicity
+            location.vector_clock.increment(location.node_id);
+            
             actor_state
                 .local_actors
                 .insert(name.clone(), location.clone());
@@ -681,8 +687,14 @@ impl GossipRegistry {
                     return Err(GossipError::Shutdown);
                 }
 
+                // Create a new vector clock for the removal with proper causality
+                let mut removal_clock = location.vector_clock.clone();
+                removal_clock.increment(self.peer_id.to_node_id());
+
                 let change = RegistryChange::ActorRemoved {
                     name: name.to_string(),
+                    vector_clock: removal_clock,
+                    removing_node_id: self.peer_id.to_node_id(),
                     priority: location.priority,
                 };
 
@@ -850,12 +862,35 @@ impl GossipRegistry {
                         // Check if we already know about this actor
                         let should_apply = match actor_state.known_actors.get(name.as_str()) {
                             Some(existing_location) => {
-                                // Use wall clock time as the primary decision factor
-                                // If times are equal, use address as tiebreaker for consistency
-                                location.wall_clock_time > existing_location.wall_clock_time
-                                    || (location.wall_clock_time
-                                        == existing_location.wall_clock_time
-                                        && location.address > existing_location.address)
+                                // Use vector clock for causal ordering
+                                match location.vector_clock.compare(&existing_location.vector_clock) {
+                                    crate::ClockOrdering::After => true,
+                                    crate::ClockOrdering::Concurrent => {
+                                        // For concurrent updates, use deterministic tiebreaker
+                                        // Hash of (actor_name + address + wall_clock) ensures consistency
+                                        use std::hash::{Hash, Hasher};
+                                        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+                                        name.hash(&mut hasher1);
+                                        location.address.hash(&mut hasher1);
+                                        location.wall_clock_time.hash(&mut hasher1);
+                                        let hash1 = hasher1.finish();
+                                        
+                                        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+                                        name.hash(&mut hasher2);
+                                        existing_location.address.hash(&mut hasher2);
+                                        existing_location.wall_clock_time.hash(&mut hasher2);
+                                        let hash2 = hasher2.finish();
+                                        
+                                        // Use hash comparison for deterministic resolution
+                                        // If hashes are equal (extremely rare), prefer newer by wall clock
+                                        if hash1 != hash2 {
+                                            hash1 > hash2
+                                        } else {
+                                            location.wall_clock_time > existing_location.wall_clock_time
+                                        }
+                                    }
+                                    _ => false, // Keep existing for Before or Equal
+                                }
                             }
                             None => {
                                 debug!(
@@ -905,7 +940,7 @@ impl GossipRegistry {
                             }
                         }
                     }
-                    RegistryChange::ActorRemoved { name, priority: _ } => {
+                    RegistryChange::ActorRemoved { name, vector_clock, removing_node_id, priority: _ } => {
                         // Don't remove local actors - early exit
                         if actor_state.local_actors.contains_key(name.as_str()) {
                             debug!(
@@ -915,10 +950,68 @@ impl GossipRegistry {
                             continue;
                         }
 
-                        // Simply remove the actor if it exists in known_actors
-                        if actor_state.known_actors.remove(name.as_str()).is_some() {
-                            applied += 1;
-                            debug!(actor_name = %name, "applied actor removal");
+                        // Check vector clock ordering before applying removal
+                        let should_remove = match actor_state.known_actors.get(name.as_str()) {
+                            Some(existing_location) => {
+                                // Use vector clock for causal ordering
+                                match vector_clock.compare(&existing_location.vector_clock) {
+                                    crate::ClockOrdering::After => {
+                                        // Removal is causally after current state
+                                        debug!(
+                                            actor_name = %name,
+                                            "removal is causally after current state - applying"
+                                        );
+                                        true
+                                    }
+                                    crate::ClockOrdering::Concurrent => {
+                                        // For concurrent removals, use deterministic tiebreaker
+                                        // Removal should win if it's "newer" based on hash
+                                        use std::hash::{Hash, Hasher};
+                                        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+                                        name.hash(&mut hasher1);
+                                        removing_node_id.hash(&mut hasher1);
+                                        vector_clock.hash(&mut hasher1);
+                                        let hash1 = hasher1.finish();
+                                        
+                                        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+                                        name.hash(&mut hasher2);
+                                        existing_location.node_id.hash(&mut hasher2);
+                                        existing_location.vector_clock.hash(&mut hasher2);
+                                        let hash2 = hasher2.finish();
+                                        
+                                        // Removal wins if its hash is greater (deterministic across all nodes)
+                                        let should_apply = hash1 > hash2;
+                                        debug!(
+                                            actor_name = %name,
+                                            removing_node = %removing_node_id.fmt_short(),
+                                            existing_node = %existing_location.node_id.fmt_short(),
+                                            should_apply = should_apply,
+                                            "removal is concurrent with current state - using node_id tiebreaker"
+                                        );
+                                        should_apply
+                                    }
+                                    _ => {
+                                        // Removal is outdated (Before or Equal) - ignore it
+                                        debug!(
+                                            actor_name = %name,
+                                            "removal is outdated - ignoring"
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                            None => {
+                                // Actor doesn't exist, nothing to remove
+                                debug!(actor_name = %name, "actor not found - ignoring removal");
+                                false
+                            }
+                        };
+
+                        if should_remove {
+                            if actor_state.known_actors.remove(name.as_str()).is_some() {
+                                applied += 1;
+                                debug!(actor_name = %name, "applied actor removal");
+                            }
                         }
                     }
                 }
@@ -1527,18 +1620,35 @@ impl GossipRegistry {
             if !local_actors.contains_key(&name) {
                 match known_actors.get(&name) {
                     Some(existing_location) => {
-                        // Use wall clock time for conflict resolution
-                        if location.wall_clock_time > existing_location.wall_clock_time {
-                            updates_to_apply.push((name.clone(), location));
-                            updated_actors += 1;
-                        } else if location.wall_clock_time == existing_location.wall_clock_time {
-                            // Use address as tiebreaker for concurrent updates
-                            if location.address > existing_location.address {
+                        // Use vector clock for causal ordering
+                        match location.vector_clock.compare(&existing_location.vector_clock) {
+                            crate::ClockOrdering::After => {
+                                // New location is causally after existing
                                 updates_to_apply.push((name.clone(), location));
                                 updated_actors += 1;
                             }
+                            crate::ClockOrdering::Concurrent => {
+                                // Concurrent updates - use deterministic hash-based tiebreaker
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+                                name.hash(&mut hasher1);
+                                location.address.hash(&mut hasher1);
+                                location.wall_clock_time.hash(&mut hasher1);
+                                let hash1 = hasher1.finish();
+                                
+                                let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+                                name.hash(&mut hasher2);
+                                existing_location.address.hash(&mut hasher2);
+                                existing_location.wall_clock_time.hash(&mut hasher2);
+                                let hash2 = hasher2.finish();
+                                
+                                if hash1 > hash2 || (hash1 == hash2 && location.wall_clock_time > existing_location.wall_clock_time) {
+                                    updates_to_apply.push((name.clone(), location));
+                                    updated_actors += 1;
+                                }
+                            }
+                            _ => {} // Keep existing for Before or Equal
                         }
-                        // Otherwise keep existing
                     }
                     None => {
                         updates_to_apply.push((name.clone(), location));
@@ -1556,18 +1666,35 @@ impl GossipRegistry {
 
             match known_actors.get(&name) {
                 Some(existing_location) => {
-                    // Use wall clock time for conflict resolution
-                    if location.wall_clock_time > existing_location.wall_clock_time {
-                        updates_to_apply.push((name, location));
-                        updated_actors += 1;
-                    } else if location.wall_clock_time == existing_location.wall_clock_time {
-                        // Use address as tiebreaker for concurrent updates
-                        if location.address > existing_location.address {
+                    // Use vector clock for causal ordering
+                    match location.vector_clock.compare(&existing_location.vector_clock) {
+                        crate::ClockOrdering::After => {
+                            // New location is causally after existing
                             updates_to_apply.push((name, location));
                             updated_actors += 1;
                         }
+                        crate::ClockOrdering::Concurrent => {
+                            // Concurrent updates - use deterministic hash-based tiebreaker
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+                            name.hash(&mut hasher1);
+                            location.address.hash(&mut hasher1);
+                            location.wall_clock_time.hash(&mut hasher1);
+                            let hash1 = hasher1.finish();
+                            
+                            let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+                            name.hash(&mut hasher2);
+                            existing_location.address.hash(&mut hasher2);
+                            existing_location.wall_clock_time.hash(&mut hasher2);
+                            let hash2 = hasher2.finish();
+                            
+                            if hash1 > hash2 || (hash1 == hash2 && location.wall_clock_time > existing_location.wall_clock_time) {
+                                updates_to_apply.push((name, location));
+                                updated_actors += 1;
+                            }
+                        }
+                        _ => {} // Keep existing for Before or Equal
                     }
-                    // Otherwise keep existing
                 }
                 None => {
                     updates_to_apply.push((name, location));
@@ -1672,8 +1799,10 @@ impl GossipRegistry {
         };
 
         if !peers_to_cleanup.is_empty() {
-            let mut gossip_state = self.gossip_state.lock().await;
+            // IMPORTANT: Always acquire locks in consistent order to prevent deadlocks
+            // Order: actor_state before gossip_state
             let mut actor_state = self.actor_state.write().await;
+            let mut gossip_state = self.gossip_state.lock().await;
 
             for peer_addr in &peers_to_cleanup {
                 // IMPORTANT: We do NOT remove the peer itself - it stays in the peer list
@@ -1698,6 +1827,104 @@ impl GossipRegistry {
                 gossip_state.peer_health_reports.remove(peer_addr);
                 gossip_state.pending_peer_failures.remove(peer_addr);
             }
+        }
+    }
+
+    /// Run vector clock garbage collection to prevent unbounded growth
+    pub async fn run_vector_clock_gc(&self) {
+        let (active_nodes, dead_nodes_with_timeout) = {
+            // Collect all active node IDs and dead nodes with timeout info
+            let gossip_state = self.gossip_state.lock().await;
+            let mut active = HashSet::new();
+            let mut dead = HashMap::new();
+            
+            // Add our own node ID - always active
+            active.insert(self.peer_id.to_node_id());
+            
+            // Add all known peer node IDs based on their status
+            let current_time = current_timestamp();
+            for peer_info in gossip_state.peers.values() {
+                if let Some(node_id) = &peer_info.node_id {
+                    if peer_info.failures < self.config.max_peer_failures {
+                        // Peer is healthy - keep their entries
+                        active.insert(*node_id);
+                    } else if let Some(failure_time) = peer_info.last_failure_time {
+                        // Peer is failed - check how long it's been dead
+                        let time_since_failure = current_time - failure_time;
+                        let retention_secs = self.config.vector_clock_retention_period.as_secs();
+                        
+                        if time_since_failure > retention_secs {
+                            // Dead for longer than retention period - can be GC'd
+                            dead.insert(*node_id, time_since_failure);
+                        } else {
+                            // Dead but within retention period - keep their entries
+                            active.insert(*node_id);
+                        }
+                    } else {
+                        // Failed but no failure time recorded - keep to be safe
+                        active.insert(*node_id);
+                    }
+                }
+            }
+            
+            (active, dead)
+        };
+        
+        // Run GC on all actor vector clocks
+        let mut gc_count = 0;
+        let mut largest_clock_size = 0;
+        {
+            let mut actor_state = self.actor_state.write().await;
+            
+            // GC local actors
+            for location in actor_state.local_actors.values() {
+                let before_size = location.vector_clock.len();
+                location.vector_clock.gc_old_nodes(&active_nodes);
+                let after_size = location.vector_clock.len();
+                if before_size > after_size {
+                    gc_count += before_size - after_size;
+                }
+                largest_clock_size = largest_clock_size.max(after_size);
+            }
+            
+            // GC known actors
+            for location in actor_state.known_actors.values() {
+                let before_size = location.vector_clock.len();
+                location.vector_clock.gc_old_nodes(&active_nodes);
+                let after_size = location.vector_clock.len();
+                if before_size > after_size {
+                    gc_count += before_size - after_size;
+                }
+                largest_clock_size = largest_clock_size.max(after_size);
+            }
+        }
+        
+        if gc_count > 0 {
+            info!(
+                entries_removed = gc_count,
+                active_nodes = active_nodes.len(),
+                dead_nodes_removed = dead_nodes_with_timeout.len(),
+                largest_clock_size = largest_clock_size,
+                "vector clock garbage collection completed"
+            );
+            
+            // Log details about removed nodes
+            for (node_id, time_dead) in dead_nodes_with_timeout {
+                debug!(
+                    node_id = ?node_id,
+                    dead_for_secs = time_dead,
+                    "removed dead node from vector clocks"
+                );
+            }
+        }
+        
+        // Warn if clocks are still large after GC
+        if largest_clock_size > 1000 {
+            warn!(
+                largest_size = largest_clock_size,
+                active_nodes = active_nodes.len(),
+                "Vector clocks still large after GC. Consider shorter retention period or investigating node churn."
+            );
         }
     }
 
@@ -2195,6 +2422,59 @@ impl GossipRegistry {
     /// Enforce bounds on gossip state data structures to prevent unbounded growth
     async fn enforce_bounds(&self) {
         let mut gossip_state = self.gossip_state.lock().await;
+        
+        // Apply vector clock compaction to all changes before bounds enforcement
+        let max_clock_size = self.config.max_vector_clock_size;
+        
+        // Compact vector clocks in pending changes
+        for change in &gossip_state.pending_changes {
+            match change {
+                RegistryChange::ActorAdded { location, .. } => {
+                    if location.vector_clock.len() > max_clock_size {
+                        location.vector_clock.compact(max_clock_size);
+                    }
+                }
+                RegistryChange::ActorRemoved { vector_clock, .. } => {
+                    if vector_clock.len() > max_clock_size {
+                        vector_clock.compact(max_clock_size);
+                    }
+                }
+            }
+        }
+        
+        // Compact vector clocks in urgent changes
+        for change in &gossip_state.urgent_changes {
+            match change {
+                RegistryChange::ActorAdded { location, .. } => {
+                    if location.vector_clock.len() > max_clock_size {
+                        location.vector_clock.compact(max_clock_size);
+                    }
+                }
+                RegistryChange::ActorRemoved { vector_clock, .. } => {
+                    if vector_clock.len() > max_clock_size {
+                        vector_clock.compact(max_clock_size);
+                    }
+                }
+            }
+        }
+        
+        // Compact vector clocks in delta history
+        for delta in &gossip_state.delta_history {
+            for change in &delta.changes {
+                match change {
+                    RegistryChange::ActorAdded { location, .. } => {
+                        if location.vector_clock.len() > max_clock_size {
+                            location.vector_clock.compact(max_clock_size);
+                        }
+                    }
+                    RegistryChange::ActorRemoved { vector_clock, .. } => {
+                        if vector_clock.len() > max_clock_size {
+                            vector_clock.compact(max_clock_size);
+                        }
+                    }
+                }
+            }
+        }
 
         // Bound pending changes
         let max_pending = 1000;
@@ -2433,15 +2713,34 @@ impl GossipRegistry {
                 return Ok(());
             }
 
-            // Create removal changes for each actor
+            // Create removal changes for each actor with proper vector clocks
             let mut removal_changes = Vec::new();
+            
+            // We need to get the current vector clocks for these actors
+            let actor_state = self.actor_state.read().await;
             for actor_name in &actors_to_remove {
+                // Get the existing vector clock for this actor if it exists
+                let mut removal_clock = if let Some(location) = actor_state.known_actors.get(actor_name) {
+                    // Use the actor's current vector clock and increment it
+                    let mut clock = location.vector_clock.clone();
+                    clock.increment(self.peer_id.to_node_id());
+                    clock
+                } else {
+                    // If actor not found (shouldn't happen), create a new clock with our increment
+                    let mut clock = crate::VectorClock::new();
+                    clock.increment(self.peer_id.to_node_id());
+                    clock
+                };
+                
                 let change = RegistryChange::ActorRemoved {
                     name: actor_name.clone(),
+                    vector_clock: removal_clock,
+                    removing_node_id: self.peer_id.to_node_id(),
                     priority: RegistrationPriority::Immediate, // Node failures are always immediate
                 };
                 removal_changes.push(change);
             }
+            drop(actor_state); // Release the read lock before acquiring write lock
 
             // Add all removal changes to urgent queue
             gossip_state.urgent_changes.extend(removal_changes);
@@ -2687,6 +2986,7 @@ mod tests {
         let mut peer = PeerInfo {
             address: test_addr(8080),
             peer_address: Some(test_addr(8081)),
+            node_id: None,
             failures: 0,
             last_attempt: 100,
             last_success: 100,
@@ -2723,6 +3023,8 @@ mod tests {
             },
             RegistryChange::ActorRemoved {
                 name: "actor2".to_string(),
+                vector_clock: crate::VectorClock::new(),
+                removing_node_id: crate::SecretKey::generate().public(),
                 priority: RegistrationPriority::Normal,
             },
         ];
@@ -2756,6 +3058,8 @@ mod tests {
 
         let remove_change = RegistryChange::ActorRemoved {
             name: "test_actor".to_string(),
+            vector_clock: crate::VectorClock::new(),
+            removing_node_id: crate::SecretKey::generate().public(),
             priority: RegistrationPriority::Normal,
         };
         assert_eq!(
@@ -3007,6 +3311,7 @@ mod tests {
         let new_peer = PeerInfo {
             address: test_addr(8081),
             peer_address: None,
+            node_id: None,
             failures: 0,
             last_attempt: 0,
             last_success: 0,
@@ -3021,6 +3326,7 @@ mod tests {
         let established_peer = PeerInfo {
             address: test_addr(8081),
             peer_address: None,
+            node_id: None,
             failures: 0,
             last_attempt: 100,
             last_success: 100,
@@ -3150,6 +3456,7 @@ mod tests {
                 PeerInfo {
                     address: test_addr(8081),
                     peer_address: None,
+                    node_id: None,
                     failures: 3,
                     last_attempt: 0,
                     last_success: 0,

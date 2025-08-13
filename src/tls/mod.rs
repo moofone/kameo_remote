@@ -318,6 +318,9 @@ mod tests {
     
     #[test]
     fn test_tls_config_creation() {
+        // Ensure crypto provider is installed for test
+        ensure_crypto_provider();
+        
         let secret_key = SecretKey::generate();
         let config = TlsConfig::new(secret_key).unwrap();
         

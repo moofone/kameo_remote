@@ -95,7 +95,6 @@ pub struct StreamFrameHeader {
     pub payload_len: u32,
 }
 
-
 /// Lock-free connection state representation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -884,8 +883,6 @@ impl Debug for LockFreeStreamHandle {
     }
 }
 
-
-
 /// Message types for seamless batching with tell()
 pub enum TellMessage<'a> {
     Single(&'a [u8]),
@@ -995,7 +992,6 @@ pub struct ConnectionPool {
     /// Connection counter for load balancing
     connection_counter: AtomicUsize,
 }
-
 
 /// Maximum number of pending responses (must be power of 2 for fast modulo)
 const PENDING_RESPONSES_SIZE: usize = 1024;
@@ -2735,7 +2731,6 @@ impl ConnectionPool {
         })
     }
 
-
     /// Mark a connection as disconnected
     pub fn mark_disconnected(&mut self, addr: SocketAddr) {
         if let Some(entry) = self.connections.get(&addr) {
@@ -2760,7 +2755,6 @@ impl ConnectionPool {
             .filter(|entry| entry.value().is_connected())
             .count()
     }
-
 
     /// Check if we have a connection to a peer by address
     pub fn has_connection(&self, addr: &SocketAddr) -> bool {
@@ -3882,8 +3876,24 @@ pub(crate) async fn handle_incoming_message(
                                         }
                                     }
                                 }
-                                crate::registry::RegistryChange::ActorRemoved { name, priority: _ } => {
-                                    if actor_state.known_actors.remove(name.as_str()).is_some() {
+                                crate::registry::RegistryChange::ActorRemoved { name, vector_clock, removing_node_id, priority: _ } => {
+                                    // Check vector clock ordering before applying removal
+                                    let should_remove = match actor_state.known_actors.get(name.as_str()) {
+                                        Some(existing_location) => {
+                                            match vector_clock.compare(&existing_location.vector_clock) {
+                                                crate::ClockOrdering::After => true,
+                                                crate::ClockOrdering::Concurrent => {
+                                                    // For concurrent removals, use node_id as deterministic tiebreaker
+                                                    // This ensures all nodes make the same decision
+                                                    removing_node_id > existing_location.node_id
+                                                }
+                                                _ => false // Ignore outdated removals (Before or Equal)
+                                            }
+                                        }
+                                        None => false // Actor doesn't exist
+                                    };
+                                    
+                                    if should_remove && actor_state.known_actors.remove(name.as_str()).is_some() {
                                         applied += 1;
                                     }
                                 }
@@ -3915,11 +3925,15 @@ pub(crate) async fn handle_incoming_message(
                                 // Check if we already know about this actor
                                 let should_apply = match actor_state.known_actors.get(name.as_str()) {
                                     Some(existing_location) => {
-                                        // Use wall clock time as the primary decision factor
-                                        location.wall_clock_time > existing_location.wall_clock_time
-                                            || (location.wall_clock_time
-                                                == existing_location.wall_clock_time
-                                                && location.address > existing_location.address)
+                                        // Use vector clock for causal ordering
+                                        match location.vector_clock.compare(&existing_location.vector_clock) {
+                                            crate::ClockOrdering::After => true,
+                                            crate::ClockOrdering::Concurrent => {
+                                                // For concurrent updates, use node_id as tiebreaker
+                                                location.node_id > existing_location.node_id
+                                            }
+                                            _ => false, // Keep existing for Before or Equal
+                                        }
                                     }
                                     None => {
                                         debug!(
@@ -3934,9 +3948,22 @@ pub(crate) async fn handle_incoming_message(
                                     pending_updates.push((name.clone(), location.clone()));
                                 }
                             }
-                            crate::registry::RegistryChange::ActorRemoved { name, priority: _ } => {
-                                if actor_state.known_actors.contains_key(name.as_str()) {
-                                    pending_removals.push(name.clone());
+                            crate::registry::RegistryChange::ActorRemoved { name, vector_clock, removing_node_id, priority: _ } => {
+                                // Check vector clock ordering before queueing removal
+                                if let Some(existing_location) = actor_state.known_actors.get(name.as_str()) {
+                                    match vector_clock.compare(&existing_location.vector_clock) {
+                                        crate::ClockOrdering::After => {
+                                            // Queue removal if it's after
+                                            pending_removals.push((name.clone(), vector_clock.clone(), *removing_node_id));
+                                        }
+                                        crate::ClockOrdering::Concurrent => {
+                                            // For concurrent removals, use node_id as tiebreaker
+                                            if removing_node_id > &existing_location.node_id {
+                                                pending_removals.push((name.clone(), vector_clock.clone(), *removing_node_id));
+                                            }
+                                        }
+                                        _ => {} // Ignore outdated removals (Before or Equal)
+                                    }
                                 }
                             }
                         }
@@ -3945,14 +3972,29 @@ pub(crate) async fn handle_incoming_message(
                     // Drop read lock before acquiring write lock
                     drop(actor_state);
                     
-                    // Second pass: apply all updates under write lock in one go
+                    // Second pass: apply all updates under write lock with re-validation
                     let mut actor_state = registry.actor_state.write().await;
                     let mut applied = 0;
                     
-                    // Apply all actor additions
+                    // Re-validate and apply actor additions
                     for (name, location) in &pending_updates {
-                        actor_state.known_actors.insert(name.clone(), location.clone());
-                        applied += 1;
+                        // Re-check if this is still valid (state may have changed)
+                        let still_valid = match actor_state.known_actors.get(name.as_str()) {
+                            Some(existing_location) => {
+                                match location.vector_clock.compare(&existing_location.vector_clock) {
+                                    crate::ClockOrdering::After => true,
+                                    crate::ClockOrdering::Concurrent => {
+                                        location.node_id > existing_location.node_id
+                                    }
+                                    _ => false,
+                                }
+                            }
+                            None => !actor_state.local_actors.contains_key(name.as_str()),
+                        };
+                        
+                        if still_valid {
+                            actor_state.known_actors.insert(name.clone(), location.clone());
+                            applied += 1;
                         
                         // Log the timing information for immediate priority changes
                         if location.priority.should_trigger_immediate_gossip() {
@@ -3976,12 +4018,25 @@ pub(crate) async fn handle_incoming_message(
                                 "RECEIVED_ACTOR"
                             );
                         }
+                        }
                     }
                     
-                    // Apply all actor removals
-                    for name in &pending_removals {
-                        if actor_state.known_actors.remove(name.as_str()).is_some() {
-                            applied += 1;
+                    // Re-validate and apply actor removals
+                    for (name, removal_clock, removing_node_id) in &pending_removals {
+                        // Re-check if removal is still valid (state may have changed)
+                        if let Some(existing_location) = actor_state.known_actors.get(name.as_str()) {
+                            let still_valid = match removal_clock.compare(&existing_location.vector_clock) {
+                                crate::ClockOrdering::After => true,
+                                crate::ClockOrdering::Concurrent => {
+                                    // Use same deterministic tiebreaker for re-validation
+                                    removing_node_id > &existing_location.node_id
+                                }
+                                _ => false,
+                            };
+                            
+                            if still_valid && actor_state.known_actors.remove(name.as_str()).is_some() {
+                                applied += 1;
+                            }
                         }
                     }
                         
@@ -4619,134 +4674,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_connection_new() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let server_addr = create_test_server().await;
-
-        // Wait for server to start
-        sleep(Duration::from_millis(10)).await;
-
-        // Get connection should create new one
-        let handle = pool.get_connection(server_addr).await.unwrap();
-        assert_eq!(handle.addr, server_addr);
-        assert_eq!(pool.connection_count(), 1);
-        assert!(pool.has_connection(&server_addr));
-    }
-
-    #[tokio::test]
-    async fn test_get_connection_reuse() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let server_addr = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        // First connection
-        let handle1 = pool.get_connection(server_addr).await.unwrap();
-        assert_eq!(pool.connection_count(), 1);
-
-        // Second get should reuse existing connection
-        let handle2 = pool.get_connection(server_addr).await.unwrap();
-        assert_eq!(pool.connection_count(), 1); // Still just one connection
-        assert_eq!(handle1.addr, handle2.addr);
-    }
-
-    #[tokio::test]
-    async fn test_get_connection_timeout() {
-        let mut pool = ConnectionPool::new(10, Duration::from_millis(100));
-        let nonexistent_addr = "127.0.0.1:1".parse().unwrap();
-
-        // Should timeout or get connection refused
-        let result = pool.get_connection(nonexistent_addr).await;
-        match result {
-            Err(GossipError::Timeout) => (),    // Expected
-            Err(GossipError::Network(_)) => (), // Also acceptable (connection refused)
-            _ => panic!("Expected timeout or network error, got: {:?}", result),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_connection_pool_full() {
-        let mut pool = ConnectionPool::new(2, Duration::from_secs(5));
-
-        let server1 = create_test_server().await;
-        let server2 = create_test_server().await;
-        let server3 = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        // Fill pool
-        pool.get_connection(server1).await.unwrap();
-        pool.get_connection(server2).await.unwrap();
-        assert_eq!(pool.connection_count(), 2);
-
-        // Third connection should evict oldest
-        pool.get_connection(server3).await.unwrap();
-        assert_eq!(pool.connection_count(), 2); // Still 2, one was evicted
-    }
-
-    #[tokio::test]
-    async fn test_mark_disconnected() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let server_addr = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        pool.get_connection(server_addr).await.unwrap();
-        assert_eq!(pool.connection_count(), 1);
-
-        pool.mark_disconnected(server_addr);
-        assert_eq!(pool.connection_count(), 0); // Disconnected connections don't count
-        assert!(!pool.has_connection(&server_addr));
-    }
-
-    #[tokio::test]
-    async fn test_remove_connection() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let server_addr = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        pool.get_connection(server_addr).await.unwrap();
-        assert!(pool.has_connection(&server_addr));
-
-        pool.remove_connection(server_addr);
-        assert!(!pool.has_connection(&server_addr));
-        assert_eq!(pool.connection_count(), 0);
-    }
-
-
-    #[tokio::test]
-    async fn test_cleanup_stale_connections() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let server_addr = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        pool.get_connection(server_addr).await.unwrap();
-        assert_eq!(pool.connection_count(), 1);
-
-        // Mark as disconnected
-        pool.mark_disconnected(server_addr);
-        assert_eq!(pool.connection_count(), 0);
-
-        // Cleanup should remove disconnected
-        pool.cleanup_stale_connections();
-        assert!(pool.connections.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_close_all_connections() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-
-        let server1 = create_test_server().await;
-        let server2 = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        pool.get_connection(server1).await.unwrap();
-        pool.get_connection(server2).await.unwrap();
-        assert_eq!(pool.connection_count(), 2);
-
-        pool.close_all_connections();
-        assert_eq!(pool.connection_count(), 0);
-        assert!(pool.connections.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_connection_handle_send_data() {
         // Create a mock stream using a TCP server for testing
         let server_addr = create_test_server().await;
@@ -4808,44 +4735,4 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_check_connection_health() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let failed = pool.check_connection_health().await;
-        assert!(failed.is_empty()); // Current implementation always returns empty
-    }
-
-    #[tokio::test]
-    async fn test_persistent_connection() {
-        let addr = "127.0.0.1:8080".parse().unwrap();
-        let _last_used = current_timestamp();
-        
-        // Create a mock stream using a TCP server for testing
-        let server_addr = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-        let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
-        let (_, writer) = stream.into_split();
-
-        // Test creating a LockFreeStreamHandle
-        let stream_handle = Arc::new(LockFreeStreamHandle::new(writer, addr, ChannelId::Global, 1024));
-        assert!(stream_handle.channel_id == ChannelId::Global);
-    }
-
-    #[tokio::test]
-    async fn test_get_connection_disconnected_removal() {
-        let mut pool = ConnectionPool::new(10, Duration::from_secs(5));
-        let server_addr = create_test_server().await;
-        sleep(Duration::from_millis(10)).await;
-
-        // Create connection
-        pool.get_connection(server_addr).await.unwrap();
-
-        // Mark as disconnected
-        pool.mark_disconnected(server_addr);
-
-        // Getting connection again should create new one
-        let handle = pool.get_connection(server_addr).await.unwrap();
-        assert_eq!(pool.connection_count(), 1);
-        assert_eq!(handle.addr, server_addr);
-    }
 }

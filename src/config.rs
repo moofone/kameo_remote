@@ -56,6 +56,8 @@ pub struct GossipConfig {
     pub vector_clock_gc_frequency: Duration,
     /// How long to retain node entries in vector clocks after last seen
     pub vector_clock_retention_period: Duration,
+    /// Maximum number of entries in a vector clock before compaction
+    pub max_vector_clock_size: usize,
     /// Threshold for small clusters
     pub small_cluster_threshold: usize,
     /// Maximum time to wait for server to become ready before bootstrap
@@ -98,6 +100,7 @@ impl Default for GossipConfig {
             checkout_timeout: Duration::from_secs(60),
             vector_clock_gc_frequency: Duration::from_secs(300), // 5 minutes
             vector_clock_retention_period: Duration::from_secs(7200), // 2 hours (was 1 hour)
+            max_vector_clock_size: 1000, // Compact after 1000 entries
             small_cluster_threshold: DEFAULT_SMALL_CLUSTER_THRESHOLD,
             bootstrap_readiness_timeout: Duration::from_secs(30),
             bootstrap_readiness_check_interval: Duration::from_millis(100),

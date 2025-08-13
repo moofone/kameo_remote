@@ -13,6 +13,8 @@ pub mod tls;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use dashmap::DashMap;
 use thiserror::Error;
 use tracing::error;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -31,7 +33,9 @@ pub use reply_to::{ReplyTo, TimeoutReplyTo};
 // =================== New Iroh-style types ===================
 
 /// Public key for node identity - Ed25519 public key
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
 pub struct PublicKey {
     inner: [u8; 32],
 }
@@ -195,6 +199,269 @@ impl std::fmt::Debug for SecretKey {
 
 // =================== End new types ===================
 
+/// Vector clock for tracking causal relationships between events
+/// Thread-safe implementation using DashMap internally
+pub struct VectorClock {
+    // Internal thread-safe storage using DashMap for O(1) operations
+    clocks: Arc<DashMap<NodeId, u64>>,
+}
+
+impl Clone for VectorClock {
+    fn clone(&self) -> Self {
+        // Deep clone - create a new DashMap with the same entries
+        let new_clocks = Arc::new(DashMap::new());
+        for entry in self.clocks.iter() {
+            new_clocks.insert(*entry.key(), *entry.value());
+        }
+        Self { clocks: new_clocks }
+    }
+}
+
+impl VectorClock {
+    pub fn new() -> Self {
+        Self {
+            clocks: Arc::new(DashMap::new()),
+        }
+    }
+
+    pub fn with_node(node_id: NodeId) -> Self {
+        let clocks = Arc::new(DashMap::new());
+        clocks.insert(node_id, 0);
+        Self { clocks }
+    }
+
+    /// Increment the clock for a specific node (thread-safe)
+    pub fn increment(&self, node_id: NodeId) {
+        self.clocks
+            .entry(node_id)
+            .and_modify(|v| *v = v.saturating_add(1))
+            .or_insert(1);
+    }
+
+    /// Merge with another vector clock (thread-safe)
+    pub fn merge(&self, other: &VectorClock) {
+        for entry in other.clocks.iter() {
+            let (other_node, other_clock) = entry.pair();
+            self.clocks
+                .entry(*other_node)
+                .and_modify(|v| *v = (*v).max(*other_clock))
+                .or_insert(*other_clock);
+        }
+    }
+
+    /// Compare vector clocks to determine causal relationship
+    pub fn compare(&self, other: &VectorClock) -> ClockOrdering {
+        let mut self_greater = false;
+        let mut other_greater = false;
+
+        // Collect all node IDs from both clocks
+        let mut all_nodes = std::collections::HashSet::new();
+        for entry in self.clocks.iter() {
+            all_nodes.insert(*entry.key());
+        }
+        for entry in other.clocks.iter() {
+            all_nodes.insert(*entry.key());
+        }
+
+        // Compare clock values for each node
+        for node_id in all_nodes {
+            let self_clock = self.clocks.get(&node_id).map(|v| *v).unwrap_or(0);
+            let other_clock = other.clocks.get(&node_id).map(|v| *v).unwrap_or(0);
+
+            match self_clock.cmp(&other_clock) {
+                std::cmp::Ordering::Greater => self_greater = true,
+                std::cmp::Ordering::Less => other_greater = true,
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+
+        match (self_greater, other_greater) {
+            (true, false) => ClockOrdering::After,
+            (false, true) => ClockOrdering::Before,
+            (false, false) => ClockOrdering::Equal,
+            (true, true) => ClockOrdering::Concurrent,
+        }
+    }
+
+    /// Garbage collect entries for nodes not seen recently (thread-safe)
+    pub fn gc_old_nodes(&self, active_nodes: &std::collections::HashSet<NodeId>) {
+        self.clocks.retain(|node_id, _| active_nodes.contains(node_id));
+    }
+
+    /// Get the number of entries in the vector clock
+    pub fn len(&self) -> usize {
+        self.clocks.len()
+    }
+
+    /// Compact the vector clock if it exceeds the maximum size (thread-safe)
+    pub fn compact(&self, max_size: usize) {
+        if self.clocks.len() <= max_size {
+            return;
+        }
+
+        // Collect all entries and sort by clock value
+        let mut entries: Vec<(NodeId, u64)> = self.clocks
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Keep only the top max_size entries
+        entries.truncate(max_size);
+
+        // Clear and rebuild the map
+        self.clocks.clear();
+        for (node_id, clock) in entries {
+            self.clocks.insert(node_id, clock);
+        }
+    }
+
+    /// Convert to a sorted Vec for serialization
+    fn to_vec(&self) -> Vec<(NodeId, u64)> {
+        let mut vec: Vec<(NodeId, u64)> = self.clocks
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        vec.sort_by_key(|(node_id, _)| *node_id);
+        vec
+    }
+
+    /// Create from a Vec (used in deserialization)
+    fn from_vec(vec: Vec<(NodeId, u64)>) -> Self {
+        let clocks = Arc::new(DashMap::new());
+        for (node_id, clock) in vec {
+            clocks.insert(node_id, clock);
+        }
+        Self { clocks }
+    }
+    
+    /// Get the clock value for a specific node
+    pub fn get(&self, node_id: &NodeId) -> u64 {
+        self.clocks.get(node_id).map(|v| *v).unwrap_or(0)
+    }
+    
+    /// Check if this vector clock happened before another
+    pub fn happens_before(&self, other: &VectorClock) -> bool {
+        matches!(self.compare(other), ClockOrdering::Before)
+    }
+    
+    /// Check if this vector clock happened after another
+    pub fn happens_after(&self, other: &VectorClock) -> bool {
+        matches!(self.compare(other), ClockOrdering::After)
+    }
+    
+    /// Check if this vector clock is concurrent with another
+    pub fn is_concurrent(&self, other: &VectorClock) -> bool {
+        matches!(self.compare(other), ClockOrdering::Concurrent)
+    }
+    
+    /// Get all nodes referenced in this vector clock
+    pub fn get_nodes(&self) -> std::collections::HashSet<NodeId> {
+        self.clocks.iter().map(|entry| *entry.key()).collect()
+    }
+    
+    /// Check if this vector clock is "empty" (only has zero entries)
+    pub fn is_effectively_empty(&self) -> bool {
+        self.clocks.iter().all(|entry| *entry.value() == 0)
+    }
+}
+
+impl Default for VectorClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for VectorClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let vec = self.to_vec();
+        f.debug_struct("VectorClock")
+            .field("clocks", &vec)
+            .finish()
+    }
+}
+
+impl PartialEq for VectorClock {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(self.compare(other), ClockOrdering::Equal)
+    }
+}
+
+impl Eq for VectorClock {}
+
+impl std::hash::Hash for VectorClock {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let sorted = self.to_vec();
+        for (node_id, clock) in sorted {
+            node_id.hash(state);
+            clock.hash(state);
+        }
+    }
+}
+
+// For rkyv serialization, we need a simple wrapper type
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone)]
+#[rkyv(derive(Debug))]
+pub struct VectorClockData {
+    pub clocks: Vec<(NodeId, u64)>,
+}
+
+impl From<&VectorClock> for VectorClockData {
+    fn from(vc: &VectorClock) -> Self {
+        VectorClockData {
+            clocks: vc.to_vec(),
+        }
+    }
+}
+
+impl From<VectorClockData> for VectorClock {
+    fn from(data: VectorClockData) -> Self {
+        VectorClock::from_vec(data.clocks)
+    }
+}
+
+// Custom rkyv implementation that uses VectorClockData
+impl rkyv::Archive for VectorClock {
+    type Archived = <VectorClockData as rkyv::Archive>::Archived;
+    type Resolver = <VectorClockData as rkyv::Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let data = VectorClockData::from(self);
+        data.resolve(resolver, out);
+    }
+}
+
+impl<S> rkyv::Serialize<S> for VectorClock 
+where
+    S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+    S::Error: rkyv::rancor::Source,
+{
+    fn serialize(&self, serializer: &mut S) -> std::result::Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
+        let data = VectorClockData::from(self);
+        data.serialize(serializer)
+    }
+}
+
+impl<D> rkyv::Deserialize<VectorClock, D> for <VectorClockData as rkyv::Archive>::Archived 
+where
+    D: rkyv::rancor::Fallible + rkyv::de::Pooling + ?Sized,
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> std::result::Result<VectorClock, <D as rkyv::rancor::Fallible>::Error> {
+        let data: VectorClockData = self.deserialize(deserializer)?;
+        Ok(VectorClock::from(data))
+    }
+}
+
+/// Ordering relationship between vector clocks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockOrdering {
+    Before,
+    After,
+    Equal,
+    Concurrent,
+}
+
 /// Key pair for node identity using Ed25519 cryptography
 #[derive(Clone)]
 pub struct KeyPair {
@@ -343,6 +610,11 @@ impl PeerId {
         let verifying_key = self.to_verifying_key()?;
         verifying_key.verify(message, signature)
             .map_err(|e| GossipError::InvalidSignature(format!("Signature verification failed: {}", e)))
+    }
+    
+    /// Convert to NodeId (which is just an alias for PublicKey)
+    pub fn to_node_id(&self) -> NodeId {
+        NodeId::from_bytes(&self.0).expect("PeerId should always be a valid NodeId")
     }
 }
 

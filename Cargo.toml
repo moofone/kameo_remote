@@ -30,6 +30,7 @@ tokio-rustls = "0.26"
 data-encoding = "2.5"  # For BASE32 DNS encoding
 zeroize = { version = "1.7", features = ["derive"] }  # For secure key handling
 x509-parser = "0.16"  # For parsing X.509 certificates
+sha2 = "0.10"  # For deterministic NodeId generation fallback
 
 # Platform-specific dependencies for io_uring support
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]

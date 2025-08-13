@@ -275,14 +275,17 @@ async fn start_gossip_timer(registry: Arc<GossipRegistry>) {
     
     let gossip_interval = registry.config.gossip_interval;
     let cleanup_interval = registry.config.cleanup_interval;
+    let vector_clock_gc_interval = registry.config.vector_clock_gc_frequency;
 
     let jitter = Duration::from_millis(rand::random::<u64>() % 1000);
     let mut next_gossip_tick = Instant::now() + gossip_interval + jitter;
     let mut cleanup_timer = interval(cleanup_interval);
+    let mut vector_clock_gc_timer = interval(vector_clock_gc_interval);
 
     debug!(
         gossip_interval_ms = gossip_interval.as_millis(),
         cleanup_interval_secs = cleanup_interval.as_secs(),
+        vector_clock_gc_interval_secs = vector_clock_gc_interval.as_secs(),
         "gossip timer started with non-blocking I/O"
     );
 
@@ -360,6 +363,13 @@ async fn start_gossip_timer(registry: Arc<GossipRegistry>) {
                 registry.check_peer_consensus().await;
                 // Clean up peers that have been dead for too long
                 registry.cleanup_dead_peers().await;
+            }
+            _ = vector_clock_gc_timer.tick() => {
+                if registry.is_shutdown().await {
+                    break;
+                }
+                // Run vector clock garbage collection
+                registry.run_vector_clock_gc().await;
             }
         }
     }

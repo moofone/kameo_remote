@@ -71,8 +71,8 @@ mod tests {
         
         let encoded = encode(&node_id);
         
-        // Check it's a valid DNS name
-        assert!(encoded.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '-'));
+        // Check it's a valid DNS name (base32 includes digits 2-7)
+        assert!(encoded.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
         
         // Check label length (each part between dots must be < 63 chars)
         for label in encoded.split('.') {

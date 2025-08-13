@@ -1,4 +1,4 @@
-use crate::{current_timestamp, RegistrationPriority};
+use crate::{current_timestamp, RegistrationPriority, VectorClock, NodeId};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::net::SocketAddr;
 
@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 pub struct RemoteActorLocation {
     pub address: String,                 // Use String instead of SocketAddr for rkyv compatibility
     pub peer_id: crate::PeerId,         // Which peer is hosting this actor
+    pub node_id: NodeId,                // Node ID for vector clock operations
+    pub vector_clock: VectorClock,      // Vector clock for causal ordering
     pub wall_clock_time: u64,           // Still needed for TTL calculations
     pub priority: RegistrationPriority, // Registration priority for propagation
     pub local_registration_time: u128,  // Precise registration time for timing measurements
@@ -15,11 +17,42 @@ pub struct RemoteActorLocation {
 }
 
 impl RemoteActorLocation {
+    /// Generate a deterministic fallback NodeId from PeerId using SHA-256
+    fn generate_fallback_node_id(peer_id: &crate::PeerId) -> NodeId {
+        use sha2::{Sha256, Digest};
+        
+        // Create a deterministic hash from the peer_id string representation
+        let mut hasher = Sha256::new();
+        hasher.update(format!("fallback_node_id:{}", peer_id));
+        let hash_result = hasher.finalize();
+        
+        // Convert the hash to a 32-byte array for NodeId
+        let mut node_id_bytes = [0u8; 32];
+        node_id_bytes.copy_from_slice(&hash_result[..32]);
+        
+        NodeId::from_bytes(&node_id_bytes)
+            .expect("SHA-256 output should always be valid NodeId bytes")
+    }
+    
     /// Create a new RemoteActorLocation with peer_id
     pub fn new_with_peer(address: SocketAddr, peer_id: crate::PeerId) -> Self {
+        // Convert PeerId to NodeId for vector clock operations
+        let node_id = peer_id.to_verifying_key()
+            .ok()
+            .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Failed to convert PeerId to NodeId for {}, using deterministic fallback",
+                    peer_id
+                );
+                Self::generate_fallback_node_id(&peer_id)
+            });
+        
         Self {
             address: address.to_string(),
             peer_id,
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: current_timestamp(),
             priority: RegistrationPriority::Normal,
             local_registration_time: std::time::SystemTime::now()
@@ -32,9 +65,23 @@ impl RemoteActorLocation {
     
     /// Create a new RemoteActorLocation with peer_id and metadata
     pub fn new_with_metadata(address: SocketAddr, peer_id: crate::PeerId, metadata: Vec<u8>) -> Self {
+        // Convert PeerId to NodeId for vector clock operations
+        let node_id = peer_id.to_verifying_key()
+            .ok()
+            .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Failed to convert PeerId to NodeId for {}, using deterministic fallback",
+                    peer_id
+                );
+                Self::generate_fallback_node_id(&peer_id)
+            });
+        
         Self {
             address: address.to_string(),
             peer_id,
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: current_timestamp(),
             priority: RegistrationPriority::Normal,
             local_registration_time: std::time::SystemTime::now()
@@ -54,9 +101,23 @@ impl RemoteActorLocation {
 
     /// Create with specific priority
     pub fn new_with_priority(address: SocketAddr, priority: RegistrationPriority) -> Self {
+        let peer_id = crate::PeerId::new("unknown");
+        let node_id = peer_id.to_verifying_key()
+            .ok()
+            .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Failed to convert PeerId to NodeId for {}, using deterministic fallback",
+                    peer_id
+                );
+                Self::generate_fallback_node_id(&peer_id)
+            });
+        
         Self {
             address: address.to_string(),
-            peer_id: crate::PeerId::new("unknown"),
+            peer_id,
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: current_timestamp(),
             priority,
             local_registration_time: std::time::SystemTime::now()
@@ -69,9 +130,23 @@ impl RemoteActorLocation {
 
     /// Create with current wall clock time
     pub fn new_with_wall_time(address: SocketAddr, wall_time: u64) -> Self {
+        let peer_id = crate::PeerId::new("unknown");
+        let node_id = peer_id.to_verifying_key()
+            .ok()
+            .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Failed to convert PeerId to NodeId for {}, using deterministic fallback",
+                    peer_id
+                );
+                Self::generate_fallback_node_id(&peer_id)
+            });
+        
         Self {
             address: address.to_string(),
-            peer_id: crate::PeerId::new("unknown"),
+            peer_id,
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: wall_time,
             priority: RegistrationPriority::Normal,
             local_registration_time: std::time::SystemTime::now()
@@ -88,9 +163,17 @@ impl RemoteActorLocation {
         wall_time: u64,
         priority: RegistrationPriority,
     ) -> Self {
+        let peer_id = crate::PeerId::new("unknown");
+        let node_id = peer_id.to_verifying_key()
+            .ok()
+            .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
+            .unwrap_or_else(|| NodeId::from_bytes(&[0u8; 32]).unwrap());
+        
         Self {
             address: address.to_string(),
-            peer_id: crate::PeerId::new("unknown"),
+            peer_id,
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: wall_time,
             priority,
             local_registration_time: std::time::SystemTime::now()
@@ -181,9 +264,16 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
         // Create with specific values to test equality
+        let peer_id = crate::PeerId::new("test_peer");
+        let node_id = peer_id.to_verifying_key()
+            .ok()
+            .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
+            .unwrap_or_else(|| NodeId::from_bytes(&[0u8; 32]).unwrap());
         let location1 = RemoteActorLocation {
             address: addr.to_string(),
-            peer_id: crate::PeerId::new("test_peer"),
+            peer_id: peer_id.clone(),
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: 1000,
             priority: RegistrationPriority::Normal,
             local_registration_time: 1000,
@@ -191,7 +281,9 @@ mod tests {
         };
         let location2 = RemoteActorLocation {
             address: addr.to_string(),
-            peer_id: crate::PeerId::new("test_peer"),
+            peer_id: peer_id.clone(),
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: 1000,
             priority: RegistrationPriority::Normal,
             local_registration_time: 1000,
@@ -202,7 +294,9 @@ mod tests {
         // Different timestamps should make them unequal
         let location3 = RemoteActorLocation {
             address: addr.to_string(),
-            peer_id: crate::PeerId::new("test_peer"),
+            peer_id: peer_id.clone(),
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: 1001,
             priority: RegistrationPriority::Normal,
             local_registration_time: 1000,
@@ -214,7 +308,9 @@ mod tests {
         let addr2: SocketAddr = "127.0.0.1:8081".parse().unwrap();
         let location4 = RemoteActorLocation {
             address: addr2.to_string(),
-            peer_id: crate::PeerId::new("test_peer"),
+            peer_id,
+            node_id,
+            vector_clock: VectorClock::with_node(node_id),
             wall_clock_time: 1000,
             priority: RegistrationPriority::Normal,
             local_registration_time: 1000,
