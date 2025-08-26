@@ -1100,6 +1100,9 @@ pub enum GossipError {
 
     #[error("actor '{0}' already exists")]
     ActorAlreadyExists(String),
+
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 pub type Result<T> = std::result::Result<T, GossipError>;

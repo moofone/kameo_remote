@@ -3,6 +3,7 @@
 //! High-performance implementation for Linux 5.1+ with true zero-copy I/O
 
 use super::{StreamWriter, WriteCommand};
+use crate::connection_pool::TCP_BUFFER_SIZE; // Use shared constant!
 use async_trait::async_trait;
 use std::io::Result;
 use std::os::unix::io::AsRawFd;
@@ -11,7 +12,7 @@ use tokio_uring::net::TcpStream;
 use io_uring::{IoUring, squeue, cqueue, opcode, types};
 
 const BUFFER_COUNT: usize = 1024;
-const BUFFER_SIZE: usize = 64 * 1024; // 64KB per buffer
+const BUFFER_SIZE: usize = TCP_BUFFER_SIZE; // Use master constant - no more magic numbers!
 const SUBMISSION_QUEUE_SIZE: u32 = 256;
 const BATCH_THRESHOLD: usize = 32;
 

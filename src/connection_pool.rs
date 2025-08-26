@@ -13,11 +13,92 @@ use crate::{
     GossipError, Result,
 };
 
-// Constants for buffer sizes and streaming
-const RING_BUFFER_SIZE: usize = 1024 * 1024; // 1MB ring buffer (must fit entire message including headers)
-pub const STREAM_CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks for streaming
-// Note: Threshold must be significantly lower to account for rkyv serialization overhead
-const STREAM_THRESHOLD: usize = 1024 * 1024 - 1024; // 1MB - 1KB to ensure messages don't exceed ring buffer
+// ==== SINGLE SOURCE OF TRUTH FOR ALL BUFFER SIZES ====
+// THIS is the ONLY place we define the master buffer size!
+// Change this ONE constant to adjust ALL buffer behavior system-wide.
+pub const MASTER_BUFFER_SIZE: usize = 1024 * 1024; // 1MB - THE source of truth
+
+// All other buffer sizes derive from the master constant - NO MAGIC NUMBERS!
+pub const TCP_BUFFER_SIZE: usize = MASTER_BUFFER_SIZE;  // BufWriter & io_uring buffer  
+pub const STREAM_CHUNK_SIZE: usize = MASTER_BUFFER_SIZE; // Streaming chunk size
+pub const STREAMING_THRESHOLD: usize = MASTER_BUFFER_SIZE.saturating_sub(1024); // Just under buffer limit
+
+// Ring buffer configuration (NUMBER OF SLOTS, not bytes!)
+pub const RING_BUFFER_SLOTS: usize = 1024; // Number of WriteCommand slots in ring buffer
+// Note: Each slot can hold any size message - this is NOT a byte limit
+// Note: Streaming threshold ensures messages fit within TCP_BUFFER_SIZE
+
+/// Buffer configuration that encapsulates all buffer-related settings
+/// 
+/// This struct ensures that the streaming threshold is always derived from the actual buffer size,
+/// preventing the disconnection between buffer size and streaming decisions that causes message loss.
+#[derive(Debug, Clone)]
+pub struct BufferConfig {
+    ring_buffer_slots: usize,  // Number of message slots in ring buffer
+    tcp_buffer_size: usize,    // Size in bytes for TCP buffers
+}
+
+impl BufferConfig {
+    /// Create a new BufferConfig with validation
+    /// 
+    /// # Arguments
+    /// * `tcp_buffer_size` - The size of TCP buffers in bytes
+    /// 
+    /// # Errors
+    /// Returns an error if the buffer size is less than 256KB for safety
+    pub fn new(tcp_buffer_size: usize) -> Result<Self> {
+        // Enforce minimum size of 256KB for safety
+        if tcp_buffer_size < 256 * 1024 {
+            return Err(GossipError::InvalidConfig(format!(
+                "TCP buffer must be at least 256KB, got {}KB",
+                tcp_buffer_size / 1024
+            )));
+        }
+        Ok(Self { 
+            ring_buffer_slots: RING_BUFFER_SLOTS,  // Use constant for slots 
+            tcp_buffer_size 
+        })
+    }
+    
+    /// Get the ring buffer slot count (NOT bytes!)
+    pub fn ring_buffer_slots(&self) -> usize {
+        self.ring_buffer_slots
+    }
+    
+    /// Calculate the streaming threshold based on buffer size
+    /// 
+    /// The streaming threshold is always derived from the buffer size,
+    /// leaving 1KB headroom for headers and serialization overhead.
+    pub fn streaming_threshold(&self) -> usize {
+        // Always derive from buffer size
+        // Leave 1KB headroom for headers/overhead
+        self.tcp_buffer_size.saturating_sub(1024)
+    }
+    
+    /// Get the TCP buffer size for BufWriter and io_uring
+    /// 
+    /// This ensures TCP buffers match the configured size, preventing bottlenecks.
+    pub fn tcp_buffer_size(&self) -> usize {
+        self.tcp_buffer_size
+    }
+    
+    /// Create BufferConfig using the master buffer size (recommended)
+    pub fn from_master() -> Self {
+        Self { 
+            ring_buffer_slots: RING_BUFFER_SLOTS,
+            tcp_buffer_size: MASTER_BUFFER_SIZE 
+        }
+    }
+    
+    /// Create a default BufferConfig with master buffer size
+    pub fn default() -> Self {
+        // Use master constant instead of magic number!
+        Self { 
+            ring_buffer_slots: RING_BUFFER_SLOTS,
+            tcp_buffer_size: MASTER_BUFFER_SIZE 
+        }
+    }
+}
 
 /// Process mock requests for testing
 #[cfg(feature = "test-helpers")]
@@ -410,15 +491,17 @@ pub struct LockFreeStreamHandle {
     streaming_active: Arc<AtomicBool>,
     /// Channel to send streaming commands to background task
     streaming_tx: mpsc::UnboundedSender<StreamingCommand>,
+    /// Buffer configuration that determines sizes and thresholds
+    buffer_config: BufferConfig,
 }
 
 impl LockFreeStreamHandle {
     /// Create a new lock-free streaming handle with background writer task
-    pub fn new<W>(tcp_writer: W, addr: SocketAddr, channel_id: ChannelId, buffer_size: usize) -> Self 
+    pub fn new<W>(tcp_writer: W, addr: SocketAddr, channel_id: ChannelId, buffer_config: BufferConfig) -> Self 
     where
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let ring_buffer = Arc::new(LockFreeRingBuffer::new(buffer_size));
+        let ring_buffer = Arc::new(LockFreeRingBuffer::new(buffer_config.ring_buffer_slots()));
         let shutdown_signal = Arc::new(AtomicBool::new(false));
         let streaming_active = Arc::new(AtomicBool::new(false));
         
@@ -456,6 +539,7 @@ impl LockFreeStreamHandle {
             shutdown_signal,
             streaming_active,
             streaming_tx,
+            buffer_config,
         }
     }
     
@@ -479,9 +563,9 @@ impl LockFreeStreamHandle {
         // This requires either:
         // 1. Modifying StreamWriter trait to work with OwnedWriteHalf
         // 2. Or using a different socket splitting approach that allows io_uring
-        // Use smaller buffer for lower latency (1KB instead of 64KB)
-        // Ask/reply operations need immediate flushing, not large buffering
-        let mut writer = tokio::io::BufWriter::with_capacity(1024, tcp_writer);
+        // Use full TCP buffer size for large messages (CRITICAL FIX!)
+        // Need large buffer to handle 100KB+ BacktestSummary messages
+        let mut writer = tokio::io::BufWriter::with_capacity(TCP_BUFFER_SIZE, tcp_writer);
         
         // Smaller batches for lower latency
         const RING_BATCH_SIZE: usize = 64;  // Smaller batches for faster processing
@@ -705,6 +789,14 @@ impl LockFreeStreamHandle {
     /// Shutdown the background writer task
     pub fn shutdown(&self) {
         self.shutdown_signal.store(true, Ordering::Relaxed);
+    }
+    
+    /// Get the streaming threshold for this connection
+    /// 
+    /// Returns the threshold above which messages should be streamed rather than
+    /// sent through the ring buffer. This is always derived from the buffer size.
+    pub fn streaming_threshold(&self) -> usize {
+        self.buffer_config.streaming_threshold()
     }
     
     /// Stream a large message directly to the socket, bypassing the ring buffer
@@ -1249,6 +1341,14 @@ impl ConnectionHandle {
         self.stream_handle.stream_large_message(msg, type_hash, actor_id).await
     }
     
+    /// Get the streaming threshold for this connection
+    /// 
+    /// Messages larger than this threshold should be sent via streaming
+    /// rather than through the ring buffer to prevent message loss.
+    pub fn streaming_threshold(&self) -> usize {
+        self.stream_handle.streaming_threshold()
+    }
+    
     /// Raw tell() - LOCK-FREE write (used internally)
     pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
         // Create message with length header using BytesMut for efficiency
@@ -1680,7 +1780,7 @@ impl ConnectionHandle {
 impl ConnectionPool {
     pub fn new(max_connections: usize, connection_timeout: Duration) -> Self {
         const POOL_SIZE: usize = 256;
-        const BUFFER_SIZE: usize = 8192;
+        const BUFFER_SIZE: usize = TCP_BUFFER_SIZE / 128; // Smaller pool buffers (8KB default)
         
         let pool = Self {
             connections_by_peer: dashmap::DashMap::new(),
@@ -1867,7 +1967,7 @@ impl ConnectionPool {
             writer, // Pass writer half
             addr,
             ChannelId::Global,
-            RING_BUFFER_SIZE,
+            BufferConfig::default(),
         ));
         
         let mut connection = LockFreeConnection::new(addr);
@@ -2006,8 +2106,8 @@ impl ConnectionPool {
 
     /// Return a buffer to the pool for reuse
     pub fn return_buffer(&mut self, buffer: Vec<u8>) {
-        if buffer.capacity() >= 1024 && buffer.capacity() <= 64 * 1024 {
-            // Return to the lock-free message buffer pool
+        if buffer.capacity() >= 1024 && buffer.capacity() <= TCP_BUFFER_SIZE {
+            // Return to the lock-free message buffer pool (up to TCP_BUFFER_SIZE)
             self.message_buffer_pool.return_buffer(buffer);
         }
         // Otherwise let the buffer drop
@@ -2016,13 +2116,13 @@ impl ConnectionPool {
     /// Get a message buffer from the pool for zero-copy processing
     pub fn get_message_buffer(&mut self) -> Vec<u8> {
         self.message_buffer_pool.get_buffer()
-            .unwrap_or_else(|| Vec::with_capacity(4096))
+            .unwrap_or_else(|| Vec::with_capacity(TCP_BUFFER_SIZE / 256)) // Default small buffer
     }
 
     /// Return a message buffer to the pool
     pub fn return_message_buffer(&mut self, buffer: Vec<u8>) {
-        if buffer.capacity() >= 1024 && buffer.capacity() <= 64 * 1024 {
-            // Keep buffers with reasonable size
+        if buffer.capacity() >= 1024 && buffer.capacity() <= TCP_BUFFER_SIZE {
+            // Keep buffers with reasonable size (up to TCP_BUFFER_SIZE)
             self.message_buffer_pool.return_buffer(buffer);
         }
         // Otherwise let the buffer drop
@@ -2286,7 +2386,7 @@ impl ConnectionPool {
             writer,
             addr,
             ChannelId::Global,
-            RING_BUFFER_SIZE,
+            BufferConfig::default(),
         ));
         
         let mut conn = LockFreeConnection::new(addr);
@@ -2839,7 +2939,7 @@ pub(crate) async fn handle_persistent_connection_reader(
             writer,
             peer_addr,
             ChannelId::Global,
-            RING_BUFFER_SIZE,
+            BufferConfig::default(),
         )))
     } else {
         None
@@ -3430,8 +3530,8 @@ async fn handle_persistent_connection_impl(
 
     // Spawn read task
     let read_task = tokio::spawn(async move {
-        let mut partial_msg_buf = Vec::with_capacity(8192); // Pre-allocate for common message sizes
-        let mut read_buf = vec![0u8; 8192]; // Larger read buffer for better performance
+        let mut partial_msg_buf = Vec::with_capacity(TCP_BUFFER_SIZE / 128); // Pre-allocate for common message sizes
+        let mut read_buf = vec![0u8; TCP_BUFFER_SIZE / 128]; // Read buffer sized from master constant
 
         loop {
             match reader.read(&mut read_buf).await {
@@ -4649,6 +4749,66 @@ mod tests {
         assert_debug::<ConnectionHandle>();
     }
 
+    #[test]
+    fn test_buffer_config_validation() {
+        // Should reject buffers < 256KB
+        let result = BufferConfig::new(100 * 1024);
+        assert!(result.is_err());
+        
+        // Should accept valid sizes
+        let config = BufferConfig::new(512 * 1024).unwrap();
+        assert_eq!(config.tcp_buffer_size(), 512 * 1024);
+        assert_eq!(config.ring_buffer_slots(), RING_BUFFER_SLOTS);
+        
+        // Streaming threshold should be buffer_size - 1KB
+        assert_eq!(config.streaming_threshold(), 511 * 1024);
+    }
+
+    #[test]
+    fn test_streaming_threshold_calculation() {
+        let config = BufferConfig::new(1024 * 1024).unwrap();
+        
+        // 1MB buffer should have ~1MB-1KB threshold
+        let threshold = config.streaming_threshold();
+        assert!(threshold < config.tcp_buffer_size());
+        assert!(threshold > 1020 * 1024); // At least 1020KB
+        assert_eq!(threshold, 1023 * 1024); // Exactly 1023KB
+    }
+
+    #[test]
+    fn test_buffer_config_default() {
+        let config = BufferConfig::default();
+        assert_eq!(config.tcp_buffer_size(), 1024 * 1024); // 1MB
+        assert_eq!(config.ring_buffer_slots(), RING_BUFFER_SLOTS); // 1024 slots
+        assert_eq!(config.streaming_threshold(), 1023 * 1024); // 1MB - 1KB
+    }
+
+    #[test]
+    fn test_buffer_config_minimum_size() {
+        // Test exactly at minimum boundary
+        let config = BufferConfig::new(256 * 1024).unwrap();
+        assert_eq!(config.tcp_buffer_size(), 256 * 1024);
+        assert_eq!(config.ring_buffer_slots(), RING_BUFFER_SLOTS);
+        assert_eq!(config.streaming_threshold(), 255 * 1024);
+        
+        // Test just below minimum (should fail)
+        let result = BufferConfig::new(256 * 1024 - 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_streaming_threshold_saturation() {
+        // Test that streaming_threshold handles edge cases properly  
+        let config = BufferConfig::new(256 * 1024).unwrap(); // Minimum buffer (256KB)
+        // Should be 255KB (256KB - 1KB)
+        assert_eq!(config.streaming_threshold(), 255 * 1024);
+        
+        // Test with exactly 1KB buffer would be rejected by validation, 
+        // but we can verify saturating_sub behavior directly
+        let large_config = BufferConfig::new(2 * 1024 * 1024).unwrap(); // 2MB
+        assert_eq!(large_config.streaming_threshold(), 2 * 1024 * 1024 - 1024);
+    }
+
     #[tokio::test]
     async fn test_connection_pool_new() {
         let pool = ConnectionPool::new(10, Duration::from_secs(5));
@@ -4683,7 +4843,7 @@ mod tests {
             writer,
             "127.0.0.1:8080".parse().unwrap(),
             ChannelId::Global,
-            1024,
+            BufferConfig::default(),
         ));
         
         let handle = ConnectionHandle {
@@ -4712,7 +4872,7 @@ mod tests {
             writer,
             "127.0.0.1:8080".parse().unwrap(),
             ChannelId::Global,
-            1024,
+            BufferConfig::default(),
         ));
         
         let handle = ConnectionHandle {

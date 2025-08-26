@@ -735,7 +735,7 @@ where
             boxed_writer,
             peer_addr,
             crate::connection_pool::ChannelId::Global,
-            16384, // RING_BUFFER_SIZE
+            crate::connection_pool::BufferConfig::default(), // Use BufferConfig with 1MB buffer
         ));
         
         // Create a connection with the TLS stream handle
@@ -1068,7 +1068,7 @@ async fn handle_incoming_connection_direct_tcp(
             writer,
             peer_addr,  // Use actual TCP peer address for the stream
             ChannelId::Global,
-            4096,
+            crate::connection_pool::BufferConfig::default(), // Use BufferConfig with 1MB buffer
         ));
         
         // Get the shared correlation tracker for this peer

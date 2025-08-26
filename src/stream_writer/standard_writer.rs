@@ -3,6 +3,7 @@
 //! Used on platforms without io_uring support (macOS, Windows, older Linux)
 
 use super::{StreamWriter, WriteCommand};
+use crate::connection_pool::TCP_BUFFER_SIZE; // Use shared constant!
 use async_trait::async_trait;
 use std::io::Result;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -16,8 +17,9 @@ pub struct StandardStreamWriter {
 impl StandardStreamWriter {
     /// Create a new standard stream writer
     pub fn new(stream: TcpStream) -> Self {
-        // Use a 64KB buffer for better performance
-        let stream = BufWriter::with_capacity(64 * 1024, stream);
+        // Use TCP_BUFFER_SIZE from master constant - no more magic numbers!
+        // This ensures the BufWriter can handle messages up to the streaming threshold
+        let stream = BufWriter::with_capacity(TCP_BUFFER_SIZE, stream);
         Self {
             stream,
         }
