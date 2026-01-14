@@ -722,9 +722,7 @@ where
                         return None;
                     }
                 }
-                RegistryMessage::PeerListGossip { sender_addr, .. } => {
-                    sender_addr.clone()
-                }
+                RegistryMessage::PeerListGossip { sender_addr, .. } => sender_addr.clone(),
             };
             (node_id, *correlation_id)
         }

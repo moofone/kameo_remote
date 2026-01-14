@@ -88,7 +88,10 @@ impl PeerCapabilities {
         // Compute feature intersection
         let local_features: HashSet<_> = local.features.iter().copied().collect();
         let remote_features: HashSet<_> = remote.features.iter().copied().collect();
-        let features: HashSet<_> = local_features.intersection(&remote_features).copied().collect();
+        let features: HashSet<_> = local_features
+            .intersection(&remote_features)
+            .copied()
+            .collect();
 
         Self { version, features }
     }

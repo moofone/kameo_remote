@@ -1849,7 +1849,7 @@ impl ConnectionPool {
         // Check if we already have a configured address for this node
         if let Some(existing_addr_entry) = self.peer_id_to_addr.get(&peer_id) {
             let existing_addr = *existing_addr_entry.value();
-            debug!("CONNECTION POOL: Node {} already has configured address {}, not updating to ephemeral port {}", 
+            debug!("CONNECTION POOL: Node {} already has configured address {}, not updating to ephemeral port {}",
                    node_id, existing_addr, addr);
             return;
         }
@@ -2005,7 +2005,7 @@ impl ConnectionPool {
 
     /// Send bytes to a node by its ID (zero-copy version)
     pub fn send_bytes_to_node_id(&self, node_id: &str, data: bytes::Bytes) -> Result<()> {
-        debug!("CONNECTION POOL: send_bytes_to_node_id called for node '{}', pool has {} node connections", 
+        debug!("CONNECTION POOL: send_bytes_to_node_id called for node '{}', pool has {} node connections",
               node_id, self.connections_by_peer.len());
         if let Some(connection) = self.get_connection_by_node_id(node_id) {
             if let Some(ref stream_handle) = connection.stream_handle {
@@ -2432,7 +2432,7 @@ impl ConnectionPool {
                 GossipError::Timeout
             })?
             .map_err(|e| {
-                debug!("CONNECTION POOL: Connection to {} failed: {} (will retry in {}s if this is a gossip peer)", 
+                debug!("CONNECTION POOL: Connection to {} failed: {} (will retry in {}s if this is a gossip peer)",
                       addr, e, 5); // 5s is the default retry interval
                 GossipError::Network(e)
             })?;
@@ -2526,7 +2526,7 @@ impl ConnectionPool {
                     // No NodeId available - can't do TLS, return error instead of panic
                     error!("❌ TLS is configured but no NodeId available for peer {}. Cannot establish secure connection.", addr);
                     return Err(GossipError::TlsError(format!(
-                        "Cannot establish TLS connection to {} without NodeId. Peer may not have connected yet.", 
+                        "Cannot establish TLS connection to {} without NodeId. Peer may not have connected yet.",
                         addr
                     )));
                     // COMMENTED OUT: Plain TCP fallback - migrating to TLS-only
@@ -2598,7 +2598,7 @@ impl ConnectionPool {
 
         // Insert into lock-free map before spawning
         self.connections.insert(addr, connection_arc.clone());
-        debug!("CONNECTION POOL: Added connection via get_connection to {} - pool now has {} connections", 
+        debug!("CONNECTION POOL: Added connection via get_connection to {} - pool now has {} connections",
               addr, self.connections.len());
         // Double check it's really there
         assert!(
@@ -2687,7 +2687,7 @@ impl ConnectionPool {
                         if let Some(ref registry_weak) = registry_weak_for_reader {
                             if let Some(registry) = registry_weak.upgrade() {
                                 let pool = registry.connection_pool.lock().await;
-                                info!(peer = %addr, "Connection still in pool after EOF? {}", 
+                                info!(peer = %addr, "Connection still in pool after EOF? {}",
                                       pool.connections.contains_key(&addr));
                             }
                         }
@@ -2823,14 +2823,14 @@ impl ConnectionPool {
                                                             correlation_id,
                                                             payload.to_vec(),
                                                         );
-                                                        debug!(peer = %addr, correlation_id = correlation_id, 
+                                                        debug!(peer = %addr, correlation_id = correlation_id,
                                                                "Delivered response via correlation tracker");
                                                     } else {
-                                                        debug!(peer = %addr, correlation_id = correlation_id, 
+                                                        debug!(peer = %addr, correlation_id = correlation_id,
                                                                "No pending request for this correlation_id - may have timed out");
                                                     }
                                                 } else {
-                                                    warn!(peer = %addr, correlation_id = correlation_id, 
+                                                    warn!(peer = %addr, correlation_id = correlation_id,
                                                            "Connection has no correlation tracker!");
                                                 }
                                             }
@@ -2854,7 +2854,7 @@ impl ConnectionPool {
                                                     )
                                                         as usize;
 
-                                                    info!(peer = %addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash), 
+                                                    info!(peer = %addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash),
                                                           payload_len = payload_len, "📨 ActorTell message details");
 
                                                     if payload.len() >= 16 + payload_len {
@@ -2886,11 +2886,11 @@ impl ConnectionPool {
                                                                         .await
                                                                     {
                                                                         Ok(_) => {
-                                                                            info!(peer = %addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash), 
+                                                                            info!(peer = %addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash),
                                                                                        "✅ ActorTell handled successfully")
                                                                         }
                                                                         Err(e) => {
-                                                                            error!(peer = %addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash), 
+                                                                            error!(peer = %addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash),
                                                                                          error = %e, "❌ Failed to handle ActorTell")
                                                                         }
                                                                     }
@@ -2904,7 +2904,7 @@ impl ConnectionPool {
                                                             error!(peer = %addr, "❌ No registry weak reference available");
                                                         }
                                                     } else {
-                                                        error!(peer = %addr, expected = 16 + payload_len, actual = payload.len(), 
+                                                        error!(peer = %addr, expected = 16 + payload_len, actual = payload.len(),
                                                               "❌ ActorTell payload too short");
                                                     }
                                                 } else {
@@ -3095,7 +3095,7 @@ impl ConnectionPool {
                                             Err(e) => {
                                                 // This might be a raw tell message without gossip wrapping
                                                 // Log at debug level since this is expected for tell messages
-                                                debug!(peer = %addr, error = %e, msg_len = msg_data_vec.len(), 
+                                                debug!(peer = %addr, error = %e, msg_len = msg_data_vec.len(),
                                                        "Message is not a RegistryMessage, might be a raw actor tell message");
                                                 // Don't drop connection, just continue processing
                                             }
@@ -3133,7 +3133,7 @@ impl ConnectionPool {
                     {
                         let had_failures = peer_info.failures > 0;
                         if had_failures {
-                            info!(peer = %peer_addr, 
+                            info!(peer = %peer_addr,
                                   prev_failures = peer_info.failures,
                                   "✅ Successfully established outgoing connection - resetting failure state");
                             peer_info.failures = 0;
@@ -3337,9 +3337,9 @@ pub(crate) async fn handle_persistent_connection_reader(
 
                         // Debug: Log first few bytes of every message
                         if msg_data.len() >= 8 {
-                            info!(peer = %peer_addr, 
+                            info!(peer = %peer_addr,
                                   "🔍 SERVER RECV: msg_len={}, first_bytes=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
-                                  msg_data.len(), 
+                                  msg_data.len(),
                                   msg_data[0], msg_data[1], msg_data[2], msg_data[3],
                                   msg_data[4], msg_data[5], msg_data[6], msg_data[7]);
                         }
@@ -3376,7 +3376,7 @@ pub(crate) async fn handle_persistent_connection_reader(
                                             &aligned_payload
                                         ) {
                                             Ok(mut registry_msg) => {
-                                                info!(peer = %peer_addr, correlation_id = correlation_id, 
+                                                info!(peer = %peer_addr, correlation_id = correlation_id,
                                                       "✅ ASK DEBUG: Successfully deserialized RegistryMessage");
                                                 debug!(peer = %peer_addr, correlation_id = correlation_id, "Received Ask with RegistryMessage payload");
 
@@ -3391,7 +3391,7 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                     // Use the Ask envelope's correlation_id
                                                     *inner_correlation_id = Some(correlation_id);
                                                     debug!(
-                                                        peer = %peer_addr, 
+                                                        peer = %peer_addr,
                                                         correlation_id = correlation_id,
                                                         actor_id = %actor_id,
                                                         type_hash = %format!("{:08x}", type_hash),
@@ -3406,9 +3406,9 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                     if let Some(registry) = registry_weak.upgrade()
                                                     {
                                                         // Special handling for ActorMessage with correlation_id
-                                                        if let crate::registry::RegistryMessage::ActorMessage { 
-                                                        ref actor_id, 
-                                                        ref type_hash, 
+                                                        if let crate::registry::RegistryMessage::ActorMessage {
+                                                        ref actor_id,
+                                                        ref type_hash,
                                                         ref payload,
                                                         correlation_id: Some(corr_id),
                                                     } = registry_msg {
@@ -3420,22 +3420,22 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                             Ok(Some(reply_payload)) => {
                                                                 debug!(peer = %peer_addr, correlation_id = corr_id, reply_len = reply_payload.len(),
                                                                        "Got reply from actor, sending response back");
-                                                                
+
                                                                 // Create response message
                                                                 let mut response = bytes::BytesMut::with_capacity(4 + 8 + reply_payload.len());
-                                                                
+
                                                                 // Length prefix (4 bytes)
                                                                 let total_len = 8 + reply_payload.len() as u32;
                                                                 response.extend_from_slice(&total_len.to_be_bytes());
-                                                                
+
                                                                 // 8-byte header: msg_type(1) + correlation_id(2) + reserved(5)
                                                                 response.put_u8(crate::MessageType::Response as u8);
                                                                 response.extend_from_slice(&corr_id.to_be_bytes());
                                                                 response.extend_from_slice(&[0u8; 5]);
-                                                                
+
                                                                 // Payload
                                                                 response.extend_from_slice(&reply_payload);
-                                                                
+
                                                                 // For both incoming and outgoing connections, find the stream handle from the pool
                                                                 let pool = registry.connection_pool.lock().await;
                                                                 if let Some(conn) = pool.connections.get(&peer_addr).map(|c| c.value().clone()) {
@@ -3556,7 +3556,7 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                 #[cfg(not(feature = "test-helpers"))]
                                                 {
                                                     // This might be a kameo AskWrapper - try to handle it
-                                                    debug!(peer = %peer_addr, correlation_id = correlation_id, payload_len = payload.len(), 
+                                                    debug!(peer = %peer_addr, correlation_id = correlation_id, payload_len = payload.len(),
                                                       "Received non-RegistryMessage Ask request, checking if it's from kameo");
 
                                                     // Try to parse binary format from kameo: [actor_id:8][type_hash:4][payload_len:4][payload:N]
@@ -3584,7 +3584,7 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                             let inner_payload =
                                                                 &payload[16..16 + payload_len];
 
-                                                            debug!(peer = %peer_addr, correlation_id = correlation_id, 
+                                                            debug!(peer = %peer_addr, correlation_id = correlation_id,
                                                                actor_id = actor_id, type_hash = type_hash,
                                                                "Successfully decoded kameo binary message format");
 
@@ -3685,13 +3685,13 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                                 }
                                                             }
                                                         } else {
-                                                            debug!(peer = %peer_addr, correlation_id = correlation_id, 
-                                                               "Binary message payload too short: expected {} bytes but got {}", 
+                                                            debug!(peer = %peer_addr, correlation_id = correlation_id,
+                                                               "Binary message payload too short: expected {} bytes but got {}",
                                                                16 + payload_len, payload.len());
                                                         }
                                                     } else {
-                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, 
-                                                           "Ask payload too short for binary format: {} bytes (need at least 16)", 
+                                                        debug!(peer = %peer_addr, correlation_id = correlation_id,
+                                                           "Ask payload too short for binary format: {} bytes (need at least 16)",
                                                            payload.len());
                                                     }
                                                 }
@@ -3756,7 +3756,7 @@ pub(crate) async fn handle_persistent_connection_reader(
 
                                                 // Log large ActorTell messages
                                                 if payload_len > 1024 * 1024 {
-                                                    info!(peer = %peer_addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash), 
+                                                    info!(peer = %peer_addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash),
                                                           payload_len = payload_len, "📨 LARGE ActorTell message - will call handler");
                                                 }
 
@@ -3808,7 +3808,7 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                     warn!(peer = %peer_addr, "No registry weak reference available");
                                                 }
                                             } else {
-                                                warn!(peer = %peer_addr, expected = 16 + payload_len, actual = payload.len(), 
+                                                warn!(peer = %peer_addr, expected = 16 + payload_len, actual = payload.len(),
                                                       "ActorTell payload too short");
                                             }
                                         } else {
@@ -4067,7 +4067,7 @@ pub(crate) async fn handle_incoming_message(
                         // This proves the peer is alive and communicating
                         let had_failures = peer_info.failures > 0;
                         if had_failures {
-                            info!(peer = %delta.sender_peer_id, 
+                            info!(peer = %delta.sender_peer_id,
                               prev_failures = peer_info.failures,
                               "🔄 Resetting failure state after receiving DeltaGossip");
                             peer_info.failures = 0;
@@ -4362,8 +4362,8 @@ pub(crate) async fn handle_incoming_message(
                                     let processing_only_time_ms = 0.0; // No additional processing time beyond network
 
                                     // Debug: Break down where the time is spent
-                                    eprintln!("🔍 TIMING_BREAKDOWN: sent={}, received={}, delta={}ns ({}ms)", 
-                                     delta.precise_timing_nanos, received_timestamp, 
+                                    eprintln!("🔍 TIMING_BREAKDOWN: sent={}, received={}, delta={}ns ({}ms)",
+                                     delta.precise_timing_nanos, received_timestamp,
                                      network_processing_time_nanos, network_processing_time_ms);
 
                                     info!(
@@ -4503,7 +4503,7 @@ pub(crate) async fn handle_incoming_message(
                     // Always reset failure state when we receive a FullSync from the peer
                     // This proves the peer is alive and communicating
                     if peer_info.failures > 0 {
-                        info!(peer = %sender_socket_addr, 
+                        info!(peer = %sender_socket_addr,
                               prev_failures = prev_failures,
                               "🔄 Resetting failure state after receiving FullSync");
                         peer_info.failures = 0;
@@ -4663,7 +4663,7 @@ pub(crate) async fn handle_incoming_message(
 
                     match send_result {
                         Ok(()) => {
-                            debug!(peer = %sender_socket_addr, 
+                            debug!(peer = %sender_socket_addr,
                                   peer_id = %sender_peer_id,
                                   local_actors = local_actors_count,
                                   known_actors = known_actors_count,
@@ -4672,9 +4672,9 @@ pub(crate) async fn handle_incoming_message(
                         }
                         Err(e) => {
                             // If we can't send immediately, queue it for the next gossip round
-                            warn!(peer = %sender_socket_addr, 
+                            warn!(peer = %sender_socket_addr,
                                   peer_id = %sender_peer_id,
-                                  error = %e, 
+                                  error = %e,
                                   "Could not send FullSync response immediately - will be sent in next gossip round");
 
                             // Store in gossip state to be sent during next gossip round
@@ -4687,7 +4687,7 @@ pub(crate) async fn handle_incoming_message(
                                 // Force a full sync on the next gossip round
                                 peer_info.consecutive_deltas =
                                     registry.config.max_delta_history as u64;
-                                info!(peer = %sender_socket_addr, 
+                                info!(peer = %sender_socket_addr,
                                       "Marked peer for full sync in next gossip round");
                             }
                         }
@@ -4766,7 +4766,7 @@ pub(crate) async fn handle_incoming_message(
                 if let Some(peer_info) = gossip_state.peers.get_mut(&sender_socket_addr) {
                     let had_failures = peer_info.failures > 0;
                     if had_failures {
-                        info!(peer = %sender_socket_addr, 
+                        info!(peer = %sender_socket_addr,
                           prev_failures = peer_info.failures,
                           "🔄 Resetting failure state after receiving FullSyncResponse");
                         peer_info.failures = 0;

@@ -80,7 +80,6 @@ pub struct GossipConfig {
     pub dead_peer_timeout: Duration,
 
     // =================== Peer Discovery Configuration ===================
-
     /// Advertised address for peer discovery (what we tell others to connect to)
     /// If None, uses the listening address
     pub advertise_address: Option<std::net::SocketAddr>,

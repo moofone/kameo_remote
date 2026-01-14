@@ -74,7 +74,7 @@ impl Default for PeerDiscoveryConfig {
     fn default() -> Self {
         Self {
             max_peers: 100,
-            allow_private_discovery: true,  // Allow private IPs by default
+            allow_private_discovery: true, // Allow private IPs by default
             allow_loopback_discovery: false, // Block loopback by default
             allow_link_local_discovery: false, // Block link-local by default
         }
@@ -353,7 +353,9 @@ impl PeerDiscovery {
 
     /// Get remaining slots available for new connections
     pub fn remaining_slots(&self) -> usize {
-        self.config.max_peers.saturating_sub(self.connected_peers.len())
+        self.config
+            .max_peers
+            .saturating_sub(self.connected_peers.len())
     }
 
     /// Clear the pending state for an address (e.g., after timeout)
@@ -424,15 +426,26 @@ mod tests {
         let mut discovery = PeerDiscovery::with_defaults(local);
 
         let peers = vec![
-            create_peer_gossip("10.0.0.1:8080"),  // self
-            create_peer_gossip("10.0.0.2:8080"),  // different peer
+            create_peer_gossip("10.0.0.1:8080"), // self
+            create_peer_gossip("10.0.0.2:8080"), // different peer
         ];
 
         let candidates = discovery.on_peer_list_gossip(&peers);
 
         // Should only return the different peer, not self
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0], test_addr(8080).ip().to_string().replace("10.0.0.1", "10.0.0.2").parse::<SocketAddr>().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 8080)));
+        assert_eq!(
+            candidates[0],
+            test_addr(8080)
+                .ip()
+                .to_string()
+                .replace("10.0.0.1", "10.0.0.2")
+                .parse::<SocketAddr>()
+                .unwrap_or(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    8080
+                ))
+        );
     }
 
     #[test]
@@ -445,15 +458,18 @@ mod tests {
         discovery.on_peer_connected(connected_peer);
 
         let peers = vec![
-            create_peer_gossip("10.0.0.2:8081"),  // already connected
-            create_peer_gossip("10.0.0.3:8082"),  // new peer
+            create_peer_gossip("10.0.0.2:8081"), // already connected
+            create_peer_gossip("10.0.0.3:8082"), // new peer
         ];
 
         let candidates = discovery.on_peer_list_gossip(&peers);
 
         // Should only return the new peer
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0], SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 8082));
+        assert_eq!(
+            candidates[0],
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 8082)
+        );
     }
 
     #[test]
@@ -554,7 +570,11 @@ mod tests {
 
         // The MAX_PEER_FAILURES-th failure should remove the peer
         let removed = discovery.on_peer_failure(peer);
-        assert!(removed, "peer should be removed after {} failures", MAX_PEER_FAILURES);
+        assert!(
+            removed,
+            "peer should be removed after {} failures",
+            MAX_PEER_FAILURES
+        );
         assert!(!discovery.failed_peers.contains_key(&peer));
     }
 

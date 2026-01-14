@@ -27,30 +27,18 @@ async fn test_mesh_formation_3_nodes() -> Result<(), Box<dyn std::error::Error>>
     let config = peer_discovery_config();
 
     // Node A (bootstrap node)
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Node B - creates without seeds, then bootstraps
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Node C - creates without seeds, then bootstraps
-    let node_c = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_c =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_c = node_c.registry.bind_addr;
 
     // Add peers manually to track them
@@ -103,21 +91,13 @@ async fn test_local_connection_wins() -> Result<(), Box<dyn std::error::Error>> 
     let config = peer_discovery_config();
 
     // Node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Node B
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Add peers and bootstrap
@@ -160,21 +140,13 @@ async fn test_feature_flag_disabled_legacy_behavior() -> Result<(), Box<dyn std:
     config.gossip_interval = Duration::from_millis(200);
 
     // Node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Node B connects to A
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Add peers and bootstrap
@@ -215,12 +187,8 @@ async fn test_stale_peer_eviction_ttl() -> Result<(), Box<dyn std::error::Error>
     config.cleanup_interval = Duration::from_millis(200);
 
     // Node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
 
     // Manually add a peer that will become stale (simulating discovery)
     let fake_peer_addr: SocketAddr = "127.0.0.1:59999".parse()?;
@@ -250,12 +218,8 @@ async fn test_connect_on_demand_soft_cap() -> Result<(), Box<dyn std::error::Err
     config.max_peers = 2; // Very low soft cap
 
     // Node A (hub)
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Nodes B, C, D all connect to A
@@ -263,12 +227,8 @@ async fn test_connect_on_demand_soft_cap() -> Result<(), Box<dyn std::error::Err
     let mut node_addrs: Vec<SocketAddr> = Vec::new();
 
     for _ in 0..3 {
-        let node = GossipRegistryHandle::new(
-            "127.0.0.1:0".parse()?,
-            vec![],
-            Some(config.clone()),
-        )
-        .await?;
+        let node =
+            GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
         let addr = node.registry.bind_addr;
 
         // Add peer tracking both ways
@@ -309,21 +269,13 @@ async fn test_known_peers_no_amnesia() -> Result<(), Box<dyn std::error::Error>>
     let config = peer_discovery_config();
 
     // Node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Node B connects to A
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Add peers and bootstrap
@@ -375,21 +327,13 @@ async fn test_peer_discovery_metrics() -> Result<(), Box<dyn std::error::Error>>
     let config = peer_discovery_config();
 
     // Node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Node B connects to A
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Add peers and bootstrap
@@ -407,7 +351,10 @@ async fn test_peer_discovery_metrics() -> Result<(), Box<dyn std::error::Error>>
     // Using explicit comparisons to avoid useless comparison warnings
     let _ = stats.discovered_peers; // Just verify field exists
     let _ = stats.failed_discovery_attempts; // Just verify field exists
-    assert!(stats.avg_mesh_connectivity >= 0.0, "avg_mesh_connectivity should be tracked");
+    assert!(
+        stats.avg_mesh_connectivity >= 0.0,
+        "avg_mesh_connectivity should be tracked"
+    );
     // mesh_formation_time_ms is Option<u64>, can be None
 
     // Clean shutdown
@@ -425,29 +372,17 @@ async fn test_failure_recovery_backoff() -> Result<(), Box<dyn std::error::Error
     config.max_peer_failures = 3; // Lower threshold for faster test
 
     // Create hub node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Create nodes B, C that connect to A
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
-    let node_c = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_c =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_c = node_c.registry.bind_addr;
 
     // Setup mesh
@@ -490,21 +425,13 @@ async fn test_simultaneous_dial_tiebreaker() -> Result<(), Box<dyn std::error::E
     let config = peer_discovery_config();
 
     // Node A
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Node B
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Both nodes configured to connect to each other (mutual dial)
@@ -545,24 +472,16 @@ async fn test_advertised_address_routing() -> Result<(), Box<dyn std::error::Err
     let mut config = peer_discovery_config();
 
     // Node A binds to any address
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
     // Set advertise_address to the actual bound address
     config.advertise_address = Some(addr_a);
 
     // Node B should be able to connect using advertised address
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
 
     // Add peer and bootstrap
     node_b.registry.add_peer(addr_a).await;
@@ -594,12 +513,8 @@ async fn test_ssrf_bogon_filtering() -> Result<(), Box<dyn std::error::Error>> {
     config.allow_link_local_discovery = false;
 
     // Node A with bogon filtering enabled
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
 
     // Try to add a loopback peer (should be filtered in discovery)
     let loopback_addr: SocketAddr = "127.0.0.1:22".parse()?;
@@ -630,20 +545,10 @@ async fn test_version_negotiation_legacy() -> Result<(), Box<dyn std::error::Err
     config_v1.enable_peer_discovery = false;
     config_v1.gossip_interval = Duration::from_millis(200);
 
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config_v2),
-    )
-    .await?;
+    let node_a = GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config_v2)).await?;
     let addr_a = node_a.registry.bind_addr;
 
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config_v1),
-    )
-    .await?;
+    let node_b = GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config_v1)).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Connect them
@@ -675,36 +580,20 @@ async fn test_partition_heal_behavior() -> Result<(), Box<dyn std::error::Error>
     let config = peer_discovery_config();
 
     // Create 4 nodes
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
-    let node_c = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_c =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_c = node_c.registry.bind_addr;
 
-    let node_d = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_d =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_d = node_d.registry.bind_addr;
 
     // Create initial mesh: A-B and C-D (two partitions)
@@ -750,20 +639,12 @@ async fn test_identity_tls_verification() -> Result<(), Box<dyn std::error::Erro
     let config = peer_discovery_config();
 
     // Create two nodes
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_a = node_a.registry.bind_addr;
 
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_b =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
     let addr_b = node_b.registry.bind_addr;
 
     // Connect nodes
@@ -798,12 +679,8 @@ async fn test_known_peers_lru_capacity() -> Result<(), Box<dyn std::error::Error
     let mut config = peer_discovery_config();
     config.known_peers_capacity = 5; // Very small for testing
 
-    let node_a = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse()?,
-        vec![],
-        Some(config.clone()),
-    )
-    .await?;
+    let node_a =
+        GossipRegistryHandle::new("127.0.0.1:0".parse()?, vec![], Some(config.clone())).await?;
 
     // Add more peers than capacity
     for i in 0..10 {

@@ -15,9 +15,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    connection_pool::ConnectionPool, current_timestamp, GossipConfig, GossipError,
+    connection_pool::ConnectionPool,
+    current_timestamp,
     peer_discovery::{PeerDiscovery, PeerDiscoveryConfig},
-    RegistrationPriority, RemoteActorLocation, Result,
+    GossipConfig, GossipError, RegistrationPriority, RemoteActorLocation, Result,
 };
 
 /// Callback trait for handling incoming actor messages
@@ -223,10 +224,7 @@ impl PeerInfo {
     /// Create from gossip-serializable format
     pub fn from_gossip(gossip: &PeerInfoGossip) -> Option<Self> {
         let address: SocketAddr = gossip.address.parse().ok()?;
-        let peer_address = gossip
-            .peer_address
-            .as_ref()
-            .and_then(|a| a.parse().ok());
+        let peer_address = gossip.peer_address.as_ref().and_then(|a| a.parse().ok());
 
         Some(Self {
             address,
@@ -311,7 +309,6 @@ pub struct GossipState {
     pub pending_peer_failures: HashMap<SocketAddr, PendingFailure>,
 
     // =================== Peer Discovery State ===================
-
     /// Last time we sent peer list gossip (for rate limiting)
     pub last_peer_gossip_time: u64,
     /// Peer discovery manager (None if peer discovery is disabled)
@@ -434,7 +431,8 @@ impl GossipRegistry {
                     None
                 },
                 known_peers: LruCache::new(
-                    NonZeroUsize::new(config.known_peers_capacity).unwrap_or(NonZeroUsize::new(10_000).unwrap())
+                    NonZeroUsize::new(config.known_peers_capacity)
+                        .unwrap_or(NonZeroUsize::new(10_000).unwrap()),
                 ),
             })),
             connection_pool: Arc::new(Mutex::new(connection_pool)),
@@ -1659,7 +1657,7 @@ impl GossipRegistry {
                         // This prevents indefinite failure count growth
                         if peer_info.failures < self.config.max_peer_failures {
                             peer_info.failures += 1;
-                            info!(peer = %result.peer_addr, 
+                            info!(peer = %result.peer_addr,
                                   new_failures = peer_info.failures,
                                   max_failures = self.config.max_peer_failures,
                                   "incremented peer failure count");
@@ -1671,7 +1669,7 @@ impl GossipRegistry {
                             }
                         } else {
                             // Already at max failures, just update attempt time
-                            debug!(peer = %result.peer_addr, 
+                            debug!(peer = %result.peer_addr,
                                    failures = peer_info.failures,
                                    "peer already at max failures, not incrementing");
                         }
@@ -3147,7 +3145,11 @@ impl GossipRegistry {
             let gossip_state = self.gossip_state.lock().await;
             if let Some(interval) = self.config.peer_gossip_interval {
                 let interval_secs = interval.as_secs();
-                if now < gossip_state.last_peer_gossip_time.saturating_add(interval_secs) {
+                if now
+                    < gossip_state
+                        .last_peer_gossip_time
+                        .saturating_add(interval_secs)
+                {
                     return; // Not time yet
                 }
             }
@@ -4424,7 +4426,10 @@ mod tests {
             } => {
                 assert_eq!(peers.len(), 2);
                 assert_eq!(peers[0].address, "127.0.0.1:8080");
-                assert_eq!(peers[0].peer_address, Some("192.168.1.100:8080".to_string()));
+                assert_eq!(
+                    peers[0].peer_address,
+                    Some("192.168.1.100:8080".to_string())
+                );
                 assert_eq!(peers[0].failures, 0);
                 assert_eq!(peers[1].address, "127.0.0.1:8081");
                 assert_eq!(peers[1].peer_address, None);
@@ -4510,7 +4515,10 @@ mod tests {
             rkyv::from_bytes::<PeerInfoGossip, rkyv::rancor::Error>(&serialized).unwrap();
 
         assert_eq!(deserialized.address, "10.0.0.1:9000");
-        assert_eq!(deserialized.peer_address, Some("192.168.1.50:9000".to_string()));
+        assert_eq!(
+            deserialized.peer_address,
+            Some("192.168.1.50:9000".to_string())
+        );
         assert_eq!(deserialized.failures, 5);
         assert_eq!(deserialized.last_attempt, 5000);
         assert_eq!(deserialized.last_success, 4000);
