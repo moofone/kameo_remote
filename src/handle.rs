@@ -354,6 +354,37 @@ impl GossipRegistryHandle {
         self.registry.get_connection(addr).await
     }
 
+    /// Bootstrap peer connections non-blocking (Phase 4)
+    ///
+    /// Dials seed peers asynchronously - doesn't block startup on gossip propagation.
+    /// Failed connections are logged but don't prevent the node from starting.
+    /// This is the recommended way to bootstrap a node with seed peers.
+    pub async fn bootstrap_non_blocking(&self, seeds: Vec<SocketAddr>) {
+        let seed_count = seeds.len();
+
+        for seed in seeds {
+            let registry = self.registry.clone();
+            tokio::spawn(async move {
+                match registry.get_connection(seed).await {
+                    Ok(_conn) => {
+                        debug!(seed = %seed, "bootstrap connection established");
+                        // Mark peer as connected
+                        registry.mark_peer_connected(seed).await;
+                    }
+                    Err(e) => {
+                        warn!(seed = %seed, error = %e, "bootstrap peer unavailable");
+                        // Note: Don't penalize at startup - peer might be starting up too
+                    }
+                }
+            });
+        }
+
+        debug!(
+            seed_count = seed_count,
+            "initiated non-blocking bootstrap for seed peers"
+        );
+    }
+
     /// Shutdown the registry
     pub async fn shutdown(&self) {
         self.registry.shutdown().await;
@@ -405,16 +436,21 @@ async fn start_gossip_timer(registry: Arc<GossipRegistry>) {
     let gossip_interval = registry.config.gossip_interval;
     let cleanup_interval = registry.config.cleanup_interval;
     let vector_clock_gc_interval = registry.config.vector_clock_gc_frequency;
+    let peer_gossip_interval = registry.config.peer_gossip_interval;
 
     let jitter = Duration::from_millis(rand::random::<u64>() % 1000);
     let mut next_gossip_tick = Instant::now() + gossip_interval + jitter;
     let mut cleanup_timer = interval(cleanup_interval);
     let mut vector_clock_gc_timer = interval(vector_clock_gc_interval);
 
+    // Peer gossip timer - only if peer discovery is enabled
+    let mut peer_gossip_timer = peer_gossip_interval.map(|i| interval(i));
+
     debug!(
         gossip_interval_ms = gossip_interval.as_millis(),
         cleanup_interval_secs = cleanup_interval.as_secs(),
         vector_clock_gc_interval_secs = vector_clock_gc_interval.as_secs(),
+        peer_gossip_interval_secs = peer_gossip_interval.map(|i| i.as_secs()),
         "gossip timer started with non-blocking I/O"
     );
 
@@ -492,6 +528,8 @@ async fn start_gossip_timer(registry: Arc<GossipRegistry>) {
                 registry.check_peer_consensus().await;
                 // Clean up peers that have been dead for too long
                 registry.cleanup_dead_peers().await;
+                // Clean up stale peers from peer discovery (Phase 4)
+                registry.prune_stale_peers().await;
             }
             _ = vector_clock_gc_timer.tick() => {
                 if registry.is_shutdown().await {
@@ -499,6 +537,23 @@ async fn start_gossip_timer(registry: Arc<GossipRegistry>) {
                 }
                 // Run vector clock garbage collection
                 registry.run_vector_clock_gc().await;
+            }
+            // Peer gossip timer - for peer list gossip (Phase 4)
+            _ = async {
+                if let Some(ref mut timer) = peer_gossip_timer {
+                    timer.tick().await
+                } else {
+                    // If peer gossip is disabled, wait forever (never fires)
+                    std::future::pending::<tokio::time::Instant>().await
+                }
+            } => {
+                if registry.is_shutdown().await {
+                    break;
+                }
+                // Only gossip peer list if peer discovery is enabled
+                if registry.config.enable_peer_discovery {
+                    registry.gossip_peer_list().await;
+                }
             }
         }
     }
@@ -667,6 +722,9 @@ where
                         return None;
                     }
                 }
+                RegistryMessage::PeerListGossip { sender_addr, .. } => {
+                    sender_addr.clone()
+                }
             };
             (node_id, *correlation_id)
         }
@@ -820,13 +878,37 @@ where
 
         // Add the connection to the pool by node ID
         let connection_arc = Arc::new(connection);
-        let pool = registry.connection_pool.lock().await;
 
-        // Add the connection using the sender's node ID
-        pool.add_connection_by_node_id(sender_node_id.clone(), peer_addr, connection_arc);
+        // DUPLICATE CONNECTION TIE-BREAKER (Phase 4):
+        // Check if we already have a connection to this peer
+        let should_add = if registry.has_connection_to_node(&sender_node_id).await {
+            // We have an existing connection - use tie-breaker
+            // This is an INBOUND connection (is_outbound = false)
+            if registry.should_keep_connection(&sender_node_id, false) {
+                debug!(
+                    node_id = %sender_node_id,
+                    "tie-breaker: keeping new inbound connection, will close existing outbound"
+                );
+                true
+            } else {
+                debug!(
+                    node_id = %sender_node_id,
+                    "tie-breaker: keeping existing outbound connection, rejecting new inbound"
+                );
+                false
+            }
+        } else {
+            true
+        };
 
-        debug!(node_id = %sender_node_id, peer_addr = %peer_addr, 
-              "Added incoming TLS connection to pool for bidirectional communication");
+        if should_add {
+            let pool = registry.connection_pool.lock().await;
+            // Add the connection using the sender's node ID
+            pool.add_connection_by_node_id(sender_node_id.clone(), peer_addr, connection_arc);
+
+            debug!(node_id = %sender_node_id, peer_addr = %peer_addr,
+                  "Added incoming TLS connection to pool for bidirectional communication");
+        }
     }
 
     // Continue reading messages from the TLS stream

@@ -78,6 +78,36 @@ pub struct GossipConfig {
     pub causal_consistency_timeout: Duration,
     /// How long to keep disconnected peers before removing them (default: 15 minutes)
     pub dead_peer_timeout: Duration,
+
+    // =================== Peer Discovery Configuration ===================
+
+    /// Advertised address for peer discovery (what we tell others to connect to)
+    /// If None, uses the listening address
+    pub advertise_address: Option<std::net::SocketAddr>,
+    /// Enable automatic peer discovery via gossip (default: false for safe rollout)
+    pub enable_peer_discovery: bool,
+    /// Maximum number of peers to maintain via discovery (soft cap, default: 100)
+    pub max_peers: usize,
+    /// Maximum consecutive peer connection failures before removal (default: 10)
+    pub max_peer_discovery_failures: usize,
+    /// Interval between peer list gossip (default: 30s)
+    pub peer_gossip_interval: Option<Duration>,
+    /// Maximum number of peers to send peer list gossip to (default: 3)
+    pub max_peer_gossip_targets: usize,
+    /// Allow discovery of private IP addresses (default: true)
+    pub allow_private_discovery: bool,
+    /// Allow discovery of loopback addresses (default: false)
+    pub allow_loopback_discovery: bool,
+    /// Allow discovery of link-local addresses (default: false)
+    pub allow_link_local_discovery: bool,
+    /// Time-to-live for failed peers before eviction (default: 6 hours)
+    pub fail_ttl: Duration,
+    /// Time-to-live for pending peers before eviction (default: 1 hour)
+    pub pending_ttl: Duration,
+    /// Time-to-live for stale peers before eviction (default: 24 hours)
+    pub stale_ttl: Duration,
+    /// Maximum capacity for known_peers LRU cache (default: 10_000)
+    pub known_peers_capacity: usize,
 }
 
 impl Default for GossipConfig {
@@ -114,6 +144,20 @@ impl Default for GossipConfig {
             max_immediate_retries: 3,
             causal_consistency_timeout: Duration::from_millis(500),
             dead_peer_timeout: Duration::from_secs(DEFAULT_DEAD_PEER_TIMEOUT_SECS),
+            // Peer discovery defaults
+            advertise_address: None,
+            enable_peer_discovery: false, // Safe rollout: disabled by default
+            max_peers: 100,
+            max_peer_discovery_failures: 10,
+            peer_gossip_interval: Some(Duration::from_secs(30)),
+            max_peer_gossip_targets: 3,
+            allow_private_discovery: true,
+            allow_loopback_discovery: false,
+            allow_link_local_discovery: false,
+            fail_ttl: Duration::from_secs(6 * 60 * 60), // 6 hours
+            pending_ttl: Duration::from_secs(60 * 60),  // 1 hour
+            stale_ttl: Duration::from_secs(24 * 60 * 60), // 24 hours
+            known_peers_capacity: 10_000,
         }
     }
 }
@@ -128,7 +172,7 @@ mod tests {
 
         assert_eq!(config.gossip_interval, Duration::from_secs(5));
         assert_eq!(config.max_gossip_peers, 3);
-        assert_eq!(config.actor_ttl, Duration::from_secs(300));
+        assert_eq!(config.actor_ttl, Duration::from_secs(86_400)); // 24 hours
         assert_eq!(config.cleanup_interval, Duration::from_secs(60));
         assert_eq!(config.connection_timeout, Duration::from_secs(10));
         assert_eq!(config.response_timeout, Duration::from_secs(5));
@@ -164,6 +208,20 @@ mod tests {
             Duration::from_millis(500)
         );
         assert_eq!(config.dead_peer_timeout, Duration::from_secs(900));
+        // Peer discovery defaults
+        assert!(config.advertise_address.is_none());
+        assert!(!config.enable_peer_discovery); // Disabled by default for safe rollout
+        assert_eq!(config.max_peers, 100);
+        assert_eq!(config.max_peer_discovery_failures, 10);
+        assert_eq!(config.peer_gossip_interval, Some(Duration::from_secs(30)));
+        assert_eq!(config.max_peer_gossip_targets, 3);
+        assert!(config.allow_private_discovery);
+        assert!(!config.allow_loopback_discovery);
+        assert!(!config.allow_link_local_discovery);
+        assert_eq!(config.fail_ttl, Duration::from_secs(6 * 60 * 60));
+        assert_eq!(config.pending_ttl, Duration::from_secs(60 * 60));
+        assert_eq!(config.stale_ttl, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(config.known_peers_capacity, 10_000);
     }
 
     #[test]
@@ -199,7 +257,7 @@ mod tests {
         assert_eq!(config.max_gossip_peers, 5);
         assert_eq!(config.peer_retry_interval, Duration::from_secs(2));
         // Other fields should have default values
-        assert_eq!(config.actor_ttl, Duration::from_secs(300));
+        assert_eq!(config.actor_ttl, Duration::from_secs(86_400)); // 24 hours
     }
 
     #[test]

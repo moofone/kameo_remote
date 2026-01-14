@@ -3211,6 +3211,14 @@ impl ConnectionPool {
             .unwrap_or(false)
     }
 
+    /// Check if we have a connection to a peer by peer ID
+    pub fn has_connection_by_peer_id(&self, peer_id: &crate::PeerId) -> bool {
+        self.connections_by_peer
+            .get(peer_id)
+            .map(|entry| entry.value().is_connected())
+            .unwrap_or(false)
+    }
+
     /// Check health of all connections (for compatibility)
     pub async fn check_connection_health(&mut self) -> Vec<SocketAddr> {
         // Health checking is now done by the persistent connection handlers
@@ -5010,6 +5018,23 @@ pub(crate) async fn handle_incoming_message(
                 );
             }
 
+            Ok(())
+        }
+
+        RegistryMessage::PeerListGossip {
+            peers,
+            timestamp,
+            sender_addr,
+        } => {
+            debug!(
+                peer_count = peers.len(),
+                timestamp = timestamp,
+                sender = %sender_addr,
+                "received peer list gossip message"
+            );
+
+            // TODO: Phase 3 will implement full peer list handling
+            // For now, just log that we received it - actual processing happens in registry
             Ok(())
         }
     }

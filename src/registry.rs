@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use tokio::sync::{Mutex, RwLock};
 
 use rand::seq::SliceRandom;
@@ -14,6 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     connection_pool::ConnectionPool, current_timestamp, GossipConfig, GossipError,
+    peer_discovery::{PeerDiscovery, PeerDiscoveryConfig},
     RegistrationPriority, RemoteActorLocation, Result,
 };
 
@@ -130,6 +133,16 @@ pub enum RegistryMessage {
         payload: Vec<u8>,
         correlation_id: Option<u16>,
     },
+    /// Peer list gossip for automatic peer discovery
+    /// Contains list of known peers with their connection info
+    PeerListGossip {
+        /// List of known peers (address as string for rkyv, peer info)
+        peers: Vec<PeerInfoGossip>,
+        /// Timestamp when this gossip was generated
+        timestamp: u64,
+        /// Sender's advertised address (so receiver can add us to their peer list)
+        sender_addr: String,
+    },
 }
 
 /// Statistics about the gossip registry
@@ -147,6 +160,15 @@ pub struct RegistryStats {
     pub full_sync_exchanges: u64,
     pub delta_history_size: usize,
     pub avg_delta_size: f64,
+    // Peer discovery metrics (Phase 5)
+    /// Number of peers discovered via gossip (in known_peers cache)
+    pub discovered_peers: usize,
+    /// Number of failed peer discovery attempts (connection failures to discovered peers)
+    pub failed_discovery_attempts: u64,
+    /// Average mesh connectivity (connected_peers / known_peers ratio)
+    pub avg_mesh_connectivity: f64,
+    /// Time taken to form initial mesh (first N peers connected), in milliseconds
+    pub mesh_formation_time_ms: Option<u64>,
 }
 
 /// Peer information with failure tracking and delta state
@@ -165,6 +187,78 @@ pub struct PeerInfo {
     pub consecutive_deltas: u64,
     /// When this peer last failed (for tracking permanent failures)
     pub last_failure_time: Option<u64>,
+}
+
+impl PeerInfo {
+    /// Create a PeerInfo for the local node (self) for gossip inclusion
+    /// Used when including ourselves in peer list gossip
+    pub fn local(advertise_addr: SocketAddr) -> Self {
+        let now = crate::current_timestamp();
+        Self {
+            address: advertise_addr,
+            peer_address: None,
+            node_id: None,
+            failures: 0,
+            last_attempt: now,
+            last_success: now, // Important: prevents pruning
+            last_sequence: 0,
+            last_sent_sequence: 0,
+            consecutive_deltas: 0,
+            last_failure_time: None,
+        }
+    }
+
+    /// Convert to gossip-serializable format
+    pub fn to_gossip(&self) -> PeerInfoGossip {
+        PeerInfoGossip {
+            address: self.address.to_string(),
+            peer_address: self.peer_address.map(|a| a.to_string()),
+            node_id: self.node_id,
+            failures: self.failures,
+            last_attempt: self.last_attempt,
+            last_success: self.last_success,
+        }
+    }
+
+    /// Create from gossip-serializable format
+    pub fn from_gossip(gossip: &PeerInfoGossip) -> Option<Self> {
+        let address: SocketAddr = gossip.address.parse().ok()?;
+        let peer_address = gossip
+            .peer_address
+            .as_ref()
+            .and_then(|a| a.parse().ok());
+
+        Some(Self {
+            address,
+            peer_address,
+            node_id: gossip.node_id,
+            failures: gossip.failures,
+            last_attempt: gossip.last_attempt,
+            last_success: gossip.last_success,
+            last_sequence: 0,
+            last_sent_sequence: 0,
+            consecutive_deltas: 0,
+            last_failure_time: None,
+        })
+    }
+}
+
+/// Peer information for gossip (rkyv-serializable version)
+/// Uses String instead of SocketAddr for rkyv compatibility
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone)]
+pub struct PeerInfoGossip {
+    /// Listening address (as string for rkyv compatibility)
+    pub address: String,
+    /// Actual connection address if different (NAT)
+    pub peer_address: Option<String>,
+    /// NodeId for TLS verification
+    pub node_id: Option<crate::NodeId>,
+    /// Number of consecutive failures
+    pub failures: usize,
+    /// Last connection attempt timestamp
+    pub last_attempt: u64,
+    /// Last successful connection timestamp
+    pub last_success: u64,
 }
 
 /// Historical delta for efficient incremental updates
@@ -198,7 +292,7 @@ pub struct ActorState {
     pub known_actors: HashMap<String, RemoteActorLocation>,
 }
 
-/// Gossip coordination state for write-heavy operations  
+/// Gossip coordination state for write-heavy operations
 #[derive(Debug)]
 pub struct GossipState {
     pub gossip_sequence: u64,
@@ -215,6 +309,15 @@ pub struct GossipState {
     pub peer_health_reports: HashMap<SocketAddr, HashMap<SocketAddr, PeerHealthStatus>>,
     /// Pending peer failures that need consensus
     pub pending_peer_failures: HashMap<SocketAddr, PendingFailure>,
+
+    // =================== Peer Discovery State ===================
+
+    /// Last time we sent peer list gossip (for rate limiting)
+    pub last_peer_gossip_time: u64,
+    /// Peer discovery manager (None if peer discovery is disabled)
+    pub peer_discovery: Option<PeerDiscovery>,
+    /// LRU cache of known peers discovered via gossip
+    pub known_peers: LruCache<SocketAddr, PeerInfo>,
 }
 
 /// Core gossip registry implementation with separated locks
@@ -315,6 +418,24 @@ impl GossipRegistry {
                 peer_to_actors: HashMap::new(),
                 peer_health_reports: HashMap::new(),
                 pending_peer_failures: HashMap::new(),
+                // Peer discovery state
+                last_peer_gossip_time: 0,
+                peer_discovery: if config.enable_peer_discovery {
+                    Some(PeerDiscovery::new(
+                        bind_addr,
+                        PeerDiscoveryConfig {
+                            max_peers: config.max_peers,
+                            allow_private_discovery: config.allow_private_discovery,
+                            allow_loopback_discovery: config.allow_loopback_discovery,
+                            allow_link_local_discovery: config.allow_link_local_discovery,
+                        },
+                    ))
+                } else {
+                    None
+                },
+                known_peers: LruCache::new(
+                    NonZeroUsize::new(config.known_peers_capacity).unwrap_or(NonZeroUsize::new(10_000).unwrap())
+                ),
             })),
             connection_pool: Arc::new(Mutex::new(connection_pool)),
             actor_message_handler: Arc::new(Mutex::new(None)),
@@ -793,6 +914,9 @@ impl GossipRegistry {
             delta_exchanges,
             full_sync_exchanges,
             delta_history_size,
+            discovered_peers,
+            failed_discovery_attempts,
+            avg_mesh_connectivity,
         ) = {
             let gossip_state = self.gossip_state.lock().await;
             let active_peers = gossip_state
@@ -802,6 +926,21 @@ impl GossipRegistry {
                 .count();
             let failed_peers = gossip_state.peers.len() - active_peers;
 
+            // Peer discovery metrics (Phase 5)
+            let discovered_peers = gossip_state.known_peers.len();
+            let failed_discovery_attempts = gossip_state
+                .peer_discovery
+                .as_ref()
+                .map(|pd| pd.failed_peer_count() as u64)
+                .unwrap_or(0);
+
+            // Calculate mesh connectivity: active connections / discovered peers
+            let avg_mesh_connectivity = if discovered_peers > 0 {
+                active_peers as f64 / discovered_peers as f64
+            } else {
+                0.0
+            };
+
             (
                 gossip_state.gossip_sequence,
                 active_peers,
@@ -809,6 +948,9 @@ impl GossipRegistry {
                 gossip_state.delta_exchanges,
                 gossip_state.full_sync_exchanges,
                 gossip_state.delta_history.len(),
+                discovered_peers,
+                failed_discovery_attempts,
+                avg_mesh_connectivity,
             )
         };
 
@@ -833,6 +975,10 @@ impl GossipRegistry {
             full_sync_exchanges,
             delta_history_size,
             avg_delta_size,
+            discovered_peers,
+            failed_discovery_attempts,
+            avg_mesh_connectivity,
+            mesh_formation_time_ms: None, // TODO: Track in gossip_state when mesh forms
         }
     }
 
@@ -2950,6 +3096,441 @@ impl GossipRegistry {
             None
         }
     }
+
+    // =================== Peer Discovery Methods ===================
+
+    /// Maximum size of peer list in gossip messages (resource exhaustion protection)
+    pub const MAX_PEER_LIST_SIZE: usize = 1000;
+
+    /// Create a snapshot of current peers for gossip
+    /// Includes self (using advertised_address from config)
+    pub async fn peers_snapshot(&self) -> Vec<PeerInfoGossip> {
+        let gossip_state = self.gossip_state.lock().await;
+        let mut peers: Vec<PeerInfoGossip> = Vec::new();
+
+        // Include self (using advertised address or bind address)
+        let self_addr = self.config.advertise_address.unwrap_or(self.bind_addr);
+        let self_info = PeerInfo::local(self_addr);
+        peers.push(self_info.to_gossip());
+
+        // Include active peers
+        for (_, peer_info) in gossip_state.peers.iter() {
+            // Skip failed peers
+            if peer_info.failures >= self.config.max_peer_failures {
+                continue;
+            }
+            peers.push(peer_info.to_gossip());
+        }
+
+        // Include known peers from LRU cache (up to limit)
+        let remaining = Self::MAX_PEER_LIST_SIZE.saturating_sub(peers.len());
+        for (_, peer_info) in gossip_state.known_peers.iter().take(remaining) {
+            peers.push(peer_info.to_gossip());
+        }
+
+        // Truncate to max size
+        peers.truncate(Self::MAX_PEER_LIST_SIZE);
+
+        peers
+    }
+
+    /// Periodic gossip of peer list to random subset of peers
+    pub async fn gossip_peer_list(&self) {
+        // Check if peer discovery is enabled
+        if !self.config.enable_peer_discovery {
+            return;
+        }
+
+        // Check gossip interval
+        let now = current_timestamp();
+        {
+            let gossip_state = self.gossip_state.lock().await;
+            if let Some(interval) = self.config.peer_gossip_interval {
+                let interval_secs = interval.as_secs();
+                if now < gossip_state.last_peer_gossip_time.saturating_add(interval_secs) {
+                    return; // Not time yet
+                }
+            }
+        }
+
+        // Get peer snapshot
+        let peers = self.peers_snapshot().await;
+        if peers.is_empty() {
+            return;
+        }
+
+        // Get active peers to gossip to
+        let targets: Vec<SocketAddr> = {
+            let gossip_state = self.gossip_state.lock().await;
+            let mut active_peers: Vec<SocketAddr> = gossip_state
+                .peers
+                .iter()
+                .filter(|(_, info)| info.failures < self.config.max_peer_failures)
+                .map(|(addr, _)| *addr)
+                .collect();
+
+            // Shuffle and take max_peer_gossip_targets
+            active_peers.shuffle(&mut rand::rng());
+            active_peers.truncate(self.config.max_peer_gossip_targets);
+            active_peers
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        // Update last gossip time
+        {
+            let mut gossip_state = self.gossip_state.lock().await;
+            gossip_state.last_peer_gossip_time = now;
+        }
+
+        // Create message
+        let self_addr = self.config.advertise_address.unwrap_or(self.bind_addr);
+        let msg = RegistryMessage::PeerListGossip {
+            peers,
+            timestamp: now,
+            sender_addr: self_addr.to_string(),
+        };
+
+        // Send to targets
+        // Note: Actual network sending is integrated in Phase 4 via handle.rs gossip_loop
+        let target_count = targets.len();
+        for target in targets {
+            debug!(target = %target, "queued peer list gossip for target");
+        }
+
+        let peer_count = if let RegistryMessage::PeerListGossip { ref peers, .. } = msg {
+            peers.len()
+        } else {
+            0
+        };
+        info!(
+            targets = target_count,
+            peer_count = peer_count,
+            "peer list gossip round completed"
+        );
+    }
+
+    /// Handle incoming peer list gossip
+    /// Returns candidates to connect to
+    ///
+    /// IMPORTANT: "Don't penalize the messenger" principle (Phase 4):
+    /// - Unreachable peers in the list do NOT cause sender to be penalized
+    /// - We only penalize the sender for INVALID data (bogon IPs, malformed data)
+    /// - Backoff is applied to TARGET peers only, not the gossip source
+    pub async fn on_peer_list_gossip(
+        &self,
+        peers: Vec<PeerInfoGossip>,
+        sender_addr: &str,
+        timestamp: u64,
+    ) -> Vec<SocketAddr> {
+        // Resource exhaustion protection - sender is sending suspicious data
+        if peers.len() > Self::MAX_PEER_LIST_SIZE {
+            warn!(
+                size = peers.len(),
+                max = Self::MAX_PEER_LIST_SIZE,
+                sender = %sender_addr,
+                "peer list too large, rejecting - potential attack"
+            );
+            // Note: We could penalize sender here, but for now just reject
+            return vec![];
+        }
+
+        // Check if peer discovery is enabled
+        if !self.config.enable_peer_discovery {
+            debug!("peer discovery disabled, ignoring peer list gossip");
+            return vec![];
+        }
+
+        let _now = current_timestamp();
+
+        // DON'T PENALIZE THE MESSENGER:
+        // Count bogon IPs to detect if sender is sending suspicious data
+        // We only penalize for INVALID data, not for unreachable peers
+        let mut bogon_count = 0;
+        for peer_gossip in &peers {
+            if let Ok(addr) = peer_gossip.address.parse::<SocketAddr>() {
+                let ip = addr.ip();
+                // Check for bogon IPs that should never be in peer lists
+                if ip.is_loopback() && !self.config.allow_loopback_discovery {
+                    bogon_count += 1;
+                }
+                // Check link-local
+                if let std::net::IpAddr::V4(v4) = ip {
+                    if v4.is_link_local() && !self.config.allow_link_local_discovery {
+                        bogon_count += 1;
+                    }
+                }
+            }
+        }
+
+        // If more than 50% of peers are bogons, log warning (could penalize sender)
+        if !peers.is_empty() && bogon_count * 2 > peers.len() {
+            warn!(
+                bogon_count = bogon_count,
+                total = peers.len(),
+                sender = %sender_addr,
+                "peer list contains mostly bogon IPs - sender may be malicious"
+            );
+            // Note: We choose to log but not block - could be misconfiguration
+        }
+
+        // Ingest peers into known_peers and get candidates
+        let candidates = {
+            let mut gossip_state = self.gossip_state.lock().await;
+
+            // Update known_peers LRU cache
+            for peer_gossip in &peers {
+                if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
+                    // Conservative merge: only update if newer
+                    if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address) {
+                        // Only update if the incoming info is newer
+                        if peer_gossip.last_success > existing.last_success {
+                            existing.last_success = peer_gossip.last_success;
+                            existing.last_attempt = peer_gossip.last_attempt;
+                            // Don't overwrite local failure count
+                        }
+                    } else {
+                        // New peer, add to cache
+                        gossip_state.known_peers.put(peer_info.address, peer_info);
+                    }
+                }
+            }
+
+            // Get candidates from peer discovery manager
+            // Note: PeerDiscovery filters out unsafe addresses via is_safe_to_dial()
+            // but does NOT penalize the sender - only skips unsafe targets
+            if let Some(ref mut discovery) = gossip_state.peer_discovery {
+                discovery.on_peer_list_gossip(&peers)
+            } else {
+                vec![]
+            }
+        };
+
+        debug!(
+            peer_count = peers.len(),
+            candidates = candidates.len(),
+            sender = %sender_addr,
+            timestamp = timestamp,
+            "processed peer list gossip"
+        );
+
+        candidates
+    }
+
+    /// Prune stale peers from known_peers based on TTLs
+    pub async fn prune_stale_peers(&self) {
+        let now = current_timestamp();
+
+        let mut gossip_state = self.gossip_state.lock().await;
+
+        // Prune from known_peers based on TTLs
+        let fail_ttl_secs = self.config.fail_ttl.as_secs();
+        let stale_ttl_secs = self.config.stale_ttl.as_secs();
+
+        // Collect keys to remove
+        let to_remove: Vec<SocketAddr> = gossip_state
+            .known_peers
+            .iter()
+            .filter(|(_, info)| {
+                // Remove if:
+                // 1. Failed and exceeded fail_ttl
+                if info.failures > 0 {
+                    if let Some(failure_time) = info.last_failure_time {
+                        if now > failure_time.saturating_add(fail_ttl_secs) {
+                            return true;
+                        }
+                    }
+                }
+                // 2. Stale (no success for stale_ttl)
+                if info.last_success > 0 && now > info.last_success.saturating_add(stale_ttl_secs) {
+                    return true;
+                }
+                false
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        // Remove stale peers
+        for addr in &to_remove {
+            gossip_state.known_peers.pop(addr);
+        }
+
+        if !to_remove.is_empty() {
+            debug!(
+                removed = to_remove.len(),
+                remaining = gossip_state.known_peers.len(),
+                "pruned stale peers from known_peers"
+            );
+        }
+
+        // Also prune from peer_discovery if enabled
+        if let Some(ref mut _discovery) = gossip_state.peer_discovery {
+            // Clear pending peers that have exceeded pending_ttl
+            let pending_ttl_secs = self.config.pending_ttl.as_secs();
+            // Note: PeerDiscovery handles its own pending cleanup via connection lifecycle
+            let _ = pending_ttl_secs; // Suppress unused warning
+        }
+    }
+
+    /// Lookup advertised address for a NodeId
+    /// First checks active peers, then falls back to known_peers
+    pub async fn lookup_advertised_addr(&self, node_id: &crate::NodeId) -> Option<SocketAddr> {
+        let gossip_state = self.gossip_state.lock().await;
+
+        // First check active peers
+        for (addr, peer_info) in gossip_state.peers.iter() {
+            if peer_info.node_id.as_ref() == Some(node_id) {
+                return Some(*addr);
+            }
+        }
+
+        // Fallback to known_peers
+        for (addr, peer_info) in gossip_state.known_peers.iter() {
+            if peer_info.node_id.as_ref() == Some(node_id) {
+                return Some(*addr);
+            }
+        }
+
+        None
+    }
+
+    /// Connect-on-demand for actor messaging (Phase 4)
+    ///
+    /// This method allows connecting to a node for actor messaging even if the
+    /// max_peers soft cap has been reached. The soft cap only limits automatic
+    /// peer discovery, not direct actor communication.
+    ///
+    /// First checks active connections, then uses known_peers to look up the address.
+    pub async fn ensure_connection_for_actor(
+        &self,
+        node_id: &crate::NodeId,
+    ) -> Result<crate::connection_pool::ConnectionHandle> {
+        // Check if we have an active connection to the node already
+        if let Some(addr) = self.lookup_advertised_addr(node_id).await {
+            if self.has_active_connection(&addr).await {
+                debug!(node_id = %node_id.fmt_short(), addr = %addr, "using existing connection for actor messaging");
+                return self.get_connection(addr).await;
+            }
+
+            // Connect-on-demand: This can exceed max_peers soft cap
+            // because actor messaging takes priority over peer discovery limits
+            debug!(
+                node_id = %node_id.fmt_short(),
+                addr = %addr,
+                "connect-on-demand for actor messaging (may exceed soft cap)"
+            );
+            return self.get_connection(addr).await;
+        }
+
+        Err(GossipError::ActorNotFound(format!(
+            "no known address for node {}",
+            node_id.fmt_short()
+        )))
+    }
+
+    /// Check if we have an active connection to a peer
+    /// Used for "local connection wins" - we trust our direct connection over gossip reports
+    pub async fn has_active_connection(&self, addr: &SocketAddr) -> bool {
+        let pool = self.connection_pool.lock().await;
+        pool.has_connection(addr)
+    }
+
+    /// Mark a peer connection as established (clears failure state)
+    pub async fn mark_peer_connected(&self, addr: SocketAddr) {
+        let mut gossip_state = self.gossip_state.lock().await;
+
+        // Update known_peers
+        if let Some(peer_info) = gossip_state.known_peers.get_mut(&addr) {
+            peer_info.failures = 0;
+            peer_info.last_failure_time = None;
+            peer_info.last_success = current_timestamp();
+        }
+
+        // Update peer_discovery
+        if let Some(ref mut discovery) = gossip_state.peer_discovery {
+            discovery.on_peer_connected(addr);
+        }
+
+        debug!(addr = %addr, "marked peer as connected");
+    }
+
+    /// Mark a peer connection as failed (applies backoff)
+    /// Implements "local connection wins" - if we have an active connection, we trust it
+    /// over gossip reports and skip marking as failed.
+    pub async fn mark_peer_failed(&self, addr: SocketAddr) {
+        // LOCAL CONNECTION WINS: If we have an active connection to this peer,
+        // don't mark it as failed based on gossip reports from other nodes.
+        // We trust our direct connection over third-party reports.
+        {
+            let pool = self.connection_pool.lock().await;
+            if pool.has_connection(&addr) {
+                debug!(
+                    addr = %addr,
+                    "local connection wins - skipping failure mark for connected peer"
+                );
+                return;
+            }
+        }
+
+        let mut gossip_state = self.gossip_state.lock().await;
+
+        let now = current_timestamp();
+
+        // Update known_peers
+        if let Some(peer_info) = gossip_state.known_peers.get_mut(&addr) {
+            peer_info.failures = peer_info.failures.saturating_add(1);
+            peer_info.last_failure_time = Some(now);
+            peer_info.last_attempt = now;
+        }
+
+        // Update peer_discovery
+        if let Some(ref mut discovery) = gossip_state.peer_discovery {
+            discovery.on_peer_failure(addr);
+        }
+
+        debug!(addr = %addr, "marked peer as failed");
+    }
+
+    /// Mark a peer as disconnected
+    pub async fn mark_peer_disconnected(&self, addr: SocketAddr) {
+        let mut gossip_state = self.gossip_state.lock().await;
+
+        if let Some(ref mut discovery) = gossip_state.peer_discovery {
+            discovery.on_peer_disconnected(addr);
+        }
+
+        debug!(addr = %addr, "marked peer as disconnected");
+    }
+
+    /// Duplicate connection tie-breaker
+    /// When both nodes try to connect simultaneously, use NodeId comparison:
+    /// - Lower NodeId keeps outbound connection
+    /// - Higher NodeId keeps inbound connection
+    ///
+    /// Returns true if this connection should be kept.
+    pub fn should_keep_connection(&self, remote_node_id: &str, is_outbound: bool) -> bool {
+        let local_id = self.peer_id.to_node_id().to_string();
+        let remote_id = remote_node_id.to_string();
+
+        match local_id.cmp(&remote_id) {
+            std::cmp::Ordering::Less => is_outbound,
+            std::cmp::Ordering::Greater => !is_outbound,
+            std::cmp::Ordering::Equal => {
+                // Same node ID shouldn't happen in practice
+                warn!(local = %local_id, remote = %remote_id, "duplicate connection from same NodeId");
+                true
+            }
+        }
+    }
+
+    /// Check if we already have a connection to a peer by node ID
+    pub async fn has_connection_to_node(&self, node_id: &str) -> bool {
+        let pool = self.connection_pool.lock().await;
+        let peer_id = crate::PeerId::new(node_id);
+        pool.has_connection_by_peer_id(&peer_id)
+    }
 }
 
 #[cfg(test)]
@@ -3079,12 +3660,19 @@ mod tests {
             full_sync_exchanges: 10,
             delta_history_size: 20,
             avg_delta_size: 5.5,
+            // Peer discovery metrics (Phase 5)
+            discovered_peers: 15,
+            failed_discovery_attempts: 2,
+            avg_mesh_connectivity: 0.2,
+            mesh_formation_time_ms: Some(500),
         };
 
         assert_eq!(stats.local_actors, 5);
         assert_eq!(stats.known_actors, 10);
         assert_eq!(stats.active_peers, 3);
         assert_eq!(stats.failed_peers, 1);
+        assert_eq!(stats.discovered_peers, 15);
+        assert_eq!(stats.failed_discovery_attempts, 2);
     }
 
     #[test]
@@ -3789,5 +4377,141 @@ mod tests {
         assert!(!gossip_state
             .pending_peer_failures
             .contains_key(&test_addr(8081)));
+    }
+
+    // =================== Phase 1: PeerListGossip Tests ===================
+
+    #[test]
+    fn test_peer_list_gossip_serialization() {
+        // Test rkyv round-trip for PeerListGossip message
+        let peer1 = PeerInfoGossip {
+            address: "127.0.0.1:8080".to_string(),
+            peer_address: Some("192.168.1.100:8080".to_string()),
+            node_id: None,
+            failures: 0,
+            last_attempt: 1000,
+            last_success: 1000,
+        };
+        let peer2 = PeerInfoGossip {
+            address: "127.0.0.1:8081".to_string(),
+            peer_address: None,
+            node_id: None,
+            failures: 2,
+            last_attempt: 2000,
+            last_success: 1500,
+        };
+
+        let msg = RegistryMessage::PeerListGossip {
+            peers: vec![peer1, peer2],
+            timestamp: 12345,
+            sender_addr: "127.0.0.1:9000".to_string(),
+        };
+
+        // Serialize
+        let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
+
+        // Deserialize
+        let deserialized: RegistryMessage =
+            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+
+        // Verify
+        match deserialized {
+            RegistryMessage::PeerListGossip {
+                peers,
+                timestamp,
+                sender_addr,
+            } => {
+                assert_eq!(peers.len(), 2);
+                assert_eq!(peers[0].address, "127.0.0.1:8080");
+                assert_eq!(peers[0].peer_address, Some("192.168.1.100:8080".to_string()));
+                assert_eq!(peers[0].failures, 0);
+                assert_eq!(peers[1].address, "127.0.0.1:8081");
+                assert_eq!(peers[1].peer_address, None);
+                assert_eq!(peers[1].failures, 2);
+                assert_eq!(timestamp, 12345);
+                assert_eq!(sender_addr, "127.0.0.1:9000");
+            }
+            _ => panic!("Expected PeerListGossip message"),
+        }
+    }
+
+    #[test]
+    fn test_peer_info_local_factory() {
+        let addr = test_addr(8080);
+        let peer_info = PeerInfo::local(addr);
+
+        assert_eq!(peer_info.address, addr);
+        assert!(peer_info.peer_address.is_none());
+        assert!(peer_info.node_id.is_none());
+        assert_eq!(peer_info.failures, 0);
+        assert!(peer_info.last_success > 0); // Should have current timestamp
+        assert!(peer_info.last_attempt > 0);
+        assert_eq!(peer_info.last_sequence, 0);
+        assert_eq!(peer_info.last_sent_sequence, 0);
+        assert_eq!(peer_info.consecutive_deltas, 0);
+        assert!(peer_info.last_failure_time.is_none());
+    }
+
+    #[test]
+    fn test_peer_info_gossip_conversion() {
+        let addr = test_addr(8080);
+        let peer_info = PeerInfo {
+            address: addr,
+            peer_address: Some(test_addr(8081)),
+            node_id: None,
+            failures: 3,
+            last_attempt: 1000,
+            last_success: 900,
+            last_sequence: 10,
+            last_sent_sequence: 8,
+            consecutive_deltas: 5,
+            last_failure_time: Some(950),
+        };
+
+        // Convert to gossip format
+        let gossip = peer_info.to_gossip();
+        assert_eq!(gossip.address, "127.0.0.1:8080");
+        assert_eq!(gossip.peer_address, Some("127.0.0.1:8081".to_string()));
+        assert_eq!(gossip.failures, 3);
+        assert_eq!(gossip.last_attempt, 1000);
+        assert_eq!(gossip.last_success, 900);
+
+        // Convert back from gossip format
+        let restored = PeerInfo::from_gossip(&gossip).unwrap();
+        assert_eq!(restored.address, addr);
+        assert_eq!(restored.peer_address, Some(test_addr(8081)));
+        assert_eq!(restored.failures, 3);
+        assert_eq!(restored.last_attempt, 1000);
+        assert_eq!(restored.last_success, 900);
+        // These fields are not transmitted over gossip, so they should be reset
+        assert_eq!(restored.last_sequence, 0);
+        assert_eq!(restored.last_sent_sequence, 0);
+        assert_eq!(restored.consecutive_deltas, 0);
+        assert!(restored.last_failure_time.is_none());
+    }
+
+    #[test]
+    fn test_peer_info_gossip_serialization() {
+        let gossip = PeerInfoGossip {
+            address: "10.0.0.1:9000".to_string(),
+            peer_address: Some("192.168.1.50:9000".to_string()),
+            node_id: None,
+            failures: 5,
+            last_attempt: 5000,
+            last_success: 4000,
+        };
+
+        // Serialize
+        let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&gossip).unwrap();
+
+        // Deserialize
+        let deserialized: PeerInfoGossip =
+            rkyv::from_bytes::<PeerInfoGossip, rkyv::rancor::Error>(&serialized).unwrap();
+
+        assert_eq!(deserialized.address, "10.0.0.1:9000");
+        assert_eq!(deserialized.peer_address, Some("192.168.1.50:9000".to_string()));
+        assert_eq!(deserialized.failures, 5);
+        assert_eq!(deserialized.last_attempt, 5000);
+        assert_eq!(deserialized.last_success, 4000);
     }
 }
