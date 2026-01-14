@@ -1,8 +1,8 @@
-use kameo_remote::{SecretKey, NodeId};
-use kameo_remote::tls::{TlsConfig, name};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use kameo_remote::tls::{name, TlsConfig};
+use kameo_remote::{NodeId, SecretKey};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create DNS name for the server
     let server_name = name::encode(&server_node_id);
     let dns_name = rustls::pki_types::ServerName::try_from(server_name.clone())?;
-    
+
     // Perform TLS handshake
     let connector = client_tls.connector();
     let mut tls_stream = connector.connect(dns_name, stream).await?;

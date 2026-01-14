@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create node 1 with TLS enabled
     println!("\nStarting Node1 with TLS...");
     let handle1 = GossipRegistryHandle::new_with_tls(addr1, node1_key, None).await?;
-    
+
     // Create node 2 with TLS enabled
     println!("Starting Node2 with TLS...");
     let handle2 = GossipRegistryHandle::new_with_tls(addr2, node2_key, None).await?;
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nAdding peers...");
     let peer1 = handle1.add_peer(&node2_id.to_peer_id()).await;
     peer1.connect(&addr2).await?;
-    
+
     let peer2 = handle2.add_peer(&node1_id.to_peer_id()).await;
     peer2.connect(&addr1).await?;
 
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get stats
     let stats1 = handle1.stats().await;
     let stats2 = handle2.stats().await;
-    
+
     println!("\nNode1 stats: {:?}", stats1);
     println!("Node2 stats: {:?}", stats2);
 

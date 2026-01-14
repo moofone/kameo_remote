@@ -17,13 +17,15 @@ async fn test_batch_ask_performance() -> Result<()> {
 
     // Start server node that will handle ask requests
     let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let server_registry = GossipRegistryHandle::new(server_addr, vec![], Some(GossipConfig::default())).await?;
+    let server_registry =
+        GossipRegistryHandle::new(server_addr, vec![], Some(GossipConfig::default())).await?;
     let actual_server_addr = server_registry.registry.bind_addr;
     info!("Server started on {}", actual_server_addr);
 
     // Start client node
     let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let client_registry = GossipRegistryHandle::new(client_addr, vec![], Some(GossipConfig::default())).await?;
+    let client_registry =
+        GossipRegistryHandle::new(client_addr, vec![], Some(GossipConfig::default())).await?;
     let actual_client_addr = client_registry.registry.bind_addr;
     info!("Client started on {}", actual_client_addr);
 
@@ -33,7 +35,7 @@ async fn test_batch_ask_performance() -> Result<()> {
         // Accept connections and handle ask requests
         loop {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            
+
             // In a real implementation, we'd need to handle incoming ask messages
             // For now, this is a placeholder
             // The actual handling would be in the connection pool's message handler
@@ -53,7 +55,10 @@ async fn test_batch_ask_performance() -> Result<()> {
         all_requests.push(request);
     }
 
-    info!("Starting batch ask performance test with {} requests", NUM_REQUESTS);
+    info!(
+        "Starting batch ask performance test with {} requests",
+        NUM_REQUESTS
+    );
 
     // Test 1: Single asks (baseline)
     {
@@ -88,7 +93,7 @@ async fn test_batch_ask_performance() -> Result<()> {
         for batch_idx in 0..(NUM_REQUESTS / BATCH_SIZE) {
             let batch_start = batch_idx * BATCH_SIZE;
             let batch_end = batch_start + BATCH_SIZE;
-            
+
             // Prepare batch request slice
             let batch_requests: Vec<&[u8]> = all_requests[batch_start..batch_end]
                 .iter()
@@ -105,10 +110,18 @@ async fn test_batch_ask_performance() -> Result<()> {
                                 all_responses.push(response);
                                 // Verify response is i+1
                                 if response.len() >= 4 {
-                                    let value = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
+                                    let value = u32::from_be_bytes([
+                                        response[0],
+                                        response[1],
+                                        response[2],
+                                        response[3],
+                                    ]);
                                     let expected = (batch_start + i + 1) as u32;
                                     if value != expected {
-                                        error!("Response mismatch: got {} expected {}", value, expected);
+                                        error!(
+                                            "Response mismatch: got {} expected {}",
+                                            value, expected
+                                        );
                                     }
                                 }
                             }
@@ -140,7 +153,7 @@ async fn test_batch_ask_performance() -> Result<()> {
         for batch_idx in 0..(NUM_REQUESTS / BATCH_SIZE) {
             let batch_start = batch_idx * BATCH_SIZE;
             let batch_end = batch_start + BATCH_SIZE;
-            
+
             // Prepare batch request slice
             let batch_requests: Vec<&[u8]> = all_requests[batch_start..batch_end]
                 .iter()
@@ -148,7 +161,10 @@ async fn test_batch_ask_performance() -> Result<()> {
                 .collect();
 
             // Send batch with optimized API
-            match connection.ask_batch_optimized(&batch_requests, &mut response_buffer).await {
+            match connection
+                .ask_batch_optimized(&batch_requests, &mut response_buffer)
+                .await
+            {
                 Ok(()) => {
                     // Collect responses
                     for receiver in response_buffer.drain(..) {
@@ -190,12 +206,11 @@ async fn test_batch_ask_performance() -> Result<()> {
 
             let task = tokio::spawn(async move {
                 let mut responses = Vec::new();
-                
+
                 // Process in smaller batches within each task
                 for chunk in requests.chunks(BATCH_SIZE / 10) {
-                    let batch_requests: Vec<&[u8]> = chunk.iter()
-                        .map(|req| req.as_slice())
-                        .collect();
+                    let batch_requests: Vec<&[u8]> =
+                        chunk.iter().map(|req| req.as_slice()).collect();
 
                     match connection_clone.ask_batch(&batch_requests).await {
                         Ok(receivers) => {
@@ -208,10 +223,10 @@ async fn test_batch_ask_performance() -> Result<()> {
                         Err(e) => error!("Concurrent batch failed: {}", e),
                     }
                 }
-                
+
                 responses
             });
-            
+
             tasks.push(task);
         }
 
@@ -263,18 +278,19 @@ async fn test_batch_ask_with_timeout() -> Result<()> {
     let connection = client.get_connection(actual_server_addr).await?;
 
     // Test batch ask with timeout
-    let requests: Vec<Vec<u8>> = (0..10)
-        .map(|i| (i as u32).to_be_bytes().to_vec())
-        .collect();
-    
-    let request_refs: Vec<&[u8]> = requests.iter()
-        .map(|r| r.as_slice())
-        .collect();
+    let requests: Vec<Vec<u8>> = (0..10).map(|i| (i as u32).to_be_bytes().to_vec()).collect();
 
-    let results = connection.ask_batch_with_timeout(&request_refs, Duration::from_secs(1)).await?;
+    let request_refs: Vec<&[u8]> = requests.iter().map(|r| r.as_slice()).collect();
 
-    info!("Batch ask with timeout completed: {} results", results.len());
-    
+    let results = connection
+        .ask_batch_with_timeout(&request_refs, Duration::from_secs(1))
+        .await?;
+
+    info!(
+        "Batch ask with timeout completed: {} results",
+        results.len()
+    );
+
     for (i, result) in results.iter().enumerate() {
         match result {
             Ok(response) => info!("Request {} got response of {} bytes", i, response.len()),

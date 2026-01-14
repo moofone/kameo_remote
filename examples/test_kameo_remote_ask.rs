@@ -1,6 +1,6 @@
+use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, PeerId};
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
-use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, PeerId};
 
 #[tokio::main]
 async fn main() {
@@ -46,7 +46,7 @@ async fn main() {
 
     // Get connection and test ask
     let conn = handle_a.get_connection(addr_b).await.unwrap();
-    
+
     println!("Sending ask request...");
     let request = b"ECHO:Hello from Node A";
     match conn.ask_with_timeout(request, Duration::from_secs(2)).await {
@@ -58,7 +58,7 @@ async fn main() {
             println!("❌ Ask failed: {:?}", e);
         }
     }
-    
+
     // Shutdown
     handle_a.shutdown().await;
     handle_b.shutdown().await;

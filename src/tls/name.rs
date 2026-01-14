@@ -19,10 +19,12 @@ pub fn decode(name: &str) -> Option<NodeId> {
     } else {
         return None;
     };
-    
+
     // Decode from base32
-    let bytes = BASE32_DNSSEC.decode(node_part.to_uppercase().as_bytes()).ok()?;
-    
+    let bytes = BASE32_DNSSEC
+        .decode(node_part.to_uppercase().as_bytes())
+        .ok()?;
+
     // Convert to NodeId
     PublicKey::from_bytes(&bytes).ok()
 }
@@ -31,49 +33,51 @@ pub fn decode(name: &str) -> Option<NodeId> {
 mod tests {
     use super::*;
     use crate::SecretKey;
-    
+
     #[test]
     fn test_encode_decode_roundtrip() {
         let secret = SecretKey::generate();
         let node_id = secret.public();
-        
+
         let encoded = encode(&node_id);
         assert!(encoded.ends_with(".kameo.invalid"));
-        
+
         let decoded = decode(&encoded).unwrap();
         assert_eq!(node_id, decoded);
     }
-    
+
     #[test]
     fn test_decode_without_suffix() {
         let secret = SecretKey::generate();
         let node_id = secret.public();
-        
+
         let full_name = encode(&node_id);
         let base32_part = full_name.strip_suffix(".kameo.invalid").unwrap();
-        
+
         // Should decode even without the suffix
         let decoded = decode(base32_part).unwrap();
         assert_eq!(node_id, decoded);
     }
-    
+
     #[test]
     fn test_decode_invalid() {
         assert!(decode("invalid-base32").is_none());
         assert!(decode("").is_none());
         assert!(decode("too-short").is_none());
     }
-    
+
     #[test]
     fn test_dns_name_valid() {
         let secret = SecretKey::generate();
         let node_id = secret.public();
-        
+
         let encoded = encode(&node_id);
-        
+
         // Check it's a valid DNS name (base32 includes digits 2-7)
-        assert!(encoded.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
-        
+        assert!(encoded
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
+
         // Check label length (each part between dots must be < 63 chars)
         for label in encoded.split('.') {
             assert!(label.len() < 63, "DNS label too long: {}", label.len());

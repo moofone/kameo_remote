@@ -1,4 +1,4 @@
-use crate::{current_timestamp, RegistrationPriority, VectorClock, NodeId};
+use crate::{current_timestamp, NodeId, RegistrationPriority, VectorClock};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::net::SocketAddr;
 
@@ -6,38 +6,39 @@ use std::net::SocketAddr;
 /// For remote actors, we need to know their address and which peer is hosting them
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq)]
 pub struct RemoteActorLocation {
-    pub address: String,                 // Use String instead of SocketAddr for rkyv compatibility
-    pub peer_id: crate::PeerId,         // Which peer is hosting this actor
-    pub node_id: NodeId,                // Node ID for vector clock operations
-    pub vector_clock: VectorClock,      // Vector clock for causal ordering
-    pub wall_clock_time: u64,           // Still needed for TTL calculations
+    pub address: String, // Use String instead of SocketAddr for rkyv compatibility
+    pub peer_id: crate::PeerId, // Which peer is hosting this actor
+    pub node_id: NodeId, // Node ID for vector clock operations
+    pub vector_clock: VectorClock, // Vector clock for causal ordering
+    pub wall_clock_time: u64, // Still needed for TTL calculations
     pub priority: RegistrationPriority, // Registration priority for propagation
-    pub local_registration_time: u128,  // Precise registration time for timing measurements
-    pub metadata: Vec<u8>,              // Optional metadata (e.g., serialized ActorId)
+    pub local_registration_time: u128, // Precise registration time for timing measurements
+    pub metadata: Vec<u8>, // Optional metadata (e.g., serialized ActorId)
 }
 
 impl RemoteActorLocation {
     /// Generate a deterministic fallback NodeId from PeerId using SHA-256
     fn generate_fallback_node_id(peer_id: &crate::PeerId) -> NodeId {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         // Create a deterministic hash from the peer_id string representation
         let mut hasher = Sha256::new();
         hasher.update(format!("fallback_node_id:{}", peer_id));
         let hash_result = hasher.finalize();
-        
+
         // Convert the hash to a 32-byte array for NodeId
         let mut node_id_bytes = [0u8; 32];
         node_id_bytes.copy_from_slice(&hash_result[..32]);
-        
+
         NodeId::from_bytes(&node_id_bytes)
             .expect("SHA-256 output should always be valid NodeId bytes")
     }
-    
+
     /// Create a new RemoteActorLocation with peer_id
     pub fn new_with_peer(address: SocketAddr, peer_id: crate::PeerId) -> Self {
         // Convert PeerId to NodeId for vector clock operations
-        let node_id = peer_id.to_verifying_key()
+        let node_id = peer_id
+            .to_verifying_key()
             .ok()
             .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
             .unwrap_or_else(|| {
@@ -47,7 +48,7 @@ impl RemoteActorLocation {
                 );
                 Self::generate_fallback_node_id(&peer_id)
             });
-        
+
         Self {
             address: address.to_string(),
             peer_id,
@@ -62,11 +63,16 @@ impl RemoteActorLocation {
             metadata: Vec::new(),
         }
     }
-    
+
     /// Create a new RemoteActorLocation with peer_id and metadata
-    pub fn new_with_metadata(address: SocketAddr, peer_id: crate::PeerId, metadata: Vec<u8>) -> Self {
+    pub fn new_with_metadata(
+        address: SocketAddr,
+        peer_id: crate::PeerId,
+        metadata: Vec<u8>,
+    ) -> Self {
         // Convert PeerId to NodeId for vector clock operations
-        let node_id = peer_id.to_verifying_key()
+        let node_id = peer_id
+            .to_verifying_key()
             .ok()
             .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
             .unwrap_or_else(|| {
@@ -76,7 +82,7 @@ impl RemoteActorLocation {
                 );
                 Self::generate_fallback_node_id(&peer_id)
             });
-        
+
         Self {
             address: address.to_string(),
             peer_id,
@@ -91,7 +97,7 @@ impl RemoteActorLocation {
             metadata,
         }
     }
-    
+
     /// Temporary constructor for backward compatibility - will be removed
     #[deprecated(note = "Use new_with_peer instead")]
     pub fn new(address: SocketAddr) -> Self {
@@ -102,7 +108,8 @@ impl RemoteActorLocation {
     /// Create with specific priority
     pub fn new_with_priority(address: SocketAddr, priority: RegistrationPriority) -> Self {
         let peer_id = crate::PeerId::new("unknown");
-        let node_id = peer_id.to_verifying_key()
+        let node_id = peer_id
+            .to_verifying_key()
             .ok()
             .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
             .unwrap_or_else(|| {
@@ -112,7 +119,7 @@ impl RemoteActorLocation {
                 );
                 Self::generate_fallback_node_id(&peer_id)
             });
-        
+
         Self {
             address: address.to_string(),
             peer_id,
@@ -131,7 +138,8 @@ impl RemoteActorLocation {
     /// Create with current wall clock time
     pub fn new_with_wall_time(address: SocketAddr, wall_time: u64) -> Self {
         let peer_id = crate::PeerId::new("unknown");
-        let node_id = peer_id.to_verifying_key()
+        let node_id = peer_id
+            .to_verifying_key()
             .ok()
             .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
             .unwrap_or_else(|| {
@@ -141,7 +149,7 @@ impl RemoteActorLocation {
                 );
                 Self::generate_fallback_node_id(&peer_id)
             });
-        
+
         Self {
             address: address.to_string(),
             peer_id,
@@ -164,11 +172,12 @@ impl RemoteActorLocation {
         priority: RegistrationPriority,
     ) -> Self {
         let peer_id = crate::PeerId::new("unknown");
-        let node_id = peer_id.to_verifying_key()
+        let node_id = peer_id
+            .to_verifying_key()
             .ok()
             .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
             .unwrap_or_else(|| NodeId::from_bytes(&[0u8; 32]).unwrap());
-        
+
         Self {
             address: address.to_string(),
             peer_id,
@@ -183,7 +192,7 @@ impl RemoteActorLocation {
             metadata: Vec::new(),
         }
     }
-    
+
     /// Get the socket address as a SocketAddr (for compatibility)
     pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
         self.address.parse()
@@ -208,7 +217,8 @@ mod tests {
     #[test]
     fn test_actor_location_new_with_priority() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let location = RemoteActorLocation::new_with_priority(addr, RegistrationPriority::Immediate);
+        let location =
+            RemoteActorLocation::new_with_priority(addr, RegistrationPriority::Immediate);
 
         assert_eq!(location.address, addr.to_string());
         assert_eq!(location.priority, RegistrationPriority::Immediate);
@@ -247,7 +257,8 @@ mod tests {
     #[test]
     fn test_actor_location_clone() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let location = RemoteActorLocation::new_with_priority(addr, RegistrationPriority::Immediate);
+        let location =
+            RemoteActorLocation::new_with_priority(addr, RegistrationPriority::Immediate);
         let cloned = location.clone();
 
         assert_eq!(location.address, cloned.address);
@@ -265,7 +276,8 @@ mod tests {
 
         // Create with specific values to test equality
         let peer_id = crate::PeerId::new("test_peer");
-        let node_id = peer_id.to_verifying_key()
+        let node_id = peer_id
+            .to_verifying_key()
             .ok()
             .and_then(|key| NodeId::from_bytes(key.as_bytes()).ok())
             .unwrap_or_else(|| NodeId::from_bytes(&[0u8; 32]).unwrap());
@@ -333,10 +345,12 @@ mod tests {
     #[test]
     fn test_actor_location_serialization() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let location = RemoteActorLocation::new_with_priority(addr, RegistrationPriority::Immediate);
+        let location =
+            RemoteActorLocation::new_with_priority(addr, RegistrationPriority::Immediate);
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&location).unwrap();
-        let deserialized: RemoteActorLocation = rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
+        let deserialized: RemoteActorLocation =
+            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
 
         assert_eq!(location.address, deserialized.address);
         assert_eq!(location.wall_clock_time, deserialized.wall_clock_time);
@@ -347,26 +361,27 @@ mod tests {
         );
         assert_eq!(location.metadata, deserialized.metadata);
     }
-    
+
     #[test]
     fn test_actor_location_with_metadata() {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let metadata = vec![0x12, 0x34, 0x56, 0x78];
         let location = RemoteActorLocation::new_with_metadata(
-            addr, 
+            addr,
             crate::PeerId::new("test_peer"),
-            metadata.clone()
+            metadata.clone(),
         );
 
         assert_eq!(location.address, addr.to_string());
         assert_eq!(location.metadata, metadata);
         assert_eq!(location.priority, RegistrationPriority::Normal);
         assert!(location.wall_clock_time > 0);
-        
+
         // Test serialization with metadata
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&location).unwrap();
-        let deserialized: RemoteActorLocation = rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
-        
+        let deserialized: RemoteActorLocation =
+            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
+
         assert_eq!(location.metadata, deserialized.metadata);
     }
 }

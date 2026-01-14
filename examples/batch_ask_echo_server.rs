@@ -29,12 +29,12 @@ async fn run_echo_server(bind_addr: SocketAddr) -> Result<SocketAddr> {
 
 async fn handle_echo_connection(mut stream: TcpStream, peer_addr: SocketAddr) {
     info!("Handling echo connection from {}", peer_addr);
-    
+
     loop {
         // Read length prefix
         let mut len_buf = [0u8; 4];
         match stream.read_exact(&mut len_buf).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 info!("Echo connection closed by peer {}", peer_addr);
                 break;
@@ -44,59 +44,63 @@ async fn handle_echo_connection(mut stream: TcpStream, peer_addr: SocketAddr) {
                 break;
             }
         }
-        
+
         let msg_len = u32::from_be_bytes(len_buf) as usize;
         debug!("Reading message of {} bytes", msg_len);
-        
+
         // Read message
         let mut msg_buf = vec![0u8; msg_len];
         if let Err(e) = stream.read_exact(&mut msg_buf).await {
             error!("Error reading message: {}", e);
             break;
         }
-        
+
         // Parse message header
         if msg_buf.len() < 8 {
             error!("Message too short");
             continue;
         }
-        
+
         let msg_type = msg_buf[0];
         let correlation_id = u16::from_be_bytes([msg_buf[1], msg_buf[2]]);
         // Skip 5 reserved bytes
         let payload = &msg_buf[8..];
-        
+
         if msg_type == MessageType::Ask as u8 {
-            debug!("Received ASK with correlation_id={}, payload_len={}", correlation_id, payload.len());
-            
+            debug!(
+                "Received ASK with correlation_id={}, payload_len={}",
+                correlation_id,
+                payload.len()
+            );
+
             // Parse integer from payload
             if payload.len() >= 4 {
                 let value = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 let response_value = value + 1;
                 debug!("Echo: {} -> {}", value, response_value);
-                
+
                 // Build response
                 let response_payload = response_value.to_be_bytes();
                 let response_size = 8 + response_payload.len();
                 let mut response = Vec::with_capacity(4 + response_size);
-                
+
                 // Length prefix
                 response.extend_from_slice(&(response_size as u32).to_be_bytes());
-                
+
                 // Header: [type:1][correlation_id:2][reserved:5]
                 response.push(MessageType::Response as u8);
                 response.extend_from_slice(&correlation_id.to_be_bytes());
                 response.extend_from_slice(&[0u8; 5]);
-                
+
                 // Payload
                 response.extend_from_slice(&response_payload);
-                
+
                 // Send response
                 if let Err(e) = stream.write_all(&response).await {
                     error!("Error sending response: {}", e);
                     break;
                 }
-                
+
                 if let Err(e) = stream.flush().await {
                     error!("Error flushing: {}", e);
                 }
@@ -119,7 +123,8 @@ async fn main() -> Result<()> {
 
     // Start a gossip registry (for the connection pool)
     let registry_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let registry = GossipRegistryHandle::new(registry_addr, vec![], Some(GossipConfig::default())).await?;
+    let registry =
+        GossipRegistryHandle::new(registry_addr, vec![], Some(GossipConfig::default())).await?;
     info!("Registry started on {}", registry.registry.bind_addr);
 
     // Get connection to echo server
@@ -140,11 +145,17 @@ async fn main() -> Result<()> {
         let start = Instant::now();
         let mut success_count = 0;
 
-        for i in 0..NUM_REQUESTS.min(100) { // Limit individual test to 100 for speed
+        for i in 0..NUM_REQUESTS.min(100) {
+            // Limit individual test to 100 for speed
             match connection.ask(&all_requests[i]).await {
                 Ok(response) => {
                     if response.len() >= 4 {
-                        let value = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
+                        let value = u32::from_be_bytes([
+                            response[0],
+                            response[1],
+                            response[2],
+                            response[3],
+                        ]);
                         if value == (i as u32 + 1) {
                             success_count += 1;
                         } else {
@@ -177,7 +188,7 @@ async fn main() -> Result<()> {
         for batch_idx in 0..(NUM_REQUESTS / BATCH_SIZE) {
             let batch_start = batch_idx * BATCH_SIZE;
             let batch_end = batch_start + BATCH_SIZE;
-            
+
             let batch_requests: Vec<&[u8]> = all_requests[batch_start..batch_end]
                 .iter()
                 .map(|req| req.as_slice())
@@ -190,12 +201,20 @@ async fn main() -> Result<()> {
                             Ok(response) => {
                                 total_responses += 1;
                                 if response.len() >= 4 {
-                                    let value = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
+                                    let value = u32::from_be_bytes([
+                                        response[0],
+                                        response[1],
+                                        response[2],
+                                        response[3],
+                                    ]);
                                     let expected = (batch_start + i + 1) as u32;
                                     if value == expected {
                                         success_count += 1;
                                     } else {
-                                        error!("Wrong response: expected {} got {}", expected, value);
+                                        error!(
+                                            "Wrong response: expected {} got {}",
+                                            expected, value
+                                        );
                                     }
                                 }
                             }
@@ -239,9 +258,8 @@ async fn main() -> Result<()> {
 
                 // Process in smaller batches
                 for (chunk_idx, chunk) in task_requests.chunks(50).enumerate() {
-                    let batch_requests: Vec<&[u8]> = chunk.iter()
-                        .map(|req| req.as_slice())
-                        .collect();
+                    let batch_requests: Vec<&[u8]> =
+                        chunk.iter().map(|req| req.as_slice()).collect();
 
                     match connection_clone.ask_batch(&batch_requests).await {
                         Ok(receivers) => {
@@ -249,7 +267,12 @@ async fn main() -> Result<()> {
                                 if let Ok(response) = receiver.await {
                                     total_count += 1;
                                     if response.len() >= 4 {
-                                        let value = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
+                                        let value = u32::from_be_bytes([
+                                            response[0],
+                                            response[1],
+                                            response[2],
+                                            response[3],
+                                        ]);
                                         let expected = (task_start + chunk_idx * 50 + i + 1) as u32;
                                         if value == expected {
                                             success_count += 1;
@@ -261,10 +284,10 @@ async fn main() -> Result<()> {
                         Err(e) => error!("Concurrent batch failed: {}", e),
                     }
                 }
-                
+
                 (success_count, total_count)
             });
-            
+
             tasks.push(task);
         }
 
@@ -292,7 +315,7 @@ async fn main() -> Result<()> {
     }
 
     info!("\n=== Performance Test Complete ===");
-    
+
     // Keep running for manual testing
     info!("Server continues running. Press Ctrl+C to exit.");
     tokio::signal::ctrl_c().await?;

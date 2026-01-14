@@ -898,7 +898,10 @@ impl LockFreeStreamHandle {
     /// This eliminates copying payload data into frame buffer - optimal for streaming
     pub fn write_bytes_vectored(&self, header: bytes::Bytes, payload: bytes::Bytes) -> Result<()> {
         // Create vectored command that preserves both header and payload as separate Bytes
-        let command = VectoredWriteCommand { header, payload };
+        let command = VectoredWriteCommand {
+            header,
+            payload,
+        };
 
         // Try to send via streaming channel first for vectored operations
         match self
@@ -3243,6 +3246,32 @@ impl ConnectionPool {
     }
 }
 
+/// Start a persistent connection handler in the background
+fn start_persistent_connection_reader(
+    reader: tokio::net::tcp::OwnedReadHalf,
+    writer: Option<tokio::net::tcp::OwnedWriteHalf>,
+    peer_addr: SocketAddr,
+    registry_weak: Option<std::sync::Weak<GossipRegistry>>,
+) {
+    tokio::spawn(async move {
+        handle_persistent_connection_reader(reader, writer, peer_addr, registry_weak).await;
+    });
+}
+
+/// Handle an incoming persistent connection - processes messages with direct TCP
+pub(crate) async fn handle_incoming_persistent_connection(
+    stream: TcpStream,
+    _rx: mpsc::Receiver<Vec<u8>>,
+    _peer_addr: SocketAddr,
+    listening_addr: SocketAddr,
+    registry_weak: Option<std::sync::Weak<GossipRegistry>>,
+) {
+    let (reader, writer) = stream.into_split();
+
+    // Pass the writer along to be stored when we know the node ID
+    handle_persistent_connection_reader(reader, Some(writer), listening_addr, registry_weak).await;
+}
+
 /// Handle persistent connection reader - only reads messages, no channels
 pub(crate) async fn handle_persistent_connection_reader(
     mut reader: tokio::net::tcp::OwnedReadHalf,
@@ -3986,6 +4015,327 @@ pub(crate) async fn handle_persistent_connection_reader(
             if let Err(e) = registry.handle_peer_connection_failure(peer_addr).await {
                 warn!(error = %e, peer = %peer_addr, "CONNECTION_POOL: Failed to handle peer connection failure");
             }
+        }
+    }
+}
+
+/// Implementation of persistent connection handling
+async fn handle_persistent_connection_impl(
+    stream: TcpStream,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    peer_addr: SocketAddr, // For outgoing: the peer's address. For incoming: the sender's listening address
+    registry_weak: Option<std::sync::Weak<GossipRegistry>>,
+) {
+    use std::io;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    info!(peer = %peer_addr, registry = ?registry_weak.is_some(), "persistent connection handler started");
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    // Create a channel to signal EOF to write task
+    let (eof_tx, mut eof_rx) = mpsc::channel::<()>(1);
+
+    // Clone registry_weak for the read task
+    let registry_weak_read = registry_weak.clone();
+
+    // Spawn read task
+    let read_task = tokio::spawn(async move {
+        let mut partial_msg_buf = Vec::with_capacity(TCP_BUFFER_SIZE / 128); // Pre-allocate for common message sizes
+        let mut read_buf = vec![0u8; TCP_BUFFER_SIZE / 128]; // Read buffer sized from master constant
+
+        loop {
+            match reader.read(&mut read_buf).await {
+                Ok(0) => {
+                    debug!(peer = %peer_addr, "🔴 CONNECTION POOL: Peer closed write (EOF) - half-closed");
+                    // Signal EOF to write task
+                    let _ = eof_tx.send(()).await;
+                    return io::Result::Ok(());
+                }
+                Ok(n) => {
+                    // Process the data we just read
+                    partial_msg_buf.extend_from_slice(&read_buf[..n]);
+
+                    // Try to process complete messages
+                    while partial_msg_buf.len() >= 4 {
+                        // All messages now have 4-byte length prefix
+                        let len = u32::from_be_bytes([
+                            partial_msg_buf[0],
+                            partial_msg_buf[1],
+                            partial_msg_buf[2],
+                            partial_msg_buf[3],
+                        ]) as usize;
+
+                        if len > 100 * 1024 * 1024 {
+                            warn!(peer = %peer_addr, "message too large: {}", len);
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "message too large",
+                            ));
+                        }
+
+                        let total_len = 4 + len;
+                        if partial_msg_buf.len() >= total_len {
+                            let msg_data = &partial_msg_buf[4..total_len];
+
+                            // Check if this is an Ask/Response message by looking at first byte
+                            if msg_data.len() >= 1 {
+                                if let Some(msg_type) = crate::MessageType::from_byte(msg_data[0]) {
+                                    // This is an Ask/Response message
+                                    if msg_data.len() < 8 {
+                                        warn!(peer = %peer_addr, "Ask/Response message too small");
+                                        partial_msg_buf.drain(..total_len);
+                                        continue;
+                                    }
+
+                                    let correlation_id =
+                                        u16::from_be_bytes([msg_data[1], msg_data[2]]);
+                                    let payload = &msg_data[8..];
+
+                                    match msg_type {
+                                        crate::MessageType::Ask => {
+                                            // Handle incoming Ask requests for testing
+                                            #[cfg(feature = "test-helpers")]
+                                            {
+                                                if let Some(ref registry_weak) = registry_weak_read
+                                                {
+                                                    if let Some(registry) = registry_weak.upgrade()
+                                                    {
+                                                        let conn = {
+                                                            let pool = registry
+                                                                .connection_pool
+                                                                .lock()
+                                                                .await;
+                                                            pool.connections.get(&peer_addr).map(
+                                                                |conn_ref| conn_ref.value().clone(),
+                                                            )
+                                                        };
+
+                                                        if let Some(conn) = conn {
+                                                            // Process the request and generate response
+                                                            let request_str =
+                                                                String::from_utf8_lossy(payload);
+                                                            let response_data =
+                                                                process_mock_request(&request_str);
+
+                                                            // Build response message
+                                                            let total_size =
+                                                                8 + response_data.len();
+                                                            let mut msg =
+                                                                bytes::BytesMut::with_capacity(
+                                                                    4 + total_size,
+                                                                );
+
+                                                            // Length prefix
+                                                            msg.extend_from_slice(
+                                                                &(total_size as u32).to_be_bytes(),
+                                                            );
+
+                                                            // Header: [type:1][corr_id:2][reserved:5]
+                                                            msg.put_u8(
+                                                                crate::MessageType::Response as u8,
+                                                            );
+                                                            msg.extend_from_slice(
+                                                                &correlation_id.to_be_bytes(),
+                                                            );
+                                                            msg.extend_from_slice(&[0u8; 5]);
+                                                            msg.extend_from_slice(&response_data);
+
+                                                            // Send response back through stream handle
+                                                            if let Some(ref stream_handle) =
+                                                                conn.stream_handle
+                                                            {
+                                                                if let Err(e) = stream_handle
+                                                                    .write_bytes_nonblocking(
+                                                                        msg.freeze(),
+                                                                    )
+                                                                {
+                                                                    warn!("Failed to send mock response: {}", e);
+                                                                } else {
+                                                                    debug!("Sent mock response for correlation_id {}", correlation_id);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            #[cfg(not(feature = "test-helpers"))]
+                                            {
+                                                warn!(peer = %peer_addr, correlation_id = correlation_id, "Received Ask request - not implemented in production");
+                                            }
+                                        }
+                                        crate::MessageType::Response => {
+                                            // Handle incoming response
+                                            if let Some(ref registry_weak) = registry_weak_read {
+                                                if let Some(registry) = registry_weak.upgrade() {
+                                                    let pool =
+                                                        registry.connection_pool.lock().await;
+                                                    let mut delivered = false;
+
+                                                    // Look up peer ID for this address
+                                                    if let Some(peer_id) = pool
+                                                        .addr_to_peer_id
+                                                        .get(&peer_addr)
+                                                        .map(|e| e.clone())
+                                                    {
+                                                        // Use shared correlation tracker
+                                                        if let Some(correlation) =
+                                                            pool.correlation_trackers.get(&peer_id)
+                                                        {
+                                                            if correlation
+                                                                .has_pending(correlation_id)
+                                                            {
+                                                                correlation.complete(
+                                                                    correlation_id,
+                                                                    payload.to_vec(),
+                                                                );
+                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, "Delivered response to shared correlation tracker");
+                                                                delivered = true;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if !delivered {
+                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, "Could not find pending request for correlation_id");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        crate::MessageType::Gossip => {
+                                            // Gossip messages can arrive here, just ignore them
+                                        }
+                                        crate::MessageType::ActorTell
+                                        | crate::MessageType::ActorAsk => {
+                                            // These can arrive here too, just process them normally
+                                        }
+                                        crate::MessageType::StreamStart
+                                        | crate::MessageType::StreamData
+                                        | crate::MessageType::StreamEnd => {
+                                            // Streaming messages processed above
+                                        }
+                                    }
+
+                                    partial_msg_buf.drain(..total_len);
+                                    continue;
+                                }
+                            }
+
+                            // This is a gossip protocol message
+                            match rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(msg_data)
+                            {
+                                Ok(msg) => {
+                                    if let Some(ref registry_weak) = registry_weak_read {
+                                        if let Some(registry) = registry_weak.upgrade() {
+                                            // Direct inline processing for minimum latency
+                                            if let Err(e) =
+                                                handle_incoming_message(registry, peer_addr, msg)
+                                                    .await
+                                            {
+                                                warn!(peer = %peer_addr, error = %e, "failed to handle incoming message");
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(peer = %peer_addr, error = %e, "failed to deserialize message");
+                                }
+                            }
+
+                            // Remove processed message from buffer AFTER processing
+                            partial_msg_buf.drain(..total_len);
+                        } else {
+                            // Need more data for complete message
+                            break;
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    warn!(peer = %peer_addr, error = %e, "error reading from socket");
+                    return Err(e);
+                }
+            }
+        }
+    });
+
+    // Spawn write task
+    let write_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // Check for EOF signal
+                _ = eof_rx.recv() => {
+                    debug!(peer = %peer_addr, "🔴 CONNECTION POOL: EOF signal received, shutting down write task");
+                    return io::Result::Ok(());
+                }
+                // Check for messages to send
+                msg = rx.recv() => {
+                    match msg {
+                        Some(data) => {
+                            match writer.write_all(&data).await {
+                                Ok(_) => {
+                                    // CRITICAL: Flush immediately to avoid TCP buffering delays
+                                    if let Err(e) = writer.flush().await {
+                                        warn!(peer = %peer_addr, error = %e, "failed to flush TCP socket");
+                                        return Err(e);
+                                    }
+                                    debug!(peer = %peer_addr, bytes = data.len(), "📤 CONNECTION POOL: Sent and flushed message");
+                                }
+                                Err(ref e) if e.kind() == io::ErrorKind::BrokenPipe
+                                          || e.kind() == io::ErrorKind::ConnectionReset => {
+                                    debug!(peer = %peer_addr, "🔴 CONNECTION POOL: Peer closed read - write failed");
+                                    return io::Result::Ok(());
+                                }
+                                Err(e) => {
+                                    warn!(peer = %peer_addr, error = %e, "failed to write");
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        None => {
+                            debug!(peer = %peer_addr, "🔴 CONNECTION POOL: channel closed, shutting down write task");
+                            return io::Result::Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for both tasks to complete
+    let (read_res, write_res) = tokio::join!(read_task, write_task);
+
+    // Log results
+    match read_res {
+        Ok(Ok(_)) => info!(peer = %peer_addr, "read task completed successfully"),
+        Ok(Err(e)) => warn!(peer = %peer_addr, error = %e, "read task failed"),
+        Err(e) => warn!(peer = %peer_addr, error = %e, "read task panicked"),
+    }
+
+    match write_res {
+        Ok(Ok(_)) => info!(peer = %peer_addr, "write task completed successfully"),
+        Ok(Err(e)) => warn!(peer = %peer_addr, error = %e, "write task failed"),
+        Err(e) => warn!(peer = %peer_addr, error = %e, "write task panicked"),
+    }
+
+    // Notify of disconnection
+    info!(peer = %peer_addr, "persistent connection lost, triggering failure handling");
+
+    // Mark connection as disconnected in the pool
+    if let Some(ref registry_weak) = registry_weak {
+        if let Some(registry) = registry_weak.upgrade() {
+            // First mark disconnected in pool
+            {
+                let mut pool = registry.connection_pool.lock().await;
+                pool.mark_disconnected(peer_addr);
+            }
+
+            // Then handle the failure in a separate task
+            let failed_addr = peer_addr;
+            tokio::spawn(async move {
+                if let Err(e) = registry.handle_peer_connection_failure(failed_addr).await {
+                    warn!(error = %e, peer = %failed_addr, "failed to handle peer connection failure");
+                }
+            });
         }
     }
 }

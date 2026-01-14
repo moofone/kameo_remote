@@ -86,7 +86,10 @@ impl Default for GossipConfig {
             key_pair: None,
             gossip_interval: Duration::from_secs(DEFAULT_GOSSIP_INTERVAL_SECS),
             max_gossip_peers: 3,
-            actor_ttl: Duration::from_secs(300),
+            // Increase default actor TTL to avoid premature expiry of distributed actor discovery
+            // This prevents cases where peers stop discovering actors after a few minutes of idle time.
+            // If needed, this can still be overridden by callers providing a custom GossipConfig.
+            actor_ttl: Duration::from_secs(86_400),
             cleanup_interval: Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS),
             connection_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(5),
@@ -100,7 +103,7 @@ impl Default for GossipConfig {
             checkout_timeout: Duration::from_secs(60),
             vector_clock_gc_frequency: Duration::from_secs(300), // 5 minutes
             vector_clock_retention_period: Duration::from_secs(7200), // 2 hours (was 1 hour)
-            max_vector_clock_size: 1000, // Compact after 1000 entries
+            max_vector_clock_size: 1000,                         // Compact after 1000 entries
             small_cluster_threshold: DEFAULT_SMALL_CLUSTER_THRESHOLD,
             bootstrap_readiness_timeout: Duration::from_secs(30),
             bootstrap_readiness_check_interval: Duration::from_millis(100),

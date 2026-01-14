@@ -35,24 +35,26 @@ async fn test_node_name_based_connections() {
     println!("Node A started at {}", node_a_addr);
 
     // Start Node B
-    let node_b = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse().unwrap(),
-        vec![],
-        Some(config_b),
-    )
-    .await
-    .expect("Failed to create node B");
+    let node_b = GossipRegistryHandle::new("127.0.0.1:0".parse().unwrap(), vec![], Some(config_b))
+        .await
+        .expect("Failed to create node B");
 
     let node_b_addr = node_b.registry.bind_addr;
     println!("Node B started at {}", node_b_addr);
-    
+
     // Node B: Add node A as peer and connect
     let peer_a = node_b.add_peer(&PeerId::new("test_node_a")).await;
-    peer_a.connect(&node_a_addr).await.expect("Failed to connect to node A");
-    
+    peer_a
+        .connect(&node_a_addr)
+        .await
+        .expect("Failed to connect to node A");
+
     // Node A: Add node B as peer and connect
     let peer_b = node_a.add_peer(&PeerId::new("test_node_b")).await;
-    peer_b.connect(&node_b_addr).await.expect("Failed to connect to node B");
+    peer_b
+        .connect(&node_b_addr)
+        .await
+        .expect("Failed to connect to node B");
 
     // Give nodes time to connect
     sleep(Duration::from_secs(2)).await;
@@ -63,7 +65,7 @@ async fn test_node_name_based_connections() {
         println!("Node B pool state:");
         println!("  Total connections: {}", pool.connection_count());
         println!("  Node mappings: {}", pool.node_id_to_addr.len());
-        
+
         // Verify Node B knows about Node A
         assert!(pool.node_id_to_addr.contains_key("test_node_a"));
         assert_eq!(pool.connection_count(), 1);
@@ -75,7 +77,7 @@ async fn test_node_name_based_connections() {
         println!("Node A pool state:");
         println!("  Total connections: {}", pool.connection_count());
         println!("  Node mappings: {}", pool.node_id_to_addr.len());
-        
+
         // After exchange, Node A should know about Node B
         assert!(pool.node_id_to_addr.contains_key("test_node_b"));
     }

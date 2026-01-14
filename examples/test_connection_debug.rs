@@ -42,18 +42,24 @@ async fn main() {
     // Monitor stats
     for i in 0..10 {
         sleep(Duration::from_secs(2)).await;
-        
+
         let stats_a = handle_a.stats().await;
         let stats_b = handle_b.stats().await;
-        
+
         println!("\n=== Round {} ===", i + 1);
-        println!("Node A - Active: {}, Failed: {}", stats_a.active_peers, stats_a.failed_peers);
-        println!("Node B - Active: {}, Failed: {}", stats_b.active_peers, stats_b.failed_peers);
-        
+        println!(
+            "Node A - Active: {}, Failed: {}",
+            stats_a.active_peers, stats_a.failed_peers
+        );
+        println!(
+            "Node B - Active: {}, Failed: {}",
+            stats_b.active_peers, stats_b.failed_peers
+        );
+
         // Check connections
         let pool_a = handle_a.registry.connection_pool.lock().await;
         let pool_b = handle_b.registry.connection_pool.lock().await;
-        
+
         println!("Node A connections: {}", pool_a.connection_count());
         println!("Node B connections: {}", pool_b.connection_count());
     }

@@ -1,5 +1,5 @@
 //! Standard tokio-based stream writer implementation
-//! 
+//!
 //! Used on platforms without io_uring support (macOS, Windows, older Linux)
 
 use super::{StreamWriter, WriteCommand};
@@ -20,9 +20,7 @@ impl StandardStreamWriter {
         // Use TCP_BUFFER_SIZE from master constant - no more magic numbers!
         // This ensures the BufWriter can handle messages up to the streaming threshold
         let stream = BufWriter::with_capacity(TCP_BUFFER_SIZE, stream);
-        Self {
-            stream,
-        }
+        Self { stream }
     }
 }
 
@@ -32,7 +30,7 @@ impl StreamWriter for StandardStreamWriter {
         if commands.is_empty() {
             return Ok(0);
         }
-        
+
         // Use vectored I/O for efficient batch writing
         if commands.len() > 1 {
             // Create IoSlice array for vectored write - no allocation, just references
@@ -40,7 +38,7 @@ impl StreamWriter for StandardStreamWriter {
                 .iter()
                 .map(|cmd| std::io::IoSlice::new(&cmd.data))
                 .collect();
-                
+
             // Write all slices in one syscall
             self.stream.write_vectored(&slices).await
         } else {
@@ -49,11 +47,11 @@ impl StreamWriter for StandardStreamWriter {
             Ok(commands[0].data.len())
         }
     }
-    
+
     async fn flush(&mut self) -> Result<()> {
         self.stream.flush().await
     }
-    
+
     fn supports_zero_copy(&self) -> bool {
         false
     }

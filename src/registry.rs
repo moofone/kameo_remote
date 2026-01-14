@@ -13,8 +13,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    connection_pool::ConnectionPool, current_timestamp, RemoteActorLocation, GossipConfig, GossipError,
-    RegistrationPriority, Result,
+    connection_pool::ConnectionPool, current_timestamp, GossipConfig, GossipError,
+    RegistrationPriority, RemoteActorLocation, Result,
 };
 
 /// Callback trait for handling incoming actor messages
@@ -42,7 +42,7 @@ pub enum RegistryChange {
     ActorRemoved {
         name: String,
         vector_clock: crate::VectorClock,
-        removing_node_id: crate::NodeId,  // Node that performed the removal
+        removing_node_id: crate::NodeId, // Node that performed the removal
         priority: RegistrationPriority,
     },
 }
@@ -54,8 +54,8 @@ pub struct RegistryDelta {
     pub current_sequence: u64,
     pub changes: Vec<RegistryChange>,
     pub sender_peer_id: crate::PeerId, // Peer's unique identifier
-    pub wall_clock_time: u64, // For debugging/monitoring only
-    pub precise_timing_nanos: u64, // High precision timing for latency measurements
+    pub wall_clock_time: u64,          // For debugging/monitoring only
+    pub precise_timing_nanos: u64,     // High precision timing for latency measurements
 }
 
 /// Peer health status from a reporter's perspective
@@ -97,7 +97,7 @@ pub enum RegistryMessage {
     FullSync {
         local_actors: Vec<(String, RemoteActorLocation)>, // Use Vec instead of HashMap for rkyv compatibility
         known_actors: Vec<(String, RemoteActorLocation)>, // Use Vec instead of HashMap for rkyv compatibility
-        sender_peer_id: crate::PeerId, // Peer's unique identifier
+        sender_peer_id: crate::PeerId,                    // Peer's unique identifier
         sequence: u64,
         wall_clock_time: u64,
     },
@@ -105,7 +105,7 @@ pub enum RegistryMessage {
     FullSyncResponse {
         local_actors: Vec<(String, RemoteActorLocation)>, // Use Vec instead of HashMap for rkyv compatibility
         known_actors: Vec<(String, RemoteActorLocation)>, // Use Vec instead of HashMap for rkyv compatibility
-        sender_peer_id: crate::PeerId, // Peer's unique identifier
+        sender_peer_id: crate::PeerId,                    // Peer's unique identifier
         sequence: u64,
         wall_clock_time: u64,
     },
@@ -116,10 +116,7 @@ pub enum RegistryMessage {
         timestamp: u64,
     },
     /// Lightweight ACK for immediate registrations
-    ImmediateAck {
-        actor_name: String,
-        success: bool,
-    },
+    ImmediateAck { actor_name: String, success: bool },
     /// Query for peer health consensus
     PeerHealthQuery {
         sender: crate::PeerId,
@@ -157,7 +154,7 @@ pub struct RegistryStats {
 pub struct PeerInfo {
     pub address: SocketAddr,              // Listening address
     pub peer_address: Option<SocketAddr>, // Actual connection address (may be NATed)
-    pub node_id: Option<crate::NodeId>,   // NodeId for TLS verification (optional for backward compat)
+    pub node_id: Option<crate::NodeId>, // NodeId for TLS verification (optional for backward compat)
     pub failures: usize,
     pub last_attempt: u64,
     pub last_success: u64,
@@ -225,10 +222,10 @@ pub struct GossipState {
 pub struct GossipRegistry {
     // Immutable config
     pub bind_addr: SocketAddr,
-    pub peer_id: crate::PeerId,  // Unique peer identifier (public key)
+    pub peer_id: crate::PeerId, // Unique peer identifier (public key)
     pub config: GossipConfig,
     pub start_time: u64,
-    
+
     // Optional TLS configuration for encrypted connections
     pub tls_config: Option<Arc<crate::tls::TlsConfig>>,
 
@@ -236,13 +233,13 @@ pub struct GossipRegistry {
     pub actor_state: Arc<RwLock<ActorState>>,
     pub gossip_state: Arc<Mutex<GossipState>>,
     pub connection_pool: Arc<Mutex<ConnectionPool>>,
-    
+
     // Actor message handler callback
     pub actor_message_handler: Arc<Mutex<Option<Arc<dyn ActorMessageHandler>>>>,
-    
+
     // Stream assembly state
     pub stream_assemblies: Arc<Mutex<HashMap<u64, StreamAssembly>>>,
-    
+
     // Pending ACKs for synchronous registrations
     pub pending_acks: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
@@ -258,19 +255,21 @@ pub struct StreamAssembly {
 impl StreamAssembly {
     /// Check if the stream assembly is complete (all chunks received with no gaps)
     pub fn is_complete(&self) -> bool {
-        let expected_chunks = (self.header.total_size + crate::connection_pool::STREAM_CHUNK_SIZE as u64 - 1) / crate::connection_pool::STREAM_CHUNK_SIZE as u64;
-        
+        let expected_chunks =
+            (self.header.total_size + crate::connection_pool::STREAM_CHUNK_SIZE as u64 - 1)
+                / crate::connection_pool::STREAM_CHUNK_SIZE as u64;
+
         if self.chunks.len() as u64 != expected_chunks {
             return false;
         }
-        
+
         // Verify all indices 0..N-1 are present (no gaps)
         for i in 0..expected_chunks as u32 {
             if !self.chunks.contains_key(&i) {
                 return false;
             }
         }
-        
+
         true
     }
 }
@@ -279,10 +278,12 @@ impl GossipRegistry {
     /// Create a new gossip registry
     pub fn new(bind_addr: SocketAddr, config: GossipConfig) -> Self {
         // Use public key from config, or generate one based on bind address
-        let peer_id = config.key_pair.as_ref()
+        let peer_id = config
+            .key_pair
+            .as_ref()
             .map(|kp| kp.peer_id())
             .unwrap_or_else(|| crate::PeerId::new(format!("node_{}", bind_addr.port())));
-        
+
         info!(
             bind_addr = %bind_addr,
             peer_id = %peer_id,
@@ -327,8 +328,9 @@ impl GossipRegistry {
     /// Enable TLS for secure connections
     /// This must be called before starting the registry to enable TLS
     pub fn enable_tls(&mut self, secret_key: crate::SecretKey) -> Result<()> {
-        let tls_config = crate::tls::TlsConfig::new(secret_key)
-            .map_err(|e| GossipError::TlsConfigError(format!("Failed to create TLS config: {}", e)))?;
+        let tls_config = crate::tls::TlsConfig::new(secret_key).map_err(|e| {
+            GossipError::TlsConfigError(format!("Failed to create TLS config: {}", e))
+        })?;
         self.tls_config = Some(Arc::new(tls_config));
         info!("TLS enabled for gossip registry");
         Ok(())
@@ -364,7 +366,9 @@ impl GossipRegistry {
                 payload_len = payload.len(),
                 "forwarding actor message to handler"
             );
-            handler.handle_actor_message(actor_id, type_hash, payload, correlation_id).await
+            handler
+                .handle_actor_message(actor_id, type_hash, payload, correlation_id)
+                .await
         } else {
             warn!(
                 actor_id = %actor_id,
@@ -379,7 +383,7 @@ impl GossipRegistry {
     // pub async fn add_bootstrap_peers(&self, bootstrap_peers: Vec<SocketAddr>) {
     //     let mut gossip_state = self.gossip_state.lock().await;
     //     let current_time = current_timestamp();
-        
+
     //     for peer in bootstrap_peers {
     //         if peer != self.bind_addr {
     //             gossip_state.peers.insert(
@@ -406,13 +410,13 @@ impl GossipRegistry {
     //         "added bootstrap peers (all initially offline)"
     //     );
     // }
-    
+
     // /// Add bootstrap peers with their expected node names
     // pub async fn add_bootstrap_peers_with_names(&self, bootstrap_peers: Vec<crate::PeerConfig>) {
     //     let mut gossip_state = self.gossip_state.lock().await;
     //     let pool = self.connection_pool.lock().await;
     //     let current_time = current_timestamp();
-        
+
     //     for peer_config in bootstrap_peers {
     //         if peer_config.addr != self.bind_addr {
     //             // Store the peer with its address
@@ -432,7 +436,7 @@ impl GossipRegistry {
     //                     last_failure_time: Some(current_time),
     //                 },
     //             );
-                
+
     //             // Map the expected node name to this address
     //             pool.update_node_address(&peer_config.node_name, peer_config.addr);
     //             info!("Bootstrap peer: {} -> {}", peer_config.node_name, peer_config.addr);
@@ -448,9 +452,13 @@ impl GossipRegistry {
     pub async fn add_peer(&self, peer_addr: SocketAddr) {
         self.add_peer_with_node_id(peer_addr, None).await;
     }
-    
+
     /// Add a new peer with NodeId for TLS verification
-    pub async fn add_peer_with_node_id(&self, peer_addr: SocketAddr, node_id: Option<crate::NodeId>) {
+    pub async fn add_peer_with_node_id(
+        &self,
+        peer_addr: SocketAddr,
+        node_id: Option<crate::NodeId>,
+    ) {
         debug!(peer = %peer_addr, self_addr = %self.bind_addr, has_node_id = node_id.is_some(), "add_peer_with_node_id called");
         if peer_addr != self.bind_addr {
             let mut gossip_state = self.gossip_state.lock().await;
@@ -482,8 +490,8 @@ impl GossipRegistry {
                     last_failure_time: None,
                 });
                 debug!(
-                    peer = %peer_addr, 
-                    peers_count = gossip_state.peers.len(), 
+                    peer = %peer_addr,
+                    peers_count = gossip_state.peers.len(),
                     has_node_id = node_id.is_some(),
                     "📌 Added new peer (listening address)"
                 );
@@ -520,7 +528,7 @@ impl GossipRegistry {
         self.register_actor_with_priority(name, location, RegistrationPriority::Normal)
             .await
     }
-    
+
     /// Register actor with confirmation from at least one peer
     /// Returns when first peer ACKs or timeout
     pub async fn register_actor_sync(
@@ -532,39 +540,35 @@ impl GossipRegistry {
         // Step 1: Check if we have any healthy peers
         let peer_count = {
             let gossip_state = self.gossip_state.lock().await;
-            gossip_state.peers.iter()
+            gossip_state
+                .peers
+                .iter()
                 .filter(|(_, info)| info.failures < self.config.max_peer_failures)
                 .count()
         };
-        
+
         if peer_count == 0 {
             // No peers - just do local registration and return
-            self.register_actor_with_priority(
-                name,
-                location,
-                RegistrationPriority::Immediate
-            ).await?;
-            
+            self.register_actor_with_priority(name, location, RegistrationPriority::Immediate)
+                .await?;
+
             info!("Sync registration completed immediately (no peers to confirm)");
             return Ok(());
         }
-        
+
         // Have peers - wait for ACK from at least one
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        
+
         // Store pending ACK handler
         {
             let mut pending = self.pending_acks.lock().await;
             pending.insert(name.clone(), ack_tx);
         }
-        
+
         // Register with immediate priority (triggers instant gossip to peers)
-        self.register_actor_with_priority(
-            name.clone(),
-            location,
-            RegistrationPriority::Immediate
-        ).await?;
-        
+        self.register_actor_with_priority(name.clone(), location, RegistrationPriority::Immediate)
+            .await?;
+
         // Wait for first ACK or timeout
         match tokio::time::timeout(timeout, ack_rx).await {
             Ok(Ok(success)) if success => {
@@ -572,8 +576,14 @@ impl GossipRegistry {
                 Ok(())
             }
             Ok(Ok(_)) => {
-                warn!("Sync registration failed according to peer for actor '{}'", name);
-                Err(GossipError::Network(io::Error::new(io::ErrorKind::Other, "Peer rejected registration")))
+                warn!(
+                    "Sync registration failed according to peer for actor '{}'",
+                    name
+                );
+                Err(GossipError::Network(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Peer rejected registration",
+                )))
             }
             Ok(Err(_)) => {
                 // Channel closed unexpectedly
@@ -589,7 +599,7 @@ impl GossipRegistry {
             }
         }
     }
-    
+
     /// Get the current number of actors in the registry (both local and known)
     pub async fn get_actor_count(&self) -> usize {
         let actor_state = self.actor_state.read().await;
@@ -620,10 +630,10 @@ impl GossipRegistry {
             {
                 return Err(GossipError::ActorAlreadyExists(name));
             }
-            
+
             // Increment vector clock inside the lock for atomicity
             location.vector_clock.increment(location.node_id);
-            
+
             actor_state
                 .local_actors
                 .insert(name.clone(), location.clone());
@@ -708,7 +718,7 @@ impl GossipRegistry {
                 }
 
                 // Create a new vector clock for the removal with proper causality
-                let mut removal_clock = location.vector_clock.clone();
+                let removal_clock = location.vector_clock.clone();
                 removal_clock.increment(self.peer_id.to_node_id());
 
                 let change = RegistryChange::ActorRemoved {
@@ -883,30 +893,36 @@ impl GossipRegistry {
                         let should_apply = match actor_state.known_actors.get(name.as_str()) {
                             Some(existing_location) => {
                                 // Use vector clock for causal ordering
-                                match location.vector_clock.compare(&existing_location.vector_clock) {
+                                match location
+                                    .vector_clock
+                                    .compare(&existing_location.vector_clock)
+                                {
                                     crate::ClockOrdering::After => true,
                                     crate::ClockOrdering::Concurrent => {
                                         // For concurrent updates, use deterministic tiebreaker
                                         // Hash of (actor_name + address + wall_clock) ensures consistency
                                         use std::hash::{Hash, Hasher};
-                                        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+                                        let mut hasher1 =
+                                            std::collections::hash_map::DefaultHasher::new();
                                         name.hash(&mut hasher1);
                                         location.address.hash(&mut hasher1);
                                         location.wall_clock_time.hash(&mut hasher1);
                                         let hash1 = hasher1.finish();
-                                        
-                                        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+
+                                        let mut hasher2 =
+                                            std::collections::hash_map::DefaultHasher::new();
                                         name.hash(&mut hasher2);
                                         existing_location.address.hash(&mut hasher2);
                                         existing_location.wall_clock_time.hash(&mut hasher2);
                                         let hash2 = hasher2.finish();
-                                        
+
                                         // Use hash comparison for deterministic resolution
                                         // If hashes are equal (extremely rare), prefer newer by wall clock
                                         if hash1 != hash2 {
                                             hash1 > hash2
                                         } else {
-                                            location.wall_clock_time > existing_location.wall_clock_time
+                                            location.wall_clock_time
+                                                > existing_location.wall_clock_time
                                         }
                                     }
                                     _ => false, // Keep existing for Before or Equal
@@ -960,7 +976,12 @@ impl GossipRegistry {
                             }
                         }
                     }
-                    RegistryChange::ActorRemoved { name, vector_clock, removing_node_id, priority: _ } => {
+                    RegistryChange::ActorRemoved {
+                        name,
+                        vector_clock,
+                        removing_node_id,
+                        priority: _,
+                    } => {
                         // Don't remove local actors - early exit
                         if actor_state.local_actors.contains_key(name.as_str()) {
                             debug!(
@@ -987,18 +1008,20 @@ impl GossipRegistry {
                                         // For concurrent removals, use deterministic tiebreaker
                                         // Removal should win if it's "newer" based on hash
                                         use std::hash::{Hash, Hasher};
-                                        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+                                        let mut hasher1 =
+                                            std::collections::hash_map::DefaultHasher::new();
                                         name.hash(&mut hasher1);
                                         removing_node_id.hash(&mut hasher1);
                                         vector_clock.hash(&mut hasher1);
                                         let hash1 = hasher1.finish();
-                                        
-                                        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+
+                                        let mut hasher2 =
+                                            std::collections::hash_map::DefaultHasher::new();
                                         name.hash(&mut hasher2);
                                         existing_location.node_id.hash(&mut hasher2);
                                         existing_location.vector_clock.hash(&mut hasher2);
                                         let hash2 = hasher2.finish();
-                                        
+
                                         // Removal wins if its hash is greater (deterministic across all nodes)
                                         let should_apply = hash1 > hash2;
                                         debug!(
@@ -1219,7 +1242,7 @@ impl GossipRegistry {
     /// Prepare gossip round with consistent lock ordering to prevent deadlocks
     pub async fn prepare_gossip_round(&self) -> Result<Vec<GossipTask>> {
         debug!("Starting gossip round");
-        
+
         // Step 1: Check shutdown status first
         {
             let gossip_state = self.gossip_state.lock().await;
@@ -1280,16 +1303,16 @@ impl GossipRegistry {
         // Step 3: Select peers and create messages
         let tasks = {
             let gossip_state = self.gossip_state.lock().await;
-            
+
             // Debug log all peers and their states
             debug!(
-                "🔍 Gossip round: examining {} total peers", 
+                "🔍 Gossip round: examining {} total peers",
                 gossip_state.peers.len()
             );
             let current_time = current_timestamp();
             for (addr, peer_info) in &gossip_state.peers {
                 let time_since_last_attempt = current_time.saturating_sub(peer_info.last_attempt);
-                let retry_eligible = peer_info.failures >= self.config.max_peer_failures 
+                let retry_eligible = peer_info.failures >= self.config.max_peer_failures
                     && time_since_last_attempt > self.config.peer_retry_interval.as_secs();
                 debug!(
                     peer = %addr,
@@ -1322,10 +1345,10 @@ impl GossipRegistry {
                 );
                 return Ok(Vec::new());
             }
-            
+
             debug!(
                 available_count = available_peers.len(),
-                "✅ Found {} available peers for gossip", 
+                "✅ Found {} available peers for gossip",
                 available_peers.len()
             );
 
@@ -1341,11 +1364,11 @@ impl GossipRegistry {
                 peers.shuffle(&mut rng);
                 peers.into_iter().take(adaptive_fanout).collect()
             };
-            
+
             debug!(
                 selected_count = selected_peers.len(),
                 selected_peers = ?selected_peers,
-                "📮 Selected {} peers for gossip", 
+                "📮 Selected {} peers for gossip",
                 selected_peers.len()
             );
 
@@ -1494,7 +1517,7 @@ impl GossipRegistry {
                                   new_failures = peer_info.failures,
                                   max_failures = self.config.max_peer_failures,
                                   "incremented peer failure count");
-                            
+
                             // Mark failure time if this puts us at max failures
                             if peer_info.failures == self.config.max_peer_failures {
                                 peer_info.last_failure_time = Some(current_time);
@@ -1641,7 +1664,10 @@ impl GossipRegistry {
                 match known_actors.get(&name) {
                     Some(existing_location) => {
                         // Use vector clock for causal ordering
-                        match location.vector_clock.compare(&existing_location.vector_clock) {
+                        match location
+                            .vector_clock
+                            .compare(&existing_location.vector_clock)
+                        {
                             crate::ClockOrdering::After => {
                                 // New location is causally after existing
                                 updates_to_apply.push((name.clone(), location));
@@ -1655,14 +1681,18 @@ impl GossipRegistry {
                                 location.address.hash(&mut hasher1);
                                 location.wall_clock_time.hash(&mut hasher1);
                                 let hash1 = hasher1.finish();
-                                
+
                                 let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
                                 name.hash(&mut hasher2);
                                 existing_location.address.hash(&mut hasher2);
                                 existing_location.wall_clock_time.hash(&mut hasher2);
                                 let hash2 = hasher2.finish();
-                                
-                                if hash1 > hash2 || (hash1 == hash2 && location.wall_clock_time > existing_location.wall_clock_time) {
+
+                                if hash1 > hash2
+                                    || (hash1 == hash2
+                                        && location.wall_clock_time
+                                            > existing_location.wall_clock_time)
+                                {
                                     updates_to_apply.push((name.clone(), location));
                                     updated_actors += 1;
                                 }
@@ -1687,7 +1717,10 @@ impl GossipRegistry {
             match known_actors.get(&name) {
                 Some(existing_location) => {
                     // Use vector clock for causal ordering
-                    match location.vector_clock.compare(&existing_location.vector_clock) {
+                    match location
+                        .vector_clock
+                        .compare(&existing_location.vector_clock)
+                    {
                         crate::ClockOrdering::After => {
                             // New location is causally after existing
                             updates_to_apply.push((name, location));
@@ -1701,14 +1734,17 @@ impl GossipRegistry {
                             location.address.hash(&mut hasher1);
                             location.wall_clock_time.hash(&mut hasher1);
                             let hash1 = hasher1.finish();
-                            
+
                             let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
                             name.hash(&mut hasher2);
                             existing_location.address.hash(&mut hasher2);
                             existing_location.wall_clock_time.hash(&mut hasher2);
                             let hash2 = hasher2.finish();
-                            
-                            if hash1 > hash2 || (hash1 == hash2 && location.wall_clock_time > existing_location.wall_clock_time) {
+
+                            if hash1 > hash2
+                                || (hash1 == hash2
+                                    && location.wall_clock_time > existing_location.wall_clock_time)
+                            {
                                 updates_to_apply.push((name, location));
                                 updated_actors += 1;
                             }
@@ -1730,14 +1766,17 @@ impl GossipRegistry {
                 // Also ensure the peer's NodeId is in the gossip state for TLS
                 if let Ok(addr) = location.address.parse::<SocketAddr>() {
                     // Convert PeerId to NodeId for TLS
-                    let node_id = crate::migration::migrate_peer_id_to_node_id(&location.peer_id).ok();
+                    let node_id =
+                        crate::migration::migrate_peer_id_to_node_id(&location.peer_id).ok();
                     if node_id.is_some() {
                         // This will be used later when we need to connect to this peer for TLS
                         self.add_peer_with_node_id(addr, node_id).await;
                         debug!(actor = %name, peer_addr = %addr, "Added NodeId to gossip state for actor's host");
                     }
                 }
-                actor_state.known_actors.insert(name.clone(), location.clone());
+                actor_state
+                    .known_actors
+                    .insert(name.clone(), location.clone());
             }
         }
 
@@ -1857,10 +1896,10 @@ impl GossipRegistry {
             let gossip_state = self.gossip_state.lock().await;
             let mut active = HashSet::new();
             let mut dead = HashMap::new();
-            
+
             // Add our own node ID - always active
             active.insert(self.peer_id.to_node_id());
-            
+
             // Add all known peer node IDs based on their status
             let current_time = current_timestamp();
             for peer_info in gossip_state.peers.values() {
@@ -1872,7 +1911,7 @@ impl GossipRegistry {
                         // Peer is failed - check how long it's been dead
                         let time_since_failure = current_time - failure_time;
                         let retention_secs = self.config.vector_clock_retention_period.as_secs();
-                        
+
                         if time_since_failure > retention_secs {
                             // Dead for longer than retention period - can be GC'd
                             dead.insert(*node_id, time_since_failure);
@@ -1886,16 +1925,16 @@ impl GossipRegistry {
                     }
                 }
             }
-            
+
             (active, dead)
         };
-        
+
         // Run GC on all actor vector clocks
         let mut gc_count = 0;
         let mut largest_clock_size = 0;
         {
-            let mut actor_state = self.actor_state.write().await;
-            
+            let actor_state = self.actor_state.write().await;
+
             // GC local actors
             for location in actor_state.local_actors.values() {
                 let before_size = location.vector_clock.len();
@@ -1906,7 +1945,7 @@ impl GossipRegistry {
                 }
                 largest_clock_size = largest_clock_size.max(after_size);
             }
-            
+
             // GC known actors
             for location in actor_state.known_actors.values() {
                 let before_size = location.vector_clock.len();
@@ -1918,7 +1957,7 @@ impl GossipRegistry {
                 largest_clock_size = largest_clock_size.max(after_size);
             }
         }
-        
+
         if gc_count > 0 {
             info!(
                 entries_removed = gc_count,
@@ -1927,7 +1966,7 @@ impl GossipRegistry {
                 largest_clock_size = largest_clock_size,
                 "vector clock garbage collection completed"
             );
-            
+
             // Log details about removed nodes
             for (node_id, time_dead) in dead_nodes_with_timeout {
                 debug!(
@@ -1937,7 +1976,7 @@ impl GossipRegistry {
                 );
             }
         }
-        
+
         // Warn if clocks are still large after GC
         if largest_clock_size > 1000 {
             warn!(
@@ -1990,12 +2029,12 @@ impl GossipRegistry {
     ) -> Result<crate::connection_pool::ConnectionHandle> {
         self.connection_pool.lock().await.get_connection(addr).await
     }
-    
+
     /// Get a connection handle directly from the pool without mutex lock
     /// Only works for already established connections
     pub fn get_connection_direct(
         &self,
-        addr: SocketAddr,
+        _addr: SocketAddr,
     ) -> Option<crate::connection_pool::ConnectionHandle> {
         // Access the internal DashMap directly without locking
         // This is safe because DashMap is lock-free
@@ -2113,20 +2152,26 @@ impl GossipRegistry {
     }
 
     /// Handle a peer connection failure by node ID instead of address
-    pub async fn handle_peer_connection_failure_by_node_id(&self, failed_node_id: &str) -> Result<()> {
+    pub async fn handle_peer_connection_failure_by_node_id(
+        &self,
+        failed_node_id: &str,
+    ) -> Result<()> {
         info!(
             failed_node_id = %failed_node_id,
             "node disconnection detected by ID, marking connection as failed (actors remain available)"
         );
-        
+
         // First, find the peer address from the node ID
         let failed_peer_addr = {
             let pool = self.connection_pool.lock().await;
-            
+
             // Try to find the address from our node ID mapping
             let failed_peer_id = crate::PeerId::new(failed_node_id);
-            let addr_opt = pool.peer_id_to_addr.get(&failed_peer_id).map(|entry| *entry);
-            
+            let addr_opt = pool
+                .peer_id_to_addr
+                .get(&failed_peer_id)
+                .map(|entry| *entry);
+
             match addr_opt {
                 Some(addr) => addr,
                 None => {
@@ -2138,19 +2183,19 @@ impl GossipRegistry {
                 }
             }
         };
-        
+
         let current_time = current_timestamp();
-        
+
         // IMMEDIATELY remove the connection from pool
         // remove_connection handles both address and node ID mappings
         {
             let pool = self.connection_pool.lock().await;
-            
+
             if pool.has_connection(&failed_peer_addr) {
                 pool.remove_connection(failed_peer_addr);
                 info!(
-                    addr = %failed_peer_addr, 
-                    node_id = %failed_node_id, 
+                    addr = %failed_peer_addr,
+                    node_id = %failed_node_id,
                     "removed disconnected connection from pool (both address and node ID mappings)"
                 );
             } else {
@@ -2160,7 +2205,7 @@ impl GossipRegistry {
                     "connection already removed from pool"
                 );
             }
-            
+
             info!(
                 node_id = %failed_node_id,
                 addr = %failed_peer_addr,
@@ -2168,7 +2213,7 @@ impl GossipRegistry {
                 "connection cleanup complete"
             );
         }
-        
+
         // IMMEDIATELY mark peer as failed in our local state
         {
             let mut gossip_state = self.gossip_state.lock().await;
@@ -2184,24 +2229,24 @@ impl GossipRegistry {
                 );
             }
         }
-        
+
         // Now start consensus process for actor invalidation (same as address-based method)
         {
             let mut gossip_state = self.gossip_state.lock().await;
-            
+
             // Record our own health report
             let our_report = PeerHealthStatus {
                 is_alive: false,
                 last_contact: current_time,
                 failure_count: 1,
             };
-            
+
             gossip_state
                 .peer_health_reports
                 .entry(failed_peer_addr)
                 .or_insert_with(HashMap::new)
                 .insert(self.bind_addr, our_report);
-            
+
             // If we don't have a pending failure, create one
             if !gossip_state
                 .pending_peer_failures
@@ -2215,7 +2260,7 @@ impl GossipRegistry {
                 gossip_state
                     .pending_peer_failures
                     .insert(failed_peer_addr, pending);
-                
+
                 info!(
                     failed_peer = %failed_peer_addr,
                     node_id = %failed_node_id,
@@ -2224,26 +2269,29 @@ impl GossipRegistry {
                 );
             }
         }
-        
+
         // Don't query immediately - give other nodes time to detect their own disconnections
         // Schedule the query for 100ms later to avoid race conditions
         let registry = self.clone();
         let failed_addr_for_spawn = failed_peer_addr;
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            
+
             info!(
                 failed_peer = %failed_addr_for_spawn,
                 "delayed query: now checking peer consensus after 100ms"
             );
-            
+
             // Query other peers for their view of the failed peer
             // This is to determine if we should invalidate actors, not the connection status
-            if let Err(e) = registry.query_peer_health_consensus(failed_addr_for_spawn).await {
+            if let Err(e) = registry
+                .query_peer_health_consensus(failed_addr_for_spawn)
+                .await
+            {
                 warn!(error = %e, "failed to query peer health consensus");
             }
         });
-        
+
         Ok(())
     }
 
@@ -2254,14 +2302,14 @@ impl GossipRegistry {
             let pool = self.connection_pool.lock().await;
             pool.has_connection(&target_peer)
         };
-        
+
         if has_active_connection {
             error!(
                 target_peer = %target_peer,
                 "🚨 CONSENSUS WARNING: Starting consensus query for a peer we still have an ACTIVE SOCKET CONNECTION to! This indicates a logic error."
             );
         }
-        
+
         let query_msg = RegistryMessage::PeerHealthQuery {
             sender: self.peer_id.clone(),
             target_peer: target_peer.to_string(),
@@ -2442,10 +2490,10 @@ impl GossipRegistry {
     /// Enforce bounds on gossip state data structures to prevent unbounded growth
     async fn enforce_bounds(&self) {
         let mut gossip_state = self.gossip_state.lock().await;
-        
+
         // Apply vector clock compaction to all changes before bounds enforcement
         let max_clock_size = self.config.max_vector_clock_size;
-        
+
         // Compact vector clocks in pending changes
         for change in &gossip_state.pending_changes {
             match change {
@@ -2461,7 +2509,7 @@ impl GossipRegistry {
                 }
             }
         }
-        
+
         // Compact vector clocks in urgent changes
         for change in &gossip_state.urgent_changes {
             match change {
@@ -2477,7 +2525,7 @@ impl GossipRegistry {
                 }
             }
         }
-        
+
         // Compact vector clocks in delta history
         for delta in &gossip_state.delta_history {
             for change in &delta.changes {
@@ -2735,23 +2783,24 @@ impl GossipRegistry {
 
             // Create removal changes for each actor with proper vector clocks
             let mut removal_changes = Vec::new();
-            
+
             // We need to get the current vector clocks for these actors
             let actor_state = self.actor_state.read().await;
             for actor_name in &actors_to_remove {
                 // Get the existing vector clock for this actor if it exists
-                let mut removal_clock = if let Some(location) = actor_state.known_actors.get(actor_name) {
+                let removal_clock = if let Some(location) = actor_state.known_actors.get(actor_name)
+                {
                     // Use the actor's current vector clock and increment it
-                    let mut clock = location.vector_clock.clone();
+                    let clock = location.vector_clock.clone();
                     clock.increment(self.peer_id.to_node_id());
                     clock
                 } else {
                     // If actor not found (shouldn't happen), create a new clock with our increment
-                    let mut clock = crate::VectorClock::new();
+                    let clock = crate::VectorClock::new();
                     clock.increment(self.peer_id.to_node_id());
                     clock
                 };
-                
+
                 let change = RegistryChange::ActorRemoved {
                     name: actor_name.clone(),
                     vector_clock: removal_clock,
@@ -2801,18 +2850,21 @@ impl GossipRegistry {
 
         Ok(())
     }
-    
+
     /// Start assembling a streamed message
     pub async fn start_stream_assembly(&self, header: crate::StreamHeader) {
         let mut assemblies = self.stream_assemblies.lock().await;
-        assemblies.insert(header.stream_id, StreamAssembly {
-            header,
-            chunks: std::collections::BTreeMap::new(),
-            received_bytes: 0,
-        });
+        assemblies.insert(
+            header.stream_id,
+            StreamAssembly {
+                header,
+                chunks: std::collections::BTreeMap::new(),
+                received_bytes: 0,
+            },
+        );
         debug!(stream_id = header.stream_id, "Started stream assembly");
     }
-    
+
     /// Add a chunk to stream assembly
     pub async fn add_stream_chunk(&self, header: crate::StreamHeader, chunk_data: Vec<u8>) {
         let mut assemblies = self.stream_assemblies.lock().await;
@@ -2826,17 +2878,22 @@ impl GossipRegistry {
             //     "Added chunk to stream assembly"
             // );
         } else {
-            warn!(stream_id = header.stream_id, "Stream assembly not found for chunk");
+            warn!(
+                stream_id = header.stream_id,
+                "Stream assembly not found for chunk"
+            );
         }
     }
-    
+
     /// Complete stream assembly and return the complete message
     pub async fn complete_stream_assembly(&self, stream_id: u64) -> Option<Vec<u8>> {
         let mut assemblies = self.stream_assemblies.lock().await;
         if let Some(assembly) = assemblies.remove(&stream_id) {
             // Verify we have all chunks with proper gap detection
-            let expected_chunks = (assembly.header.total_size + crate::connection_pool::STREAM_CHUNK_SIZE as u64 - 1) / crate::connection_pool::STREAM_CHUNK_SIZE as u64;
-            
+            let expected_chunks =
+                (assembly.header.total_size + crate::connection_pool::STREAM_CHUNK_SIZE as u64 - 1)
+                    / crate::connection_pool::STREAM_CHUNK_SIZE as u64;
+
             // ✅ PROPER: Check both count and verify all chunk indices are present
             if assembly.chunks.len() as u64 != expected_chunks {
                 warn!(
@@ -2847,7 +2904,7 @@ impl GossipRegistry {
                 );
                 return None;
             }
-            
+
             // ✅ PROPER: Verify all indices 0..N-1 are present (no gaps)
             for i in 0..expected_chunks as u32 {
                 if !assembly.chunks.contains_key(&i) {
@@ -2861,7 +2918,7 @@ impl GossipRegistry {
                     return None;
                 }
             }
-            
+
             // ✅ PROPER: Reassemble in correct order using chunk indices
             let mut complete = Vec::with_capacity(assembly.header.total_size as usize);
             for i in 0..expected_chunks as u32 {
@@ -2877,16 +2934,19 @@ impl GossipRegistry {
                     return None;
                 }
             }
-            
+
             info!(
                 stream_id = stream_id,
                 total_size = complete.len(),
                 "Completed stream assembly"
             );
-            
+
             Some(complete)
         } else {
-            warn!(stream_id = stream_id, "Stream assembly not found for completion");
+            warn!(
+                stream_id = stream_id,
+                "Stream assembly not found for completion"
+            );
             None
         }
     }
@@ -3276,7 +3336,10 @@ mod tests {
 
         // Add some data
         registry
-            .register_actor("actor1".to_string(), RemoteActorLocation::new(test_addr(9001)))
+            .register_actor(
+                "actor1".to_string(),
+                RemoteActorLocation::new(test_addr(9001)),
+            )
             .await
             .unwrap();
         registry.add_peer(test_addr(8081)).await;
@@ -3408,7 +3471,10 @@ mod tests {
 
         // Add some changes
         registry
-            .register_actor("actor1".to_string(), RemoteActorLocation::new(test_addr(9001)))
+            .register_actor(
+                "actor1".to_string(),
+                RemoteActorLocation::new(test_addr(9001)),
+            )
             .await
             .unwrap();
 
@@ -3423,7 +3489,10 @@ mod tests {
 
         // Add some data
         registry
-            .register_actor("actor1".to_string(), RemoteActorLocation::new(test_addr(9001)))
+            .register_actor(
+                "actor1".to_string(),
+                RemoteActorLocation::new(test_addr(9001)),
+            )
             .await
             .unwrap();
         registry.add_peer(test_addr(8081)).await;

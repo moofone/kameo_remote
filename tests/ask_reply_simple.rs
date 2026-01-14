@@ -64,7 +64,10 @@ async fn test_basic_ask_correlation() {
 
         // Test ECHO command
         let request = b"ECHO:Hello from Node A";
-        info!("Sending ask request: {:?}", String::from_utf8_lossy(request));
+        info!(
+            "Sending ask request: {:?}",
+            String::from_utf8_lossy(request)
+        );
         let response = conn.ask(request).await.unwrap();
         assert_eq!(response, b"ECHOED:Hello from Node A");
         info!("ECHO test passed: {:?}", String::from_utf8_lossy(&response));

@@ -1,8 +1,8 @@
-use kameo_remote::{GossipRegistryHandle, SecretKey, NodeId, GossipConfig};
+use kameo_remote::{GossipConfig, GossipRegistryHandle, NodeId, SecretKey};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{info, error};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter("kameo_remote=debug,test_tls_with_node_id=info")
@@ -33,34 +33,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start Node A with TLS
     let addr_a: SocketAddr = "127.0.0.1:7001".parse()?;
-    let registry_a = GossipRegistryHandle::new_with_tls(
-        addr_a,
-        secret_key_a,
-        Some(config.clone()),
-    ).await?;
+    let registry_a =
+        GossipRegistryHandle::new_with_tls(addr_a, secret_key_a, Some(config.clone())).await?;
     info!("Node A started with TLS on {}", addr_a);
 
     // Start Node B with TLS
     let addr_b: SocketAddr = "127.0.0.1:7002".parse()?;
-    let registry_b = GossipRegistryHandle::new_with_tls(
-        addr_b,
-        secret_key_b,
-        Some(config.clone()),
-    ).await?;
+    let registry_b =
+        GossipRegistryHandle::new_with_tls(addr_b, secret_key_b, Some(config.clone())).await?;
     info!("Node B started with TLS on {}", addr_b);
 
     // Register an actor on Node A
     let actor_addr: SocketAddr = "127.0.0.1:8001".parse()?;
-    registry_a.register("test_actor".to_string(), actor_addr).await?;
+    registry_a
+        .register("test_actor".to_string(), actor_addr)
+        .await?;
     info!("Registered test_actor on Node A at {}", actor_addr);
 
     // Add peers WITH NodeId for proper TLS verification
     // Node A knows about Node B
-    registry_a.registry.add_peer_with_node_id(addr_b, Some(node_id_b)).await;
+    registry_a
+        .registry
+        .add_peer_with_node_id(addr_b, Some(node_id_b))
+        .await;
     info!("Node A added Node B as peer with NodeId");
 
     // Node B knows about Node A
-    registry_b.registry.add_peer_with_node_id(addr_a, Some(node_id_a)).await;
+    registry_b
+        .registry
+        .add_peer_with_node_id(addr_a, Some(node_id_a))
+        .await;
     info!("Node B added Node A as peer with NodeId");
 
     // Wait for gossip to propagate
@@ -72,12 +74,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(location) => {
             info!("✅ SUCCESS: Node B found actor via TLS-encrypted gossip!");
             info!("Actor location: {:?}", location);
-            
+
             // Verify the actor is on the correct node
             if location.address == actor_addr.to_string() {
                 info!("✅ Actor address matches!");
             } else {
-                error!("❌ Actor address mismatch! Expected: {}, Got: {}", actor_addr, location.address);
+                error!(
+                    "❌ Actor address mismatch! Expected: {}, Got: {}",
+                    actor_addr, location.address
+                );
             }
         }
         None => {
@@ -89,13 +94,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print stats to verify TLS connections
     let stats_a = registry_a.stats().await;
     let stats_b = registry_b.stats().await;
-    
+
     info!("\nNode A stats:");
     info!("  Active peers: {}", stats_a.active_peers);
     info!("  Failed peers: {}", stats_a.failed_peers);
     info!("  Local actors: {}", stats_a.local_actors);
     info!("  Known actors: {}", stats_a.known_actors);
-    
+
     info!("\nNode B stats:");
     info!("  Active peers: {}", stats_b.active_peers);
     info!("  Failed peers: {}", stats_b.failed_peers);
@@ -104,20 +109,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test outgoing connection with wrong NodeId (should fail)
     info!("\n--- Testing TLS verification with wrong NodeId ---");
-    
+
     // Create a third node
     let secret_key_c = SecretKey::generate();
     let node_id_c = secret_key_c.public();
     let addr_c: SocketAddr = "127.0.0.1:7003".parse()?;
-    let registry_c = GossipRegistryHandle::new_with_tls(
-        addr_c,
-        secret_key_c,
-        Some(config),
-    ).await?;
+    let registry_c = GossipRegistryHandle::new_with_tls(addr_c, secret_key_c, Some(config)).await?;
     info!("Node C started with ID: {}", node_id_c.fmt_short());
 
     // Node A tries to connect to Node C but with wrong NodeId (Node B's ID)
-    registry_a.registry.add_peer_with_node_id(addr_c, Some(node_id_b)).await;
+    registry_a
+        .registry
+        .add_peer_with_node_id(addr_c, Some(node_id_b))
+        .await;
     info!("Node A added Node C with WRONG NodeId (using Node B's ID)");
 
     // Wait a bit for connection attempt
