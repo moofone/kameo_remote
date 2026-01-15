@@ -2993,8 +2993,7 @@ impl GossipRegistry {
                         precise_timing_nanos,
                     },
                 };
-                let chunk_serialized =
-                    rkyv::to_bytes::<rkyv::rancor::Error>(&chunk_message)?;
+                let chunk_serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&chunk_message)?;
                 serialized_messages.push(Arc::new(chunk_serialized));
                 current_changes.clear();
                 current_changes.push(last);

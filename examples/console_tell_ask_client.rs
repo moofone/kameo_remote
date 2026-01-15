@@ -1,13 +1,14 @@
 use anyhow::Result;
+use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use kameo_remote::registry::RegistryMessage;
 use kameo_remote::{GossipConfig, GossipRegistryHandle, NodeId, SecretKey};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
 use std::fs;
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
-use futures::stream::{FuturesUnordered, StreamExt};
+use std::time::{Duration, Instant};
 
 struct CountingAlloc;
 
@@ -111,10 +112,7 @@ async fn main() -> Result<()> {
     let ask_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ask_msg)?;
     let response = conn.ask(ask_bytes.as_slice()).await?;
 
-    println!(
-        "✅ Ask response: {:?}",
-        String::from_utf8_lossy(&response)
-    );
+    println!("✅ Ask response: {:?}", String::from_utf8_lossy(&response));
 
     if tell_count > 0 {
         println!("\n🔸 Tell benchmark (count = {})", tell_count);
@@ -145,7 +143,8 @@ async fn main() -> Result<()> {
         );
         let before = alloc_snapshot();
         let ask_payload = std::sync::Arc::new(ask_bytes.to_vec());
-        let mut in_flight = FuturesUnordered::new();
+        let mut in_flight: FuturesUnordered<BoxFuture<'static, Result<Duration, anyhow::Error>>> =
+            FuturesUnordered::new();
         let ask_start = Instant::now();
         let mut remaining = ask_count;
 
@@ -153,11 +152,11 @@ async fn main() -> Result<()> {
         for _ in 0..initial {
             let conn_clone = conn.clone();
             let payload = ask_payload.clone();
-            in_flight.push(async move {
+            in_flight.push(Box::pin(async move {
                 let start = Instant::now();
                 let _ = conn_clone.ask(&payload).await?;
                 Ok::<Duration, anyhow::Error>(start.elapsed())
-            });
+            }));
             remaining -= 1;
         }
 
@@ -167,11 +166,11 @@ async fn main() -> Result<()> {
             if remaining > 0 {
                 let conn_clone = conn.clone();
                 let payload = ask_payload.clone();
-                in_flight.push(async move {
+                in_flight.push(Box::pin(async move {
                     let start = Instant::now();
                     let _ = conn_clone.ask(&payload).await?;
                     Ok::<Duration, anyhow::Error>(start.elapsed())
-                });
+                }));
                 remaining -= 1;
             }
         }
@@ -206,8 +205,7 @@ fn load_node_id(path: &str) -> Result<NodeId> {
         ));
     }
 
-    NodeId::from_bytes(&pub_key_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid NodeId: {}", e))
+    NodeId::from_bytes(&pub_key_bytes).map_err(|e| anyhow::anyhow!("Invalid NodeId: {}", e))
 }
 
 fn load_or_generate_key(path: &str) -> Result<SecretKey> {

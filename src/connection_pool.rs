@@ -40,7 +40,7 @@ pub struct BufferConfig {
     tcp_buffer_size: usize,   // Size in bytes for TCP buffers
 }
 
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, feature = "test-helpers"))]
 fn process_mock_request(request: &str) -> Vec<u8> {
     format!("mock-response:{}", request).into_bytes()
 }
@@ -2844,17 +2844,17 @@ impl ConnectionPool {
 
                         // Process complete messages
                         while partial_msg_buf.len() >= 4 {
-                        let len = u32::from_be_bytes([
-                            partial_msg_buf[0],
-                            partial_msg_buf[1],
-                            partial_msg_buf[2],
-                            partial_msg_buf[3],
-                        ]) as usize;
-                        debug!(
-                            peer = %addr,
-                            frame_len = len,
-                            "🔍 TLS reader got frame length prefix (client stream)"
-                        );
+                            let len = u32::from_be_bytes([
+                                partial_msg_buf[0],
+                                partial_msg_buf[1],
+                                partial_msg_buf[2],
+                                partial_msg_buf[3],
+                            ]) as usize;
+                            debug!(
+                                peer = %addr,
+                                frame_len = len,
+                                "🔍 TLS reader got frame length prefix (client stream)"
+                            );
 
                             if partial_msg_buf.len() >= 4 + len {
                                 // We have a complete message
@@ -2893,7 +2893,7 @@ impl ConnectionPool {
                                         match msg_type {
                                             crate::MessageType::Ask => {
                                                 // Handle incoming Ask requests for testing
-                                                #[cfg(feature = "test-helpers")]
+                                                #[cfg(any(test, feature = "test-helpers"))]
                                                 {
                                                     if let Some(ref registry_weak) =
                                                         registry_weak_for_reader
@@ -3082,7 +3082,8 @@ impl ConnectionPool {
                                                     );
                                                     let payload_len = u32::from_be_bytes(
                                                         payload[12..16].try_into().unwrap(),
-                                                    ) as usize;
+                                                    )
+                                                        as usize;
 
                                                     if payload.len() >= 16 + payload_len {
                                                         let actor_payload =
@@ -3115,24 +3116,32 @@ impl ConnectionPool {
                                                                                 bytes::BytesMut::with_capacity(
                                                                                     4 + 8 + reply_payload.len(),
                                                                                 );
-                                                                            let total_len =
-                                                                                8 + reply_payload.len() as u32;
-                                                                            response.extend_from_slice(
-                                                                                &total_len.to_be_bytes(),
+                                                                            let total_len = 8
+                                                                                + reply_payload
+                                                                                    .len()
+                                                                                    as u32;
+                                                                            response
+                                                                                .extend_from_slice(
+                                                                                &total_len
+                                                                                    .to_be_bytes(),
                                                                             );
                                                                             response.put_u8(
                                                                                 crate::MessageType::Response
                                                                                     as u8,
                                                                             );
-                                                                            response.extend_from_slice(
-                                                                                &correlation_id.to_be_bytes(),
+                                                                            response
+                                                                                .extend_from_slice(
+                                                                                &correlation_id
+                                                                                    .to_be_bytes(),
                                                                             );
-                                                                            response.extend_from_slice(
-                                                                                &[0u8; 5],
-                                                                            );
-                                                                            response.extend_from_slice(
-                                                                                &reply_payload,
-                                                                            );
+                                                                            response
+                                                                                .extend_from_slice(
+                                                                                    &[0u8; 5],
+                                                                                );
+                                                                            response
+                                                                                .extend_from_slice(
+                                                                                    &reply_payload,
+                                                                                );
 
                                                                             if let Err(e) =
                                                                                 stream_handle
@@ -3169,7 +3178,8 @@ impl ConnectionPool {
                                                             if let Some(registry) =
                                                                 registry_weak.upgrade()
                                                             {
-                                                                let msg_data_vec = msg_data.to_vec();
+                                                                let msg_data_vec =
+                                                                    msg_data.to_vec();
                                                                 if let Ok(registry_msg) = rkyv::from_bytes::<
                                                                     crate::registry::RegistryMessage,
                                                                     rkyv::rancor::Error,
@@ -3200,7 +3210,9 @@ impl ConnectionPool {
                                                     if let Some(ref registry_weak) =
                                                         registry_weak_for_reader
                                                     {
-                                                        if let Some(registry) = registry_weak.upgrade() {
+                                                        if let Some(registry) =
+                                                            registry_weak.upgrade()
+                                                        {
                                                             let msg_data_vec = msg_data.to_vec();
                                                             if let Ok(registry_msg) = rkyv::from_bytes::<
                                                                 crate::registry::RegistryMessage,
@@ -3802,7 +3814,7 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                        "HANDLE ASK: Failed to deserialize as RegistryMessage, trying MessageWrapper");
 
                                                 // Not a RegistryMessage, handle as before for test helpers
-                                                #[cfg(feature = "test-helpers")]
+                                                #[cfg(any(test, feature = "test-helpers"))]
                                                 {
                                                     if let Some(ref registry_weak) = registry_weak {
                                                         if let Some(registry) =
@@ -4151,17 +4163,16 @@ pub(crate) async fn handle_persistent_connection_reader(
                                             );
                                             let payload_len = u32::from_be_bytes(
                                                 payload[12..16].try_into().unwrap(),
-                                            ) as usize;
+                                            )
+                                                as usize;
 
                                             if payload.len() >= 16 + payload_len {
-                                                let actor_payload =
-                                                    &payload[16..16 + payload_len];
+                                                let actor_payload = &payload[16..16 + payload_len];
 
                                                 if let Some(ref registry_weak) = registry_weak {
                                                     if let Some(registry) = registry_weak.upgrade()
                                                     {
-                                                        let actor_id_str =
-                                                            actor_id.to_string();
+                                                        let actor_id_str = actor_id.to_string();
                                                         match registry
                                                             .handle_actor_message(
                                                                 &actor_id_str,
@@ -4172,9 +4183,10 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                             .await
                                                         {
                                                             Ok(Some(reply_payload)) => {
-                                                                let mut response = bytes::BytesMut::with_capacity(
-                                                                    4 + 8 + reply_payload.len(),
-                                                                );
+                                                                let mut response =
+                                                                    bytes::BytesMut::with_capacity(
+                                                                        4 + 8 + reply_payload.len(),
+                                                                    );
                                                                 let total_len =
                                                                     8 + reply_payload.len() as u32;
                                                                 response.extend_from_slice(
@@ -4187,11 +4199,11 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                                 response.extend_from_slice(
                                                                     &correlation_id.to_be_bytes(),
                                                                 );
-                                                                response.extend_from_slice(
-                                                                    &[0u8; 5],
-                                                                );
                                                                 response
-                                                                    .extend_from_slice(&reply_payload);
+                                                                    .extend_from_slice(&[0u8; 5]);
+                                                                response.extend_from_slice(
+                                                                    &reply_payload,
+                                                                );
 
                                                                 if let Some(ref handle) =
                                                                     response_handle
@@ -4254,16 +4266,16 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                         if let Ok(registry_msg) = rkyv::from_bytes::<
                                                             crate::registry::RegistryMessage,
                                                             rkyv::rancor::Error,
-                                                        >(&msg_data_vec)
-                                                        {
+                                                        >(
+                                                            &msg_data_vec
+                                                        ) {
                                                             handled_as_registry = true;
-                                                            if let Err(e) =
-                                                                handle_incoming_message(
-                                                                    registry,
-                                                                    peer_addr,
-                                                                    registry_msg,
-                                                                )
-                                                                .await
+                                                            if let Err(e) = handle_incoming_message(
+                                                                registry,
+                                                                peer_addr,
+                                                                registry_msg,
+                                                            )
+                                                            .await
                                                             {
                                                                 warn!(peer = %peer_addr, error = %e, "Failed to handle registry message fallback");
                                                             }
@@ -4284,8 +4296,9 @@ pub(crate) async fn handle_persistent_connection_reader(
                                                     if let Ok(registry_msg) = rkyv::from_bytes::<
                                                         crate::registry::RegistryMessage,
                                                         rkyv::rancor::Error,
-                                                    >(&msg_data_vec)
-                                                    {
+                                                    >(
+                                                        &msg_data_vec
+                                                    ) {
                                                         handled_as_registry = true;
                                                         if let Err(e) = handle_incoming_message(
                                                             registry,

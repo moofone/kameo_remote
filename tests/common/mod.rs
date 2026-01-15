@@ -23,10 +23,10 @@ pub async fn create_tls_node(
     let secret_key = SecretKey::generate();
     let private_bytes = secret_key.to_bytes();
     let key_pair = KeyPair::from_private_key_bytes(&private_bytes)
-        .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        .map_err(Box::<dyn std::error::Error>::from)?;
     config.key_pair = Some(key_pair);
-    let node =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, secret_key, Some(config)).await?;
+    let node = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, secret_key, Some(config))
+        .await?;
     Ok(node)
 }
 

@@ -1,12 +1,52 @@
 mod common;
 
 use common::{create_tls_node, wait_for_condition};
+use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler, RegistryMessage};
+use kameo_remote::{GossipConfig, PeerId};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use kameo_remote::{GossipConfig, PeerId};
+const TEST_ACTOR_ID: &str = "tls_test_actor";
+const TEST_TYPE_HASH: u32 = 0xA57A_A5C0;
+
+struct TestActorHandler;
+
+impl ActorMessageHandler for TestActorHandler {
+    fn handle_actor_message(
+        &self,
+        _actor_id: &str,
+        _type_hash: u32,
+        payload: &[u8],
+        correlation_id: Option<u16>,
+    ) -> ActorMessageFuture<'_> {
+        let payload = payload.to_vec();
+        Box::pin(async move {
+            if correlation_id.is_some() {
+                let response = format!("RESPONSE:{}", payload.len()).into_bytes();
+                Ok(Some(response))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+}
+
+fn encode_actor_ask(payload: impl Into<Vec<u8>>) -> Vec<u8> {
+    let payload = payload.into();
+    let message = RegistryMessage::ActorMessage {
+        actor_id: TEST_ACTOR_ID.to_string(),
+        type_hash: TEST_TYPE_HASH,
+        payload,
+        correlation_id: None,
+    };
+
+    rkyv::to_bytes::<rkyv::rancor::Error>(&message)
+        .expect("serialize actor message")
+        .to_vec()
+}
 
 /// Test true end-to-end ask/reply over TCP sockets
 #[tokio::test]
@@ -21,6 +61,10 @@ async fn test_end_to_end_ask_reply() {
     let config = GossipConfig::default();
     let handle_a = create_tls_node(config.clone()).await.unwrap();
     let handle_b = create_tls_node(config).await.unwrap();
+    handle_b
+        .registry
+        .set_actor_message_handler(Arc::new(TestActorHandler))
+        .await;
 
     let addr_b = handle_b.registry.bind_addr;
     let peer_b_id = handle_b.registry.peer_id.clone();
@@ -35,16 +79,13 @@ async fn test_end_to_end_ask_reply() {
         "TLS peer should connect"
     );
 
-    info!("=== Test 1: Basic ask/reply with mock response ===");
+    info!("=== Test 1: Basic ask/reply with actor handler ===");
     {
-        let conn = handle_a
-            .get_connection_to_peer(&peer_b_id)
-            .await
-            .unwrap();
+        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
 
-        let request = b"Hello from test";
+        let request = encode_actor_ask(b"Hello from test");
         let start = std::time::Instant::now();
-        let response = conn.ask(request).await.unwrap();
+        let response = conn.ask(&request).await.unwrap();
         let elapsed = start.elapsed();
 
         info!(
@@ -57,10 +98,7 @@ async fn test_end_to_end_ask_reply() {
 
     info!("=== Test 2: Multiple concurrent asks with correlation tracking ===");
     {
-        let conn = handle_a
-            .get_connection_to_peer(&peer_b_id)
-            .await
-            .unwrap();
+        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
 
         let mut handles = Vec::new();
         let start = std::time::Instant::now();
@@ -69,16 +107,18 @@ async fn test_end_to_end_ask_reply() {
             let conn_clone = conn.clone();
             let handle = tokio::spawn(async move {
                 let request = format!("Concurrent request {}", i).into_bytes();
-                let response = conn_clone.ask(&request).await.unwrap();
-                (i, response, request)
+                let payload_len = request.len();
+                let request_bytes = encode_actor_ask(request);
+                let response = conn_clone.ask(&request_bytes).await.unwrap();
+                (i, response, payload_len)
             });
             handles.push(handle);
         }
 
         // Verify all responses are correctly correlated
         for handle in handles {
-            let (i, response, request) = handle.await.unwrap();
-            let expected = format!("RESPONSE:{}", request.len()).into_bytes();
+            let (i, response, payload_len) = handle.await.unwrap();
+            let expected = format!("RESPONSE:{}", payload_len).into_bytes();
             assert_eq!(response, expected);
             info!("Request {} correctly correlated", i);
         }
@@ -95,47 +135,37 @@ async fn test_end_to_end_ask_reply() {
         // 3. Node B passes the ReplyTo to an actor for processing
         // 4. The actor sends the response back through the ReplyTo
 
-        let conn = handle_a
-            .get_connection_to_peer(&peer_b_id)
-            .await
-            .unwrap();
+        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
         // Simulate what would happen on Node B:
         // When an Ask arrives, the connection handler would create a ReplyTo
         // and pass it to an actor. We'll simulate this with ask_with_reply_to
 
-        let request = b"Process this request";
+        let request_payload = b"Process this request".to_vec();
 
         // On Node A: Send the ask and wait for response
         let response_future = {
             let conn_clone = conn.clone();
-            let request = request.to_vec();
-            tokio::spawn(async move { conn_clone.ask(&request).await })
+            let request_bytes = encode_actor_ask(request_payload.clone());
+            tokio::spawn(async move { conn_clone.ask(&request_bytes).await })
         };
 
         // Give the message time to arrive at Node B
         sleep(Duration::from_millis(10)).await;
 
-        // On Node B: The automatic mock response will be sent
-        // In a real system, you would intercept the Ask message and
-        // route it to an actor with the ReplyTo handle
-
         let response = response_future.await.unwrap().unwrap();
         info!("Got response: {:?}", String::from_utf8_lossy(&response));
-        assert_eq!(response, b"RESPONSE:20"); // Mock response
+        assert_eq!(response, b"RESPONSE:20");
     }
 
     info!("=== Test 4: Performance test ===");
     {
-        let conn = handle_a
-            .get_connection_to_peer(&peer_b_id)
-            .await
-            .unwrap();
+        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
 
         let num_requests = 100;
         let start = std::time::Instant::now();
 
         for i in 0..num_requests {
-            let request = format!("Perf test {}", i).into_bytes();
+            let request = encode_actor_ask(format!("Perf test {}", i).into_bytes());
             let response = conn.ask(&request).await.unwrap();
             assert!(response.starts_with(b"RESPONSE:"));
         }
