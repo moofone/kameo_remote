@@ -24,7 +24,8 @@ use crate::{
 };
 
 /// Resolve the effective peer address from sender_bind_addr with validation.
-/// Falls back to tcp_source_addr if sender_bind_addr is None, invalid, or unspecified (0.0.0.0).
+/// Falls back to tcp_source_addr if sender_bind_addr is None, invalid, unspecified (0.0.0.0),
+/// or loopback when the TCP source is not loopback.
 ///
 /// # Arguments
 /// * `sender_bind_addr` - Optional bind address from the message
@@ -38,8 +39,9 @@ pub fn resolve_peer_addr(
 ) -> SocketAddr {
     if let Some(bind_addr_str) = sender_bind_addr {
         if let Ok(bind_addr) = bind_addr_str.parse::<SocketAddr>() {
-            // Validate: reject unspecified (0.0.0.0) or loopback if tcp_source is not loopback
             let ip = bind_addr.ip();
+
+            // Validate: reject unspecified (0.0.0.0, ::)
             if ip.is_unspecified() {
                 // Use TCP source IP with bind_addr port
                 debug!(
@@ -48,6 +50,17 @@ pub fn resolve_peer_addr(
                 );
                 return SocketAddr::new(tcp_source_addr.ip(), bind_addr.port());
             }
+
+            // Validate: reject loopback (127.0.0.1, ::1) when TCP source is not loopback
+            // A remote peer advertising loopback is unreachable from outside
+            if ip.is_loopback() && !tcp_source_addr.ip().is_loopback() {
+                warn!(
+                    "sender_bind_addr {} is loopback but TCP source {} is not, using TCP source IP with bind port {}",
+                    bind_addr, tcp_source_addr, bind_addr.port()
+                );
+                return SocketAddr::new(tcp_source_addr.ip(), bind_addr.port());
+            }
+
             return bind_addr;
         } else {
             warn!(
@@ -4949,6 +4962,33 @@ mod tests {
         let result = super::resolve_peer_addr(Some("[::]:9000"), tcp_source);
         // Should use TCP source IP (::1) with bind_addr port (9000)
         assert_eq!(result, "[::1]:9000".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_peer_addr_loopback_from_remote() {
+        // If peer claims loopback (127.0.0.1) but TCP source is remote, reject it
+        let tcp_source: SocketAddr = "192.168.1.100:54321".parse().unwrap();
+        let result = super::resolve_peer_addr(Some("127.0.0.1:9000"), tcp_source);
+        // Should use TCP source IP (192.168.1.100) with bind_addr port (9000)
+        assert_eq!(result, "192.168.1.100:9000".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_peer_addr_loopback_from_loopback() {
+        // If both bind_addr and TCP source are loopback, accept it (local testing)
+        let tcp_source: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let result = super::resolve_peer_addr(Some("127.0.0.1:9000"), tcp_source);
+        // Should accept loopback since TCP source is also loopback
+        assert_eq!(result, "127.0.0.1:9000".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_peer_addr_ipv6_loopback_from_remote() {
+        // IPv6 loopback from remote should also be rejected
+        let tcp_source: SocketAddr = "[2001:db8::1]:54321".parse().unwrap();
+        let result = super::resolve_peer_addr(Some("[::1]:9000"), tcp_source);
+        // Should use TCP source IP with bind_addr port
+        assert_eq!(result, "[2001:db8::1]:9000".parse::<SocketAddr>().unwrap());
     }
 
     #[test]
