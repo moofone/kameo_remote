@@ -3117,31 +3117,46 @@ impl ConnectionPool {
             let conn = conn_entry.value().clone();
             if conn.is_connected() {
                 debug!("CONNECTION POOL: Found connection for peer '{}'", peer_id);
-                Some(conn)
-            } else {
-                warn!(
-                    "CONNECTION POOL: Connection for peer '{}' is disconnected",
-                    peer_id
-                );
-                None
+                return Some(conn);
             }
-        } else {
             warn!(
-                "CONNECTION POOL: No connection found for peer '{}'",
+                "CONNECTION POOL: Connection for peer '{}' is disconnected",
                 peer_id
             );
-            // Debug: show what nodes we do have connections for
-            let connected_nodes: Vec<String> = self
-                .connections_by_peer
-                .iter()
-                .map(|entry| entry.key().to_hex())
-                .collect();
-            warn!(
-                "CONNECTION POOL: Available node connections: {:?}",
-                connected_nodes
-            );
-            None
         }
+
+        // FALLBACK: Outbound connections may only be indexed by address.
+        // Look up the address via peer_id_to_addr, then get the connection by address.
+        if let Some(addr) = self.peer_id_to_addr.get(peer_id).map(|e| *e.value()) {
+            if let Some(conn_entry) = self.connections_by_addr.get(&addr) {
+                let conn = conn_entry.value().clone();
+                if conn.is_connected() {
+                    debug!(
+                        "CONNECTION POOL: Found connection for peer '{}' via address fallback ({})",
+                        peer_id, addr
+                    );
+                    // Index by peer_id for future lookups
+                    self.connections_by_peer.insert(peer_id.clone(), conn.clone());
+                    return Some(conn);
+                }
+            }
+        }
+
+        warn!(
+            "CONNECTION POOL: No connection found for peer '{}'",
+            peer_id
+        );
+        // Debug: show what nodes we do have connections for
+        let connected_nodes: Vec<String> = self
+            .connections_by_peer
+            .iter()
+            .map(|entry| entry.key().to_hex())
+            .collect();
+        warn!(
+            "CONNECTION POOL: Available node connections: {:?}",
+            connected_nodes
+        );
+        None
     }
 
     /// Get a connection by socket address
