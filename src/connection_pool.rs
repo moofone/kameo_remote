@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     current_timestamp, framing,
-    registry::{GossipRegistry, RegistryMessage},
+    registry::{resolve_peer_addr, GossipRegistry, RegistryMessage},
     GossipError, Result,
 };
 
@@ -4047,6 +4047,7 @@ impl ConnectionPool {
                     local_actors: actor_state.local_actors.clone().into_iter().collect(),
                     known_actors: actor_state.known_actors.clone().into_iter().collect(),
                     sender_peer_id: registry_arc.peer_id.clone(),
+                    sender_bind_addr: Some(registry_arc.bind_addr.to_string()), // Use our listening address, not ephemeral port
                     sequence: gossip_state.gossip_sequence,
                     wall_clock_time: crate::current_timestamp(),
                 }
@@ -5727,23 +5728,46 @@ pub(crate) fn handle_incoming_message(
                 local_actors,
                 known_actors,
                 sender_peer_id,
+                sender_bind_addr,
                 sequence,
                 wall_clock_time,
             } => {
-                let sender_socket_addr =
-                    resolve_peer_state_addr(&registry, Some(&sender_peer_id), _peer_addr).await;
+                // Use resolve_peer_addr for safe address resolution with validation
+                // This handles: None, invalid addresses, 0.0.0.0, and falls back to TCP source
+                let sender_socket_addr = resolve_peer_addr(sender_bind_addr.as_deref(), _peer_addr);
 
                 // Note: sender_peer_id is now a PeerId (e.g., "node_a"), not an address
                 debug!(
-                    "Received FullSync from node '{}' at address {}",
-                    sender_peer_id, sender_socket_addr
+                    "Received FullSync from node '{}' at bind_addr {} (tcp_source={})",
+                    sender_peer_id, sender_socket_addr, _peer_addr
                 );
 
                 // OPTIMIZATION: Do all peer management in one lock acquisition
                 {
                     let mut gossip_state = registry.gossip_state.lock().await;
 
-                    // Add the sender as a peer (inlined to avoid separate lock)
+                    // FIX: If the resolved bind address differs from the TCP source address,
+                    // migrate the PeerInfo from the ephemeral port entry to the bind address.
+                    // This preserves node_id, sequence, and failure state learned during TLS handshake.
+                    if sender_socket_addr != _peer_addr && _peer_addr != registry.bind_addr {
+                        if let Some(mut old_peer_info) = gossip_state.peers.remove(&_peer_addr) {
+                            info!(
+                                old_addr = %_peer_addr,
+                                new_addr = %sender_socket_addr,
+                                node_id = ?old_peer_info.node_id,
+                                "🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync"
+                            );
+                            // Update the address field and preserve the connection address
+                            old_peer_info.address = sender_socket_addr;
+                            old_peer_info.peer_address = Some(_peer_addr);
+                            // Insert with new key (bind address), preserving all state
+                            gossip_state.peers.insert(sender_socket_addr, old_peer_info);
+                            // Also clean up pending failures for the old address
+                            gossip_state.pending_peer_failures.remove(&_peer_addr);
+                        }
+                    }
+
+                    // Add the sender as a peer if not already present (inlined to avoid separate lock)
                     if sender_socket_addr != registry.bind_addr {
                         if let std::collections::hash_map::Entry::Vacant(e) =
                             gossip_state.peers.entry(sender_socket_addr)
@@ -5752,7 +5776,7 @@ pub(crate) fn handle_incoming_message(
                             let current_time = crate::current_timestamp();
                             e.insert(crate::registry::PeerInfo {
                                 address: sender_socket_addr,
-                                peer_address: None,
+                                peer_address: Some(_peer_addr), // Remember the actual connection address
                                 node_id: None,
                                 failures: 0,
                                 last_attempt: current_time,
@@ -5810,6 +5834,12 @@ pub(crate) fn handle_incoming_message(
                 // This allows bidirectional communication to work properly
                 {
                     let pool = registry.connection_pool.lock().await;
+
+                    // FIX: Clean up any stale mapping for the old ephemeral TCP source address
+                    if sender_socket_addr != _peer_addr {
+                        pool.addr_to_peer_id.remove(&_peer_addr);
+                    }
+
                     pool.peer_id_to_addr
                         .insert(sender_peer_id.clone(), sender_socket_addr);
                     pool.addr_to_peer_id
@@ -5854,6 +5884,7 @@ pub(crate) fn handle_incoming_message(
                         local_actors: our_local_actors.into_iter().collect(),
                         known_actors: our_known_actors.into_iter().collect(),
                         sender_peer_id: registry.peer_id.clone(), // Use peer ID
+                        sender_bind_addr: Some(registry.bind_addr.to_string()), // Our listening address
                         sequence: our_sequence,
                         wall_clock_time: crate::current_timestamp(),
                     };
@@ -5979,6 +6010,7 @@ pub(crate) fn handle_incoming_message(
             }
             RegistryMessage::FullSyncRequest {
                 sender_peer_id,
+                sender_bind_addr: _, // Not used for requests, but must be present
                 sequence: _,
                 wall_clock_time: _,
             } => {
@@ -6015,18 +6047,21 @@ pub(crate) fn handle_incoming_message(
                 local_actors,
                 known_actors,
                 sender_peer_id,
+                sender_bind_addr,
                 sequence,
                 wall_clock_time,
             } => {
+                // Use resolve_peer_addr for safe address resolution with validation
+                let sender_socket_addr = resolve_peer_addr(sender_bind_addr.as_deref(), _peer_addr);
+
                 debug!(
                     sender = %sender_peer_id,
+                    bind_addr = %sender_socket_addr,
+                    tcp_source = %_peer_addr,
                     local_actors = local_actors.len(),
                     known_actors = known_actors.len(),
-                    "RECEIVED: FullSyncResponse from peer"
+                    "RECEIVED: FullSyncResponse from peer (using bind_addr)"
                 );
-
-                let sender_socket_addr =
-                    resolve_peer_state_addr(&registry, Some(&sender_peer_id), _peer_addr).await;
 
                 registry
                     .merge_full_sync(
@@ -6038,8 +6073,49 @@ pub(crate) fn handle_incoming_message(
                     )
                     .await;
 
+                // FIX: Update peer_id mappings (mirror the FullSync handler logic)
+                // This prevents stale ephemeral addresses from being reintroduced via resolve_peer_state_addr
+                {
+                    let pool = registry.connection_pool.lock().await;
+
+                    // Clean up any stale mapping for the old ephemeral TCP source address
+                    if sender_socket_addr != _peer_addr {
+                        pool.addr_to_peer_id.remove(&_peer_addr);
+                    }
+
+                    pool.peer_id_to_addr
+                        .insert(sender_peer_id.clone(), sender_socket_addr);
+                    pool.addr_to_peer_id
+                        .insert(sender_socket_addr, sender_peer_id.clone());
+                    debug!(
+                        "BIDIRECTIONAL: Updated connection mapping from FullSyncResponse - peer_id={} addr={}",
+                        sender_peer_id, sender_socket_addr
+                    );
+                }
+
                 // Reset failure state when receiving response
                 let mut gossip_state = registry.gossip_state.lock().await;
+
+                // FIX: If the resolved bind address differs from the TCP source address,
+                // migrate the PeerInfo from the ephemeral port entry to the bind address.
+                // This preserves node_id, sequence, and failure state learned during TLS handshake.
+                if sender_socket_addr != _peer_addr && _peer_addr != registry.bind_addr {
+                    if let Some(mut old_peer_info) = gossip_state.peers.remove(&_peer_addr) {
+                        info!(
+                            old_addr = %_peer_addr,
+                            new_addr = %sender_socket_addr,
+                            node_id = ?old_peer_info.node_id,
+                            "🔄 Migrating peer info from ephemeral TCP source to bind address from FullSyncResponse"
+                        );
+                        // Update the address field and preserve the connection address
+                        old_peer_info.address = sender_socket_addr;
+                        old_peer_info.peer_address = Some(_peer_addr);
+                        // Insert with new key (bind address), preserving all state
+                        gossip_state.peers.insert(sender_socket_addr, old_peer_info);
+                        // Also clean up pending failures for the old address
+                        gossip_state.pending_peer_failures.remove(&_peer_addr);
+                    }
+                }
 
                 // Reset failure state for responding peer
                 let need_to_clear_pending =
