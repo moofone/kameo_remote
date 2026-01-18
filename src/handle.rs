@@ -976,6 +976,25 @@ where
             return ConnectionCloseOutcome::DroppedByTieBreaker;
         }
 
+        // CRITICAL FIX: Also index by ephemeral peer_addr if it differs from peer_state_addr.
+        // This ensures that handle_response_message (which looks up by peer_addr) can find
+        // the connection AND the correlation tracker. Without this, responses fail to be
+        // delivered because they are looked up by the ephemeral address but only indexed
+        // by the configured bind address.
+        if peer_addr != peer_state_addr {
+            let pool = registry.connection_pool.lock().await;
+            pool.index_connection_by_addr(peer_addr, connection_arc.clone());
+            // Also add the addr_to_peer_id mapping so handle_response_message can look up
+            // the shared correlation tracker via peer_id
+            pool.add_addr_to_peer_id(peer_addr, peer_id.clone());
+            debug!(
+                node_id = %sender_node_id,
+                peer_addr = %peer_addr,
+                peer_state_addr = %peer_state_addr,
+                "Also indexed incoming connection by ephemeral address for response delivery"
+            );
+        }
+
         debug!(
             node_id = %sender_node_id,
             peer_addr = %peer_addr,
@@ -1085,11 +1104,11 @@ where
                 }
             }
         }
-        Ok(MessageReadResult::Raw(payload)) => {
+        Ok(MessageReadResult::Raw(_payload)) => {
             #[cfg(any(test, feature = "test-helpers", debug_assertions))]
             {
                 if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
-                    crate::test_helpers::record_raw_payload(payload.clone());
+                    crate::test_helpers::record_raw_payload(_payload.clone());
                 }
             }
             debug!(peer_addr = %peer_addr, "Ignoring raw message payload");
@@ -1216,11 +1235,11 @@ where
                     }
                 }
             }
-            Ok(MessageReadResult::Raw(payload)) => {
+            Ok(MessageReadResult::Raw(_payload)) => {
                 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
                 {
                     if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
-                        crate::test_helpers::record_raw_payload(payload.clone());
+                        crate::test_helpers::record_raw_payload(_payload.clone());
                     }
                 }
                 debug!(peer_addr = %peer_addr, "Ignoring raw message payload");
@@ -1327,33 +1346,46 @@ pub(crate) async fn handle_response_message(
     correlation_id: u16,
     payload: bytes::Bytes,
 ) {
-    let conn = {
-        let pool = registry.connection_pool.lock().await;
-        pool.get_connection_by_addr(&peer_addr)
-    };
+    let pool = registry.connection_pool.lock().await;
 
-    if let Some(conn) = conn {
+    // First, try to deliver via connection's embedded correlation tracker
+    if let Some(conn) = pool.get_connection_by_addr(&peer_addr) {
         if let Some(ref correlation) = conn.correlation {
             if correlation.has_pending(correlation_id) {
                 correlation.complete(correlation_id, payload);
                 debug!(
                     peer = %peer_addr,
                     correlation_id = correlation_id,
-                    "Delivered response via correlation tracker"
+                    "Delivered response via connection correlation tracker"
                 );
-            } else {
+                return;
+            }
+        }
+    }
+
+    // FALLBACK: Use shared correlation tracker by peer_id.
+    // This is critical for bidirectional connections where the ask was sent on
+    // the outbound connection but the response arrives on the inbound connection.
+    if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
+        if let Some(correlation) = pool.get_shared_correlation_tracker(&peer_id) {
+            if correlation.has_pending(correlation_id) {
+                correlation.complete(correlation_id, payload);
                 debug!(
                     peer = %peer_addr,
+                    peer_id = %peer_id,
                     correlation_id = correlation_id,
-                    "Response received with no pending request"
+                    "Delivered response via shared correlation tracker (fallback)"
                 );
+                return;
             }
-        } else {
-            warn!(peer = %peer_addr, "Connection has no correlation tracker for response");
         }
-    } else {
-        warn!(peer = %peer_addr, "No connection found for response delivery");
     }
+
+    debug!(
+        peer = %peer_addr,
+        correlation_id = correlation_id,
+        "Response received with no pending request (neither connection nor shared tracker)"
+    );
 }
 
 /// Read a message from a TLS reader
