@@ -3103,7 +3103,20 @@ impl ConnectionPool {
         // Check if new_addr is already indexed
         if let Some(existing_peer_id) = self.addr_to_peer_id.get(&new_addr) {
             if existing_peer_id.value() == peer_id {
-                // Already indexed under the advertised address for this peer, nothing to do
+                // Already indexed under the advertised address for this peer.
+                // But we still need to ensure the OLD (ephemeral) address is indexed too!
+                // Without this, lookups by ephemeral address fail after gossip rounds.
+                let old_addr = connection.addr;
+                if old_addr != new_addr && !self.connections_by_addr.contains_key(&old_addr) {
+                    self.connections_by_addr.insert(old_addr, connection);
+                    self.addr_to_peer_id.insert(old_addr, peer_id.clone());
+                    debug!(
+                        old_addr = %old_addr,
+                        new_addr = %new_addr,
+                        peer_id = %peer_id,
+                        "📍 Added missing ephemeral address mapping"
+                    );
+                }
                 return;
             } else {
                 // Stale entry from different peer - remove it before reindexing
