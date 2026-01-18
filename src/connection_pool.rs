@@ -3141,9 +3141,11 @@ impl ConnectionPool {
             self.addr_to_peer_id.insert(old_addr, peer_id.clone());
         }
 
-        debug!(
-            "CONNECTION POOL: Reindexed peer {} - added {} alongside {} (both addresses valid)",
-            peer_id, new_addr, old_addr
+        info!(
+            old_addr = %old_addr,
+            new_addr = %new_addr,
+            peer_id = %peer_id,
+            "📍 Reindexed connection from ephemeral port to bind address"
         );
     }
 
@@ -5968,13 +5970,9 @@ pub(crate) fn handle_incoming_message(
                     // Without this, get_connection(bind_addr) fails because the connection is
                     // still indexed under the ephemeral port the peer connected FROM.
                     // This allows messages to be sent back to the peer using their advertised address.
+                    // Note: reindex_connection_addr already has early-return if already indexed,
+                    // and logs internally when it actually does work.
                     if sender_socket_addr != _peer_addr {
-                        info!(
-                            old_addr = %_peer_addr,
-                            new_addr = %sender_socket_addr,
-                            peer_id = %sender_peer_id,
-                            "📍 Reindexing connection from ephemeral port to bind address"
-                        );
                         pool.reindex_connection_addr(&sender_peer_id, sender_socket_addr);
                     }
 
@@ -6223,13 +6221,9 @@ pub(crate) fn handle_incoming_message(
 
                     // CRITICAL FIX: Reindex the connection from ephemeral TCP port to bind address
                     // Mirror the FullSync handler fix - allows sending to advertised address
+                    // Note: reindex_connection_addr already has early-return if already indexed,
+                    // and logs internally when it actually does work.
                     if sender_socket_addr != _peer_addr {
-                        info!(
-                            old_addr = %_peer_addr,
-                            new_addr = %sender_socket_addr,
-                            peer_id = %sender_peer_id,
-                            "📍 Reindexing connection from ephemeral port to bind address (FullSyncResponse)"
-                        );
                         pool.reindex_connection_addr(&sender_peer_id, sender_socket_addr);
                     }
 
