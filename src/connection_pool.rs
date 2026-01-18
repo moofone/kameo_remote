@@ -5154,10 +5154,14 @@ impl ConnectionPool {
                                         }
                                         crate::MessageType::StreamStart => {
                                             // Parse stream header from payload
-                                            if payload.len() >= crate::StreamHeader::SERIALIZED_SIZE
+                                            // Wire format: [type:1][correlation_id:2][reserved:5][StreamHeader:36]
+                                            // After ASK_RESPONSE_HEADER_LEN (4) slice, payload has reserved(4) then StreamHeader
+                                            // So we need to skip 4 bytes to get to StreamHeader
+                                            const RESERVED_BYTES: usize = 4;
+                                            if payload.len() >= RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE
                                             {
                                                 if let Some(header) =
-                                                    crate::StreamHeader::from_bytes(payload)
+                                                    crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
                                                 {
                                                     info!(peer = %peer_addr, stream_id = header.stream_id, total_size = header.total_size,
                                                       type_hash = %format!("{:08x}", header.type_hash), actor_id = header.actor_id,
@@ -5178,13 +5182,16 @@ impl ConnectionPool {
                                         }
                                         crate::MessageType::StreamData => {
                                             // Parse stream header and data
-                                            if payload.len() >= crate::StreamHeader::SERIALIZED_SIZE
+                                            // Wire format: [type:1][correlation_id:2][reserved:5][StreamHeader:36][chunk_data:N]
+                                            // After ASK_RESPONSE_HEADER_LEN (4) slice, payload has reserved(4) then StreamHeader
+                                            const RESERVED_BYTES: usize = 4;
+                                            if payload.len() >= RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE
                                             {
                                                 if let Some(header) =
-                                                    crate::StreamHeader::from_bytes(payload)
+                                                    crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
                                                 {
                                                     let data_start =
-                                                        crate::StreamHeader::SERIALIZED_SIZE;
+                                                        RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE;
                                                     if payload.len()
                                                         >= data_start + header.chunk_size as usize
                                                     {
@@ -5216,10 +5223,13 @@ impl ConnectionPool {
                                         }
                                         crate::MessageType::StreamEnd => {
                                             // Parse stream header and complete assembly
-                                            if payload.len() >= crate::StreamHeader::SERIALIZED_SIZE
+                                            // Wire format: [type:1][correlation_id:2][reserved:5][StreamHeader:36]
+                                            // After ASK_RESPONSE_HEADER_LEN (4) slice, payload has reserved(4) then StreamHeader
+                                            const RESERVED_BYTES: usize = 4;
+                                            if payload.len() >= RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE
                                             {
                                                 if let Some(header) =
-                                                    crate::StreamHeader::from_bytes(payload)
+                                                    crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
                                                 {
                                                     info!(peer = %peer_addr, stream_id = header.stream_id,
                                                       "📤 StreamEnd: Completing streaming transfer");
