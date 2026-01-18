@@ -3102,18 +3102,25 @@ impl ConnectionPool {
             let old_addr = connection.addr;
 
             // Insert the connection under the new (advertised) address
-            self.connections_by_addr.insert(new_addr, connection);
+            self.connections_by_addr.insert(new_addr, connection.clone());
             self.addr_to_peer_id.insert(new_addr, peer_id.clone());
+            // Also update peer_id_to_addr so disconnect uses the correct address
+            self.peer_id_to_addr.insert(peer_id.clone(), new_addr);
 
-            // Remove from the old (ephemeral) address if it differs
+            // IMPORTANT: Keep the old (ephemeral) address entry as well!
+            // Inbound messages still arrive with the TCP source address (old_addr),
+            // so we need both addresses to point to the same connection.
+            // The old entry is NOT removed - both addresses are valid for this peer.
             if old_addr != new_addr {
-                self.connections_by_addr.remove(&old_addr);
-                self.addr_to_peer_id.remove(&old_addr);
+                // Re-insert connection under old addr to ensure both addresses work
+                self.connections_by_addr.insert(old_addr, connection);
+                // Keep addr_to_peer_id for old_addr so lookups work
+                self.addr_to_peer_id.insert(old_addr, peer_id.clone());
             }
 
             debug!(
-                "CONNECTION POOL: Reindexed peer {} from {} to {} (advertised bind address)",
-                peer_id, old_addr, new_addr
+                "CONNECTION POOL: Reindexed peer {} - added {} alongside {} (both addresses valid)",
+                peer_id, new_addr, old_addr
             );
         }
     }
@@ -3526,11 +3533,25 @@ impl ConnectionPool {
         peer_id: &crate::PeerId,
     ) -> Option<Arc<LockFreeConnection>> {
         if let Some((_, connection)) = self.connections_by_peer.remove(peer_id) {
-            let addr = connection.addr;
-            self.connections_by_addr.remove(&addr);
-            self.addr_to_peer_id.remove(&addr);
+            // Remove peer_id_to_addr entry
+            self.peer_id_to_addr.remove(peer_id);
+
+            // Remove ALL addr_to_peer_id entries for this peer
+            // (may have multiple due to reindexing keeping both ephemeral and bind addresses)
+            let addrs_to_remove: Vec<SocketAddr> = self
+                .addr_to_peer_id
+                .iter()
+                .filter(|entry| entry.value() == peer_id)
+                .map(|entry| *entry.key())
+                .collect();
+
+            for addr in &addrs_to_remove {
+                self.addr_to_peer_id.remove(addr);
+                self.connections_by_addr.remove(addr);
+                self.clear_capabilities_for_addr(addr);
+            }
+
             self.connection_counter.fetch_sub(1, Ordering::AcqRel);
-            self.clear_capabilities_for_addr(&addr);
             Some(connection)
         } else {
             None
