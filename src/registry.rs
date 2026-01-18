@@ -2407,11 +2407,18 @@ impl GossipRegistry {
         let current_time = current_timestamp();
 
         // IMMEDIATELY mark the connection as failed and remove from pool
+        // Use disconnect_connection_by_peer_id when possible to clean up ALL address aliases
         {
             let pool = self.connection_pool.lock().await;
-            if pool.has_connection(&failed_peer_addr) {
+            // Try to find peer_id for proper cleanup of all aliases
+            if let Some(peer_id) = pool.get_peer_id_by_addr(&failed_peer_addr) {
+                if let Some(_conn) = pool.disconnect_connection_by_peer_id(&peer_id) {
+                    info!(addr = %failed_peer_addr, peer_id = %peer_id, "removed disconnected connection from pool (all address aliases cleaned up)");
+                }
+            } else if pool.has_connection(&failed_peer_addr) {
+                // Fallback: no peer_id found, remove by address only
                 pool.remove_connection(failed_peer_addr);
-                info!(addr = %failed_peer_addr, "removed disconnected connection from pool");
+                info!(addr = %failed_peer_addr, "removed disconnected connection from pool (by address only)");
             }
         }
 
@@ -2519,16 +2526,16 @@ impl GossipRegistry {
         let current_time = current_timestamp();
 
         // IMMEDIATELY remove the connection from pool
-        // remove_connection handles both address and node ID mappings
+        // Use disconnect_connection_by_peer_id to clean up ALL address aliases
+        // (ephemeral port + bind address mappings created during reindex)
         {
             let pool = self.connection_pool.lock().await;
 
-            if pool.has_connection(&failed_peer_addr) {
-                pool.remove_connection(failed_peer_addr);
+            if let Some(_conn) = pool.disconnect_connection_by_peer_id(failed_peer_id) {
                 info!(
                     addr = %failed_peer_addr,
                     node_id = %failed_peer_id,
-                    "removed disconnected connection from pool (both address and node ID mappings)"
+                    "removed disconnected connection from pool (all address aliases cleaned up)"
                 );
             } else {
                 info!(
