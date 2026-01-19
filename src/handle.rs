@@ -65,6 +65,8 @@ struct InProgressStream {
     actor_id: u64,
     chunks: BTreeMap<u32, Bytes>, // chunk_index -> chunk_data
     received_size: usize,
+    /// Timestamp when stream started (for stale cleanup)
+    started_at: std::time::Instant,
 }
 
 impl StreamingState {
@@ -90,6 +92,7 @@ impl StreamingState {
             actor_id: header.actor_id,
             chunks: BTreeMap::new(),
             received_size: 0,
+            started_at: std::time::Instant::now(),
         };
 
         self.active_streams.insert(header.stream_id, stream);
@@ -151,6 +154,41 @@ impl StreamingState {
         );
 
         Ok(Some(complete_data.to_vec()))
+    }
+
+    /// Clean up stale streams that have been incomplete for too long.
+    /// This prevents memory leaks when StreamStart arrives but StreamEnd never comes.
+    fn cleanup_stale(&mut self) {
+        use std::time::Duration;
+        const STREAM_TIMEOUT: Duration = Duration::from_secs(60);
+
+        let before_count = self.active_streams.len();
+
+        self.active_streams.retain(|stream_id, stream| {
+            let age = stream.started_at.elapsed();
+            if age > STREAM_TIMEOUT {
+                warn!(
+                    stream_id = stream_id,
+                    age_secs = age.as_secs(),
+                    received_size = stream.received_size,
+                    expected_size = stream.total_size,
+                    chunks_received = stream.chunks.len(),
+                    "Cleaning up stale stream - StreamEnd never arrived"
+                );
+                false // Remove this entry
+            } else {
+                true // Keep this entry
+            }
+        });
+
+        let removed = before_count - self.active_streams.len();
+        if removed > 0 {
+            info!(
+                removed_count = removed,
+                remaining = self.active_streams.len(),
+                "Cleaned up stale in-progress streams"
+            );
+        }
     }
 }
 
@@ -1114,8 +1152,22 @@ where
 
     // Continue reading messages from the TLS stream
     // Note: writer has been moved to the connection pool, so we only have the reader
+    // Cleanup interval for stale streams (every 30 seconds)
+    let mut cleanup_interval = interval(Duration::from_secs(30));
+    cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
-        match read_message_from_tls_reader(&mut reader, max_message_size).await {
+        // Use select! to either read a message or trigger periodic cleanup
+        let msg_result = tokio::select! {
+            result = read_message_from_tls_reader(&mut reader, max_message_size) => result,
+            _ = cleanup_interval.tick() => {
+                // Periodically cleanup stale incomplete streams to prevent memory leak
+                streaming_state.cleanup_stale();
+                continue;
+            }
+        };
+
+        match msg_result {
             Ok(MessageReadResult::Gossip(msg, correlation_id)) => {
                 // For ActorMessage with correlation_id from Ask envelope, ensure it's set
                 let msg_to_handle = if let RegistryMessage::ActorMessage {
@@ -1495,21 +1547,21 @@ where
                     }
                     crate::MessageType::ActorTell | crate::MessageType::ActorAsk => {
                         // This is an actor message with envelope format:
-                        // [type:1][correlation_id:2][reserved:5][actor_id:8][type_hash:4][payload_len:4][payload:N]
+                        // [type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
                         if msg_data.len() < crate::framing::ACTOR_HEADER_LEN {
-                            // Need at least 24 bytes for header
+                            // Need at least 28 bytes for header
                             return Ok(MessageReadResult::Raw(msg_data));
                         }
 
                         // Parse the actor message envelope
-                        // Wire format (from kameo): [type:1][correlation_id:2][reserved:5][actor_id:8][type_hash:4][payload_len:4][payload:N]
+                        // Wire format: [type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
                         let msg_type_byte = msg_data[0];
                         let correlation_id = u16::from_be_bytes([msg_data[1], msg_data[2]]);
-                        // Skip reserved bytes (3-7), actor_id starts at byte 8
-                        let actor_id = u64::from_be_bytes(msg_data[8..16].try_into().unwrap());
-                        let type_hash = u32::from_be_bytes(msg_data[16..20].try_into().unwrap());
+                        // Skip reserved bytes (3-11), actor_id starts at byte 12
+                        let actor_id = u64::from_be_bytes(msg_data[12..20].try_into().unwrap());
+                        let type_hash = u32::from_be_bytes(msg_data[20..24].try_into().unwrap());
                         let payload_len =
-                            u32::from_be_bytes(msg_data[20..24].try_into().unwrap()) as usize;
+                            u32::from_be_bytes(msg_data[24..28].try_into().unwrap()) as usize;
 
                         if msg_data.len() < crate::framing::ACTOR_HEADER_LEN + payload_len {
                             return Ok(MessageReadResult::Raw(msg_data));
@@ -1532,7 +1584,7 @@ where
                     | crate::MessageType::StreamData
                     | crate::MessageType::StreamEnd => {
                         // Handle streaming messages
-                        // Message format: [type:1][correlation_id:2][reserved:5][stream_header:36][chunk_data:N]
+                        // Message format: [type:1][correlation_id:2][reserved:9][stream_header:36][chunk_data:N]
                         if msg_data.len()
                             < crate::framing::STREAM_HEADER_PREFIX_LEN
                                 + crate::StreamHeader::SERIALIZED_SIZE
@@ -1540,7 +1592,7 @@ where
                             return Ok(MessageReadResult::Raw(msg_data));
                         }
 
-                        // Parse the stream header (36 bytes starting at offset 8)
+                        // Parse the stream header (36 bytes starting at offset 12)
                         let header_bytes = &msg_data[crate::framing::STREAM_HEADER_PREFIX_LEN
                             ..crate::framing::STREAM_HEADER_PREFIX_LEN
                                 + crate::StreamHeader::SERIALIZED_SIZE];
@@ -1643,13 +1695,13 @@ mod framing_tests {
         let actor_id = 0x0102030405060708u64;
         let type_hash = 0x11223344u32;
 
-        // Wire format: [len:4][type:1][correlation_id:2][reserved:5][actor_id:8][type_hash:4][payload_len:4][payload:N]
+        // Wire format: [len:4][type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
         let total_len = framing::ACTOR_HEADER_LEN + payload_bytes.len();
         let mut frame = Vec::with_capacity(framing::LENGTH_PREFIX_LEN + total_len);
         frame.extend_from_slice(&(total_len as u32).to_be_bytes()); // 4 bytes: length prefix
         frame.push(MessageType::ActorTell as u8);                   // 1 byte: message type
         frame.extend_from_slice(&0u16.to_be_bytes());               // 2 bytes: correlation_id
-        frame.extend_from_slice(&[0u8; 5]);                         // 5 bytes: reserved (was 1 byte pad)
+        frame.extend_from_slice(&[0u8; 9]);                         // 9 bytes: reserved (for 32-byte alignment)
         frame.extend_from_slice(&actor_id.to_be_bytes());           // 8 bytes: actor_id
         frame.extend_from_slice(&type_hash.to_be_bytes());          // 4 bytes: type_hash
         frame.extend_from_slice(&(payload_bytes.len() as u32).to_be_bytes()); // 4 bytes: payload_len
