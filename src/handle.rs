@@ -725,13 +725,13 @@ async fn handle_tls_connection(
                 }
             },
             ConnectionCloseOutcome::Normal { node_id: None } => {
-                warn!(peer = %peer_addr, "HANDLE.RS: Cannot handle peer failure - sender node ID unknown");
+                warn!(peer = %peer_addr, "⚠️ HANDLE.RS: Connection handler returned without node_id - early exit path taken");
             }
             ConnectionCloseOutcome::DroppedByTieBreaker => {
-                debug!(peer = %peer_addr, "HANDLE.RS: Dropped duplicate connection via tie-breaker");
+                warn!(peer = %peer_addr, "⚠️ HANDLE.RS: Dropped duplicate connection via tie-breaker");
             }
         }
-        debug!(peer = %peer_addr, "HANDLE.RS: Incoming TLS connection handler exited");
+        warn!(peer = %peer_addr, "📤 HANDLE.RS: Incoming TLS connection handler task EXITED");
     });
 }
 
@@ -838,7 +838,7 @@ where
             }
         }
         Err(e) => {
-            warn!(error = %e, "Failed to read initial message from TLS stream");
+            warn!(error = %e, peer_addr = %peer_addr, "⚠️ Failed to read initial message from TLS stream - early exit");
             return ConnectionCloseOutcome::Normal { node_id: None };
         }
     };
