@@ -418,6 +418,8 @@ pub struct StreamAssembly {
     pub header: crate::StreamHeader,
     pub chunks: std::collections::BTreeMap<u32, Vec<u8>>,
     pub received_bytes: usize,
+    /// Timestamp when stream assembly started (for stale cleanup)
+    pub started_at: std::time::Instant,
 }
 
 impl StreamAssembly {
@@ -2171,6 +2173,44 @@ impl GossipRegistry {
             let mut connection_pool = self.connection_pool.lock().await;
             connection_pool.cleanup_stale_connections();
         }
+
+        // Clean up stale stream assemblies (incomplete streams older than 60 seconds)
+        self.cleanup_stale_stream_assemblies().await;
+    }
+
+    /// Clean up incomplete stream assemblies that have been stale for too long.
+    /// This prevents memory leaks when StreamStart arrives but StreamEnd never comes.
+    pub async fn cleanup_stale_stream_assemblies(&self) {
+        const STREAM_ASSEMBLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+        let mut assemblies = self.stream_assemblies.lock().await;
+        let before_count = assemblies.len();
+
+        assemblies.retain(|stream_id, assembly| {
+            let age = assembly.started_at.elapsed();
+            if age > STREAM_ASSEMBLY_TIMEOUT {
+                warn!(
+                    stream_id = stream_id,
+                    age_secs = age.as_secs(),
+                    received_bytes = assembly.received_bytes,
+                    expected_bytes = assembly.header.total_size,
+                    chunks_received = assembly.chunks.len(),
+                    "Cleaning up stale stream assembly - StreamEnd never arrived"
+                );
+                false // Remove this entry
+            } else {
+                true // Keep this entry
+            }
+        });
+
+        let removed = before_count - assemblies.len();
+        if removed > 0 {
+            info!(
+                removed_count = removed,
+                remaining = assemblies.len(),
+                "Cleaned up stale stream assemblies"
+            );
+        }
     }
 
     /// Clean up actors from peers that have been disconnected for longer than dead_peer_timeout
@@ -2931,8 +2971,18 @@ impl GossipRegistry {
                 .take(to_remove)
                 .map(|(addr, _)| *addr)
                 .collect();
-            for addr in addrs_to_remove {
-                gossip_state.peers.remove(&addr);
+            for addr in &addrs_to_remove {
+                gossip_state.peers.remove(addr);
+                // LEAK-002 fix: Also clean up associated maps for evicted peers
+                gossip_state.peer_to_actors.remove(addr);
+                gossip_state.peer_health_reports.remove(addr);
+                gossip_state.pending_peer_failures.remove(addr);
+            }
+            if !addrs_to_remove.is_empty() {
+                debug!(
+                    removed_count = addrs_to_remove.len(),
+                    "Trimmed stale peers and associated data"
+                );
             }
         }
     }
@@ -3265,6 +3315,7 @@ impl GossipRegistry {
                 header,
                 chunks: std::collections::BTreeMap::new(),
                 received_bytes: 0,
+                started_at: std::time::Instant::now(),
             },
         );
         debug!(stream_id = header.stream_id, "Started stream assembly");

@@ -3,8 +3,8 @@ use crate::MessageType;
 pub const LENGTH_PREFIX_LEN: usize = 4;
 pub const ASK_RESPONSE_HEADER_LEN: usize = 4; // type(1) + correlation_id(2) + pad(1)
 pub const GOSSIP_HEADER_LEN: usize = 4; // type(1) + pad(3)
-pub const ACTOR_HEADER_LEN: usize = 24; // type(1) + correlation_id(2) + reserved(5) + actor_id(8) + type_hash(4) + payload_len(4)
-pub const STREAM_HEADER_PREFIX_LEN: usize = 8; // type(1) + correlation_id(2) + reserved(5)
+pub const ACTOR_HEADER_LEN: usize = 28; // type(1) + correlation_id(2) + reserved(9) + actor_id(8) + type_hash(4) + payload_len(4)
+pub const STREAM_HEADER_PREFIX_LEN: usize = 12; // type(1) + correlation_id(2) + reserved(9)
 
 pub const ASK_RESPONSE_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + ASK_RESPONSE_HEADER_LEN;
 pub const GOSSIP_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + GOSSIP_HEADER_LEN;
@@ -61,14 +61,11 @@ mod tests {
 
     #[test]
     fn actor_payload_offset_with_length_prefix() {
-        // NOTE: Actor payload is NOT 8-byte aligned with the current wire format.
-        // Wire format (from kameo): [len:4][type:1][corr:2][reserved:5][actor_id:8][type_hash:4][payload_len:4][payload:N]
-        // Payload offset = 4 + 24 = 28, and 28 % 8 = 4 (not aligned)
-        // The runtime code handles this by copying to an aligned buffer when needed
-        // (see decode_registry_message in handle.rs).
+        // Wire format: [len:4][type:1][corr:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
+        // Payload offset = 4 + 28 = 32, and 32 % 8 = 0 (8-byte aligned!)
         let offset = LENGTH_PREFIX_LEN + ACTOR_HEADER_LEN;
-        assert_eq!(offset, 28);
-        assert_eq!(offset % ALIGNMENT, 4); // Documents that it's NOT 8-byte aligned
+        assert_eq!(offset, 32);
+        assert_eq!(offset % ALIGNMENT, 0); // Now 8-byte aligned
     }
 
     #[test]
@@ -81,9 +78,11 @@ mod tests {
         let gossip_pad_needed = (ALIGNMENT - (gossip_header_without_pad % ALIGNMENT)) % ALIGNMENT;
         assert_eq!(gossip_pad_needed, 7);
 
-        let actor_header_without_pad = 1 + 2 + 8 + 4 + 4; // type + correlation_id + actor_id + type_hash + payload_len
-        let actor_pad_needed = (ALIGNMENT - (actor_header_without_pad % ALIGNMENT)) % ALIGNMENT;
-        assert_eq!(actor_pad_needed, 5);
+        // For 32-byte aligned actor header, we need 9 reserved bytes
+        let actor_header_without_pad = 1 + 2 + 8 + 4 + 4; // type + correlation_id + actor_id + type_hash + payload_len = 19
+        let actor_header_with_length_prefix = LENGTH_PREFIX_LEN + actor_header_without_pad; // 4 + 19 = 23
+        let actor_pad_needed_for_32 = 32 - actor_header_with_length_prefix; // 32 - 23 = 9
+        assert_eq!(actor_pad_needed_for_32, 9); // 9 reserved bytes for 32-byte alignment
     }
 
     #[test]
@@ -126,8 +125,8 @@ mod tests {
 
             assert!(is_aligned(LENGTH_PREFIX_LEN + ASK_RESPONSE_HEADER_LEN));
             assert!(is_aligned(LENGTH_PREFIX_LEN + GOSSIP_HEADER_LEN));
-            // Note: Actor header is NOT 8-byte aligned (28 % 8 = 4), handled at runtime
-            assert_eq!((LENGTH_PREFIX_LEN + ACTOR_HEADER_LEN) % ALIGNMENT, 4);
+            // Actor header is now 8-byte aligned (32 % 8 = 0)
+            assert!(is_aligned(LENGTH_PREFIX_LEN + ACTOR_HEADER_LEN));
         }
     }
 }
