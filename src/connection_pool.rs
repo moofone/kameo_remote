@@ -1346,7 +1346,7 @@ impl LockFreeStreamHandle {
             .expect("ask permit semaphore closed")
     }
 
-    async fn acquire_control_permit(&self) -> OwnedSemaphorePermit {
+    async fn acquire_control_permit(&self) -> Result<OwnedSemaphorePermit> {
         // Track permit acquisition for debugging stalls
         static ACQUIRE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let count = ACQUIRE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1361,7 +1361,7 @@ impl LockFreeStreamHandle {
             );
         }
 
-        // Add timeout to detect permit stalls
+        // Add timeout to detect permit stalls - return error instead of panic
         let start = std::time::Instant::now();
         let permit = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -1378,17 +1378,26 @@ impl LockFreeStreamHandle {
                         "⚠️ Control permit acquisition was slow"
                     );
                 }
-                p
+                Ok(p)
             }
-            Ok(Err(_)) => panic!("control permit semaphore closed"),
+            Ok(Err(_)) => {
+                error!("control permit semaphore closed unexpectedly");
+                Err(GossipError::Network(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "control permit semaphore closed",
+                )))
+            }
             Err(_) => {
-                // Timeout after 5 seconds - this is a fatal stall
-                eprintln!(
-                    "💀 [PERMIT TIMEOUT] #{} timed out after 5s waiting for control permit (available: {})",
-                    count,
-                    self.control_permits.available_permits()
+                // Timeout after 5 seconds - connection likely stalled
+                warn!(
+                    count = count,
+                    available = self.control_permits.available_permits(),
+                    "Control permit acquisition timed out after 5s - writer likely stalled, dropping message"
                 );
-                panic!("control permit acquisition timed out - writer likely stalled");
+                Err(GossipError::Network(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "control permit acquisition timed out - writer stalled",
+                )))
             }
         }
     }
@@ -1408,7 +1417,7 @@ impl LockFreeStreamHandle {
 
     #[cfg(test)]
     async fn acquire_control_permit_for_test(&self) -> OwnedSemaphorePermit {
-        self.acquire_control_permit().await
+        self.acquire_control_permit().await.expect("test: control permit acquisition failed")
     }
 
     fn enqueue_with_permit(&self, data: WritePayload, permit: OwnedSemaphorePermit) -> Result<()> {
@@ -1447,7 +1456,7 @@ impl LockFreeStreamHandle {
     }
 
     pub async fn write_bytes_control(&self, data: bytes::Bytes) -> Result<()> {
-        let permit = self.acquire_control_permit().await;
+        let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(WritePayload::Single(data), permit)
     }
 
@@ -1456,7 +1465,7 @@ impl LockFreeStreamHandle {
         header: bytes::Bytes,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        let permit = self.acquire_control_permit().await;
+        let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(WritePayload::HeaderPayload { header, payload }, permit)
     }
 
@@ -1466,7 +1475,7 @@ impl LockFreeStreamHandle {
         header_len: u8,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        let permit = self.acquire_control_permit().await;
+        let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(
             WritePayload::HeaderInline {
                 header,
@@ -1509,7 +1518,7 @@ impl LockFreeStreamHandle {
         prefix: Option<bytes::Bytes>,
         payload: crate::typed::PooledPayload,
     ) -> Result<()> {
-        let permit = self.acquire_control_permit().await;
+        let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(
             WritePayload::HeaderPooled {
                 header,
@@ -1528,7 +1537,7 @@ impl LockFreeStreamHandle {
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
     ) -> Result<()> {
-        let permit = self.acquire_control_permit().await;
+        let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(
             WritePayload::HeaderInlinePooled {
                 header,
@@ -1583,7 +1592,7 @@ impl LockFreeStreamHandle {
     where
         B: Buf + Send + 'static,
     {
-        let permit = self.acquire_control_permit().await;
+        let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(WritePayload::Buf(Box::new(buf)), permit)
     }
 
