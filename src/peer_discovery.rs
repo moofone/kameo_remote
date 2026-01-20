@@ -243,16 +243,6 @@ impl PeerDiscovery {
         let current_count = connected_count + pending_count;
         let remaining_slots = self.config.max_peers.saturating_sub(current_count);
 
-        // DEBUG_MARKER:F001 - verify slot calculation includes pending peers
-        debug!(
-            connected = connected_count,
-            pending = pending_count,
-            remaining = remaining_slots,
-            max = self.config.max_peers,
-            "DEBUG_VERIFY:F001 slot calculation includes pending peers"
-        );
-        // END_DEBUG_MARKER:F001
-
         if remaining_slots == 0 {
             debug!(
                 connected = connected_count,
@@ -320,12 +310,6 @@ impl PeerDiscovery {
 
         // Atomically mark candidates as pending using peer_states
         for addr in &candidates {
-            // DEBUG_MARKER:F003 - verify atomic transition to Pending
-            debug!(
-                addr = %addr,
-                "DEBUG_VERIFY:F003 peer state -> Pending"
-            );
-            // END_DEBUG_MARKER:F003
             self.peer_states.insert(*addr, PeerState::Pending { since: now });
             // Also update legacy fields for backward compatibility
             self.pending_peers.insert(*addr, now);
@@ -431,13 +415,6 @@ impl PeerDiscovery {
             // Also clean up legacy fields
             self.pending_peers.remove(&addr);
             self.failed_peers.remove(&addr);
-
-            // DEBUG_MARKER:F003 - verify atomic removal
-            debug!(
-                addr = %addr,
-                "DEBUG_VERIFY:F003 peer state -> Removed (max failures)"
-            );
-            // END_DEBUG_MARKER:F003
         } else {
             // Atomically transition to Failed state
             let new_state = PeerState::Failed {
@@ -445,15 +422,6 @@ impl PeerDiscovery {
                 attempts: new_attempts,
             };
             self.peer_states.insert(addr, new_state);
-
-            // DEBUG_MARKER:F003 - verify atomic transition to Failed
-            debug!(
-                addr = %addr,
-                failures = new_attempts,
-                backoff_secs = new_state.backoff_seconds(),
-                "DEBUG_VERIFY:F003 peer state -> Failed"
-            );
-            // END_DEBUG_MARKER:F003
 
             // Also update legacy fields for backward compatibility
             self.pending_peers.remove(&addr);
@@ -483,14 +451,6 @@ impl PeerDiscovery {
         self.pending_peers.remove(&addr);
         self.failed_peers.remove(&addr);
         self.connected_peers.insert(addr);
-
-        // DEBUG_MARKER:F003 - verify atomic transition to Connected
-        debug!(
-            addr = %addr,
-            connected_count = self.connected_count_unified(),
-            "DEBUG_VERIFY:F003 peer state -> Connected"
-        );
-        // END_DEBUG_MARKER:F003
     }
 
     /// Record a peer disconnection
@@ -502,14 +462,6 @@ impl PeerDiscovery {
 
         // Also update legacy field for backward compatibility
         self.connected_peers.remove(&addr);
-
-        // DEBUG_MARKER:F003 - verify atomic removal on disconnect
-        debug!(
-            addr = %addr,
-            connected_count = self.connected_count_unified(),
-            "DEBUG_VERIFY:F003 peer state -> Removed (disconnected)"
-        );
-        // END_DEBUG_MARKER:F003
     }
 
     /// Get the current number of connected peers
