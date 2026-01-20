@@ -148,12 +148,26 @@ impl PeerDiscovery {
         let mut candidates = Vec::new();
 
         // Calculate how many more peers we can connect to
-        let current_count = self.connected_peers.len();
+        // IMPORTANT: Include pending_peers to prevent concurrent gossip overcommit
+        let connected_count = self.connected_peers.len();
+        let pending_count = self.pending_peers.len();
+        let current_count = connected_count + pending_count;
         let remaining_slots = self.config.max_peers.saturating_sub(current_count);
+
+        // DEBUG_MARKER:F001 - verify slot calculation includes pending peers
+        debug!(
+            connected = connected_count,
+            pending = pending_count,
+            remaining = remaining_slots,
+            max = self.config.max_peers,
+            "DEBUG_VERIFY:F001 slot calculation includes pending peers"
+        );
+        // END_DEBUG_MARKER:F001
 
         if remaining_slots == 0 {
             debug!(
-                current = current_count,
+                connected = connected_count,
+                pending = pending_count,
                 max = self.config.max_peers,
                 "at soft cap, not accepting new peer candidates"
             );
@@ -857,5 +871,106 @@ mod tests {
         let stats = discovery.cleanup_expired(now + 2);
         assert_eq!(stats.failed_removed, 1);
         assert!(!discovery.failed_peers.contains_key(&failed_peer));
+    }
+
+    /// Test that slot calculation respects pending peers
+    /// Bug: remaining_slots only counts connected_peers, ignoring pending_peers
+    /// This allows concurrent gossip rounds to overcommit beyond max_peers
+    #[test]
+    fn test_on_peer_list_gossip_respects_pending_peers() {
+        let local = test_addr(8080);
+        let config = PeerDiscoveryConfig {
+            max_peers: 5,
+            ..Default::default()
+        };
+        let mut discovery = PeerDiscovery::new(local, config);
+
+        // Add 2 peers to connected_peers
+        discovery.on_peer_connected(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 20)),
+            8001,
+        ));
+        discovery.on_peer_connected(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 21)),
+            8002,
+        ));
+
+        assert_eq!(discovery.connected_peer_count(), 2);
+
+        // First gossip call adds 2 peers to pending_peers (slots: 5-2=3, takes 2)
+        let peers_first = vec![
+            create_peer_gossip("10.0.0.30:8010"),
+            create_peer_gossip("10.0.0.31:8011"),
+        ];
+        let candidates1 = discovery.on_peer_list_gossip(&peers_first);
+        assert_eq!(candidates1.len(), 2);
+        assert_eq!(discovery.pending_peer_count(), 2);
+
+        // Now: 2 connected + 2 pending = 4, so only 1 slot should remain
+        // Second gossip call with 3 new peers should only return 1 candidate
+        let peers_second = vec![
+            create_peer_gossip("10.0.0.40:8020"),
+            create_peer_gossip("10.0.0.41:8021"),
+            create_peer_gossip("10.0.0.42:8022"),
+        ];
+        let candidates2 = discovery.on_peer_list_gossip(&peers_second);
+
+        // EXPECTED: 1 candidate (5 - 2 connected - 2 pending = 1 slot)
+        // BUG: Current code returns 3 candidates (5 - 2 connected = 3 slots)
+        assert_eq!(
+            candidates2.len(),
+            1,
+            "should only return 1 candidate (5 max - 2 connected - 2 pending = 1 slot)"
+        );
+        assert_eq!(
+            discovery.pending_peer_count(),
+            3,
+            "should have 3 pending peers total (2 from first + 1 from second)"
+        );
+    }
+
+    /// Test that second gossip call with same peers skips already-pending ones
+    /// Bug: After insert at line 218, if gossip runs again before connection
+    /// completes, the same peer could be added as candidate again
+    #[test]
+    fn test_on_peer_list_gossip_skips_already_pending() {
+        let local = test_addr(8080);
+        let mut discovery = PeerDiscovery::with_defaults(local);
+
+        // First gossip call with peers A and B
+        let peers_first = vec![
+            create_peer_gossip("10.0.0.50:8050"), // Peer A
+            create_peer_gossip("10.0.0.51:8051"), // Peer B
+        ];
+        let candidates1 = discovery.on_peer_list_gossip(&peers_first);
+        assert_eq!(candidates1.len(), 2);
+        assert_eq!(discovery.pending_peer_count(), 2);
+
+        // Second gossip call with A, B, and new peer C
+        // A and B are already pending, so should be skipped
+        let peers_second = vec![
+            create_peer_gossip("10.0.0.50:8050"), // Peer A (already pending)
+            create_peer_gossip("10.0.0.51:8051"), // Peer B (already pending)
+            create_peer_gossip("10.0.0.52:8052"), // Peer C (new)
+        ];
+        let candidates2 = discovery.on_peer_list_gossip(&peers_second);
+
+        // EXPECTED: Only peer C returned (A and B already pending)
+        // Note: The current code DOES filter pending peers at line 183-186,
+        // so this test should pass. But we add it to ensure the fix doesn't break this.
+        assert_eq!(
+            candidates2.len(),
+            1,
+            "should only return peer C (A and B already pending)"
+        );
+
+        let peer_c = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 52)), 8052);
+        assert_eq!(candidates2[0], peer_c, "returned candidate should be peer C");
+
+        assert_eq!(
+            discovery.pending_peer_count(),
+            3,
+            "should have 3 pending peers total"
+        );
     }
 }
