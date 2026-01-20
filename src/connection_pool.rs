@@ -7,6 +7,7 @@ use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, time::Dura
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
@@ -34,6 +35,58 @@ pub const RING_BUFFER_SLOTS: usize = 1024; // Number of WriteCommand slots in ri
                                            // Note: Streaming threshold ensures messages fit within TCP_BUFFER_SIZE
 const CONTROL_RESERVED_SLOTS: usize = 32; // Reserved permits for control/tell/response lanes
 const WRITER_MAX_LATENCY: Duration = Duration::from_micros(100);
+
+/// Tracks spawned tasks for a connection.
+///
+/// ## Lifecycle Rules (H-004)
+/// - `set_writer`/`set_reader` should only be called when establishing NEW connections
+/// - Do NOT call set_* during reconnect while messages are in flight
+/// - Call `abort_all()` only when the connection is being permanently torn down
+/// - For reconnection: let old tasks complete naturally, then set new handles
+#[derive(Debug, Default)]
+pub struct TaskTracker {
+    writer_handle: Option<JoinHandle<()>>,
+    reader_handle: Option<JoinHandle<()>>,
+}
+
+impl TaskTracker {
+    /// Create a new empty TaskTracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set writer handle. Only call for NEW connections, not reconnects.
+    pub fn set_writer(&mut self, handle: JoinHandle<()>) {
+        if let Some(old) = self.writer_handle.take() {
+            old.abort();
+        }
+        self.writer_handle = Some(handle);
+    }
+
+    /// Set reader handle. Only call for NEW connections, not reconnects.
+    pub fn set_reader(&mut self, handle: JoinHandle<()>) {
+        if let Some(old) = self.reader_handle.take() {
+            old.abort();
+        }
+        self.reader_handle = Some(handle);
+    }
+
+    /// Abort all tracked tasks.
+    pub fn abort_all(&mut self) {
+        if let Some(h) = self.writer_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.reader_handle.take() {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for TaskTracker {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
 
 fn control_reserved_slots(capacity: usize) -> usize {
     if capacity == 0 {
@@ -277,6 +330,8 @@ pub struct LockFreeConnection {
     pub stream_handle: Option<Arc<LockFreeStreamHandle>>,
     pub(crate) correlation: Option<Arc<CorrelationTracker>>,
     pub direction: ConnectionDirection,
+    /// Task tracker for background tasks (writer and reader)
+    pub task_tracker: std::sync::Mutex<TaskTracker>,
 }
 
 impl Clone for LockFreeConnection {
@@ -291,6 +346,10 @@ impl Clone for LockFreeConnection {
             stream_handle: self.stream_handle.clone(),
             correlation: self.correlation.clone(),
             direction: self.direction,
+            // Note: TaskTracker is not cloned - each clone gets a fresh tracker
+            // This is intentional: clones are typically used for metadata snapshots,
+            // not to transfer task ownership
+            task_tracker: std::sync::Mutex::new(TaskTracker::new()),
         }
     }
 }
@@ -307,6 +366,7 @@ impl LockFreeConnection {
             stream_handle: None,
             correlation: Some(CorrelationTracker::new()),
             direction,
+            task_tracker: std::sync::Mutex::new(TaskTracker::new()),
         }
     }
 
@@ -666,12 +726,15 @@ pub struct LockFreeStreamHandle {
 
 impl LockFreeStreamHandle {
     /// Create a new lock-free streaming handle with background writer task
+    ///
+    /// Returns a tuple of (Self, JoinHandle) where the JoinHandle can be used
+    /// to track and abort the background writer task (H-004 task tracking).
     pub fn new<W>(
         tcp_writer: W,
         addr: SocketAddr,
         channel_id: ChannelId,
         buffer_config: BufferConfig,
-    ) -> Self
+    ) -> (Self, JoinHandle<()>)
     where
         W: AsyncWrite + Unpin + Send + 'static,
     {
@@ -700,7 +763,7 @@ impl LockFreeStreamHandle {
         let (streaming_tx, streaming_rx) = mpsc::unbounded_channel();
 
         // Spawn background writer task with exclusive TCP access - NO MUTEX!
-        {
+        let writer_handle = {
             let ring_buffer = ring_buffer.clone();
             let shutdown_signal = shutdown_signal.clone();
             let bytes_written_for_task = bytes_written.clone();
@@ -735,26 +798,29 @@ impl LockFreeStreamHandle {
                     channel_id = ?writer_channel_id,
                     "⚠️ Background writer task EXITED - no more writes possible on this connection!"
                 );
-            });
-        }
+            })
+        };
 
-        Self {
-            addr,
-            channel_id,
-            sequence_counter: Arc::new(AtomicUsize::new(0)),
-            frame_sequence: Arc::new(AtomicUsize::new(0)),
-            bytes_written, // This now tracks actual TCP bytes written
-            ring_buffer,
-            shutdown_signal,
-            flush_pending,
-            writer_idle,
-            writer_notify,
-            ask_permits,
-            control_permits,
-            streaming_active,
-            streaming_tx,
-            buffer_config,
-        }
+        (
+            Self {
+                addr,
+                channel_id,
+                sequence_counter: Arc::new(AtomicUsize::new(0)),
+                frame_sequence: Arc::new(AtomicUsize::new(0)),
+                bytes_written, // This now tracks actual TCP bytes written
+                ring_buffer,
+                shutdown_signal,
+                flush_pending,
+                writer_idle,
+                writer_notify,
+                ask_permits,
+                control_permits,
+                streaming_active,
+                streaming_tx,
+                buffer_config,
+            },
+            writer_handle,
+        )
     }
 
     /// Background writer task - truly lock-free with exclusive TCP access
@@ -3513,17 +3579,23 @@ impl ConnectionPool {
             })
             .unwrap_or_default();
 
-        let stream_handle = Arc::new(LockFreeStreamHandle::new(
+        let (stream_handle, writer_task_handle) = LockFreeStreamHandle::new(
             writer, // Pass writer half
             addr,
             ChannelId::Global,
             buffer_config,
-        ));
+        );
+        let stream_handle = Arc::new(stream_handle);
 
         let mut connection = LockFreeConnection::new(addr, ConnectionDirection::Outbound);
         connection.stream_handle = Some(stream_handle);
         connection.set_state(ConnectionState::Connected);
         connection.update_last_used();
+
+        // Track the writer task handle (H-004)
+        if let Ok(mut tracker) = connection.task_tracker.lock() {
+            tracker.set_writer(writer_task_handle);
+        }
 
         let connection_arc = Arc::new(connection);
 
@@ -3531,12 +3603,17 @@ impl ConnectionPool {
         // This reader needs to process incoming messages on outgoing connections
         let reader_connection = connection_arc.clone();
         let registry_weak = self.registry.clone();
-        tokio::spawn(async move {
+        let reader_task_handle = tokio::spawn(async move {
             info!(peer = %addr, "Starting reader task for outgoing connection");
             Self::handle_persistent_connection_reader(reader, None, addr, registry_weak).await;
             reader_connection.set_state(ConnectionState::Disconnected);
             info!(peer = %addr, "Reader task for outgoing connection ended");
         });
+
+        // Track the reader task handle (H-004)
+        if let Ok(mut tracker) = connection_arc.task_tracker.lock() {
+            tracker.set_reader(reader_task_handle);
+        }
 
         // Insert into lock-free hash map
         self.connections_by_addr
@@ -4188,17 +4265,23 @@ impl ConnectionPool {
                 BufferConfig::default().with_ask_inflight_limit(registry.config.ask_inflight_limit)
             })
             .unwrap_or_default();
-        let stream_handle = Arc::new(LockFreeStreamHandle::new(
+        let (stream_handle, writer_task_handle) = LockFreeStreamHandle::new(
             writer,
             addr,
             ChannelId::Global,
             buffer_config,
-        ));
+        );
+        let stream_handle = Arc::new(stream_handle);
 
         let mut conn = LockFreeConnection::new(addr, ConnectionDirection::Outbound);
         conn.stream_handle = Some(stream_handle.clone());
         conn.set_state(ConnectionState::Connected);
         conn.update_last_used();
+
+        // Track the writer task handle (H-004)
+        if let Ok(mut tracker) = conn.task_tracker.lock() {
+            tracker.set_writer(writer_task_handle);
+        }
 
         // For outgoing connections, we might know the peer ID from configuration
         let peer_id_opt = self
@@ -4296,7 +4379,7 @@ impl ConnectionPool {
         // This MUST process incoming messages to receive responses!
         let reader_connection = connection_arc.clone();
         let registry_weak_for_reader = registry_weak.clone();
-        tokio::spawn(async move {
+        let reader_task_handle = tokio::spawn(async move {
             info!(peer = %addr, "Starting outgoing connection reader with message processing");
 
             let max_message_size = registry_weak_for_reader
@@ -4420,6 +4503,11 @@ impl ConnectionPool {
 
             info!(peer = %addr, "Outgoing connection reader exited");
         });
+
+        // Track the reader task handle (H-004)
+        if let Ok(mut tracker) = connection_arc.task_tracker.lock() {
+            tracker.set_reader(reader_task_handle);
+        }
 
         // Reset failure state for this peer since we successfully connected
         if let Some(ref registry_weak) = registry_weak {
@@ -4568,6 +4656,8 @@ impl ConnectionPool {
 
         // For incoming connections with a writer, create a stream handle
         // For outgoing connections, we'll use the existing handle from the pool
+        // Note: The writer_task_handle is not tracked here as this is for response handling
+        // on incoming connections, not for the main connection lifecycle tracking.
         let response_handle = writer.map(|writer| {
             let buffer_config = registry_weak
                 .as_ref()
@@ -4577,12 +4667,13 @@ impl ConnectionPool {
                         .with_ask_inflight_limit(registry.config.ask_inflight_limit)
                 })
                 .unwrap_or_default();
-            Arc::new(LockFreeStreamHandle::new(
+            let (handle, _writer_task_handle) = LockFreeStreamHandle::new(
                 writer,
                 peer_addr,
                 ChannelId::Global,
                 buffer_config,
-            ))
+            );
+            Arc::new(handle)
         });
 
         loop {
@@ -6687,7 +6778,7 @@ pub(crate) fn handle_incoming_message(
                 }
 
                 let registry_clone = registry.clone();
-                tokio::spawn(async move {
+                let discovery_handle = tokio::spawn(async move {
                     for addr in candidates {
                         let node_id = registry_clone.lookup_node_id(&addr).await;
                         registry_clone.add_peer_with_node_id(addr, node_id).await;
@@ -6704,6 +6795,13 @@ pub(crate) fn handle_incoming_message(
                         }
                     }
                 });
+
+                // Track the discovery task handle (H-004)
+                if let Ok(mut handles) = registry.discovery_task_handles.lock() {
+                    // Clean up finished handles before adding new one
+                    handles.retain(|h| !h.is_finished());
+                    handles.push(discovery_handle);
+                }
 
                 Ok(())
             }
@@ -6863,7 +6961,7 @@ mod tests {
     #[tokio::test]
     async fn test_permit_lanes_allow_control_when_ask_exhausted() {
         let (writer, _reader) = tokio::io::duplex(1024);
-        let handle = LockFreeStreamHandle::new(
+        let (handle, _writer_task) = LockFreeStreamHandle::new(
             writer,
             "127.0.0.1:0".parse().unwrap(),
             ChannelId::TellAsk,
@@ -6937,12 +7035,13 @@ mod tests {
         let (_, writer) = stream.into_split();
 
         // Create a LockFreeStreamHandle
-        let stream_handle = Arc::new(LockFreeStreamHandle::new(
+        let (stream_handle, _writer_task) = LockFreeStreamHandle::new(
             writer,
             "127.0.0.1:8080".parse().unwrap(),
             ChannelId::Global,
             BufferConfig::default(),
-        ));
+        );
+        let stream_handle = Arc::new(stream_handle);
 
         let handle = ConnectionHandle {
             addr: "127.0.0.1:8080".parse().unwrap(),
@@ -6966,12 +7065,13 @@ mod tests {
         let _ = writer.shutdown().await; // Close the writer
 
         // Create a LockFreeStreamHandle
-        let stream_handle = Arc::new(LockFreeStreamHandle::new(
+        let (stream_handle, _writer_task) = LockFreeStreamHandle::new(
             writer,
             "127.0.0.1:8080".parse().unwrap(),
             ChannelId::Global,
             BufferConfig::default(),
-        ));
+        );
+        let stream_handle = Arc::new(stream_handle);
 
         let handle = ConnectionHandle {
             addr: "127.0.0.1:8080".parse().unwrap(),
@@ -6988,5 +7088,78 @@ mod tests {
         let result = handle.send_data(vec![1, 2, 3]).await;
         // With fire-and-forget semantics, this should return Ok even with a closed writer
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_task_tracker_aborts_on_drop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let task_started = Arc::new(AtomicBool::new(false));
+        let task_completed = Arc::new(AtomicBool::new(false));
+        let started_clone = task_started.clone();
+        let completed_clone = task_completed.clone();
+
+        let handle = tokio::spawn(async move {
+            started_clone.store(true, Ordering::SeqCst);
+            // Long sleep that should be aborted
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            completed_clone.store(true, Ordering::SeqCst);
+        });
+
+        // Give task time to start
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(task_started.load(Ordering::SeqCst), "Task should have started");
+
+        // Create tracker and set the handle
+        let mut tracker = TaskTracker::new();
+        tracker.set_writer(handle);
+
+        // Drop the tracker - this should abort the task
+        drop(tracker);
+
+        // Give task time to be aborted
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Task should NOT have completed (it was aborted)
+        assert!(
+            !task_completed.load(Ordering::SeqCst),
+            "Task should have been aborted, not completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_tracker_replaces_old_handle() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let task2_started = Arc::new(AtomicBool::new(false));
+
+        let handle1 = tokio::spawn(async move {
+            // Long sleep that should be aborted when handle2 replaces it
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let started_clone = task2_started.clone();
+        let handle2 = tokio::spawn(async move {
+            started_clone.store(true, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let mut tracker = TaskTracker::new();
+
+        // Set first handle
+        tracker.set_writer(handle1);
+
+        // Set second handle - first should be aborted
+        tracker.set_writer(handle2);
+
+        // Give task2 time to start
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            task2_started.load(Ordering::SeqCst),
+            "Second task should have started"
+        );
+
+        // Clean up
+        drop(tracker);
     }
 }

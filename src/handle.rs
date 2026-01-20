@@ -944,12 +944,13 @@ where
         let boxed_writer: Pin<Box<dyn AsyncWrite + Send>> = Box::pin(writer);
         let buffer_config = crate::connection_pool::BufferConfig::default()
             .with_ask_inflight_limit(registry.config.ask_inflight_limit);
-        let stream_handle = Arc::new(crate::connection_pool::LockFreeStreamHandle::new(
+        let (stream_handle, writer_task_handle) = crate::connection_pool::LockFreeStreamHandle::new(
             boxed_writer,
             peer_addr,
             crate::connection_pool::ChannelId::Global,
             buffer_config,
-        ));
+        );
+        let stream_handle = Arc::new(stream_handle);
 
         let mut connection = crate::connection_pool::LockFreeConnection::new(
             peer_state_addr,
@@ -958,6 +959,11 @@ where
         connection.stream_handle = Some(stream_handle);
         connection.set_state(crate::connection_pool::ConnectionState::Connected);
         connection.update_last_used();
+
+        // Track the writer task handle (H-004)
+        if let Ok(mut tracker) = connection.task_tracker.lock() {
+            tracker.set_writer(writer_task_handle);
+        }
 
         let connection_arc = Arc::new(connection);
 

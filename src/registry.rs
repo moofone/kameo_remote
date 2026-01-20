@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::task::JoinHandle;
 
 use dashmap::DashMap;
 use lru::LruCache;
@@ -407,6 +408,10 @@ pub struct GossipRegistry {
 
     // Pending ACKs for synchronous registrations
     pub pending_acks: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
+
+    /// Handles for peer discovery background tasks (H-004)
+    /// These are tracked to enable cleanup on shutdown and prevent zombie tasks
+    pub discovery_task_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
 unsafe impl Send for GossipRegistry {}
@@ -518,6 +523,7 @@ impl GossipRegistry {
             actor_message_handler: Arc::new(Mutex::new(None)),
             stream_assemblies: Arc::new(Mutex::new(HashMap::new())),
             pending_acks: Arc::new(Mutex::new(HashMap::new())),
+            discovery_task_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
