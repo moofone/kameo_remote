@@ -934,15 +934,12 @@ impl GossipRegistry {
             "🔄 DNS re-resolution: peer IP changed (old IP not in DNS results)"
         );
 
-        // Update the peer entry with the new address
-        // Note: We need to handle several edge cases:
-        // 1. The peer may have been removed between DNS lookup and this update
-        // 2. The new address may already be used by another peer (address collision)
-        // 3. We need to update all address-keyed maps atomically
-        let peer_id_opt = {
+        // PHASE 1: Check for collisions and update gossip_state
+        // Release lock before acquiring connection_pool to prevent deadlock
+        let migration_result = {
             let mut gossip_state = self.gossip_state.lock().await;
 
-            // Check if the new address is already used by another peer
+            // Check if the new address is already used by another peer in gossip_state
             if gossip_state.peers.contains_key(&new_addr) {
                 warn!(
                     old_addr = %peer_addr,
@@ -960,13 +957,28 @@ impl GossipRegistry {
                 peer_info.last_failure_time = None;
                 gossip_state.peers.insert(new_addr, peer_info);
 
-                // Also update peer_to_actors mapping if it exists
+                // Migrate peer_to_actors mapping if it exists
                 if let Some(actors) = gossip_state.peer_to_actors.remove(&peer_addr) {
                     gossip_state.peer_to_actors.insert(new_addr, actors);
                 }
 
-                // Get peer_id while we have the lock, for connection pool update
-                Some(self.connection_pool.lock().await.get_peer_id_by_addr(&peer_addr))
+                // Migrate peer_health_reports - both as subject and as reporter
+                if let Some(reports) = gossip_state.peer_health_reports.remove(&peer_addr) {
+                    gossip_state.peer_health_reports.insert(new_addr, reports);
+                }
+                // Also update any reports about this peer from other reporters
+                for (_, reports) in gossip_state.peer_health_reports.iter_mut() {
+                    if let Some(status) = reports.remove(&peer_addr) {
+                        reports.insert(new_addr, status);
+                    }
+                }
+
+                // Migrate pending_peer_failures if exists
+                if let Some(failure) = gossip_state.pending_peer_failures.remove(&peer_addr) {
+                    gossip_state.pending_peer_failures.insert(new_addr, failure);
+                }
+
+                true // Migration succeeded
             } else {
                 // Peer was removed between DNS lookup and update - don't proceed
                 debug!(
@@ -974,34 +986,60 @@ impl GossipRegistry {
                     dns_name = %dns_name,
                     "DNS re-resolution: peer was removed, skipping update"
                 );
-                return None;
+                false
             }
-        };
+        }; // gossip_state lock released here
 
-        // Update connection pool mappings and migrate connection
-        if let Some(Some(peer_id)) = peer_id_opt {
-            let pool = self.connection_pool.lock().await;
-
-            // Update peer_id_to_addr mapping
-            pool.peer_id_to_addr.insert(peer_id.clone(), new_addr);
-            // Add new address to addr_to_peer_id mapping
-            pool.add_addr_to_peer_id(new_addr, peer_id.clone());
-
-            // Migrate connections_by_addr: move connection from old addr to new addr
-            // This allows lookups by new address to find the existing connection
-            if let Some((_, connection)) = pool.connections_by_addr.remove(&peer_addr) {
-                pool.connections_by_addr.insert(new_addr, connection);
-                debug!(
-                    old_addr = %peer_addr,
-                    new_addr = %new_addr,
-                    "DNS refresh: migrated connection from old to new address"
-                );
-            }
-
-            // Clean up old addr_to_peer_id mapping
-            pool.addr_to_peer_id.remove(&peer_addr);
+        if !migration_result {
+            return None;
         }
 
+        // PHASE 2: Update connection pool (separate lock acquisition)
+        {
+            let pool = self.connection_pool.lock().await;
+
+            // Check for pool-level collision before proceeding
+            if pool.addr_to_peer_id.contains_key(&new_addr) {
+                // Check if it's a different peer
+                if let Some(existing_peer_id) = pool.addr_to_peer_id.get(&new_addr) {
+                    if let Some(old_peer_id) = pool.addr_to_peer_id.get(&peer_addr) {
+                        if existing_peer_id.value() != old_peer_id.value() {
+                            warn!(
+                                old_addr = %peer_addr,
+                                new_addr = %new_addr,
+                                "DNS refresh: new address already mapped to different peer in pool, skipping pool update"
+                            );
+                            // Don't return None - gossip_state was already migrated
+                            // Just skip pool updates to avoid clobbering
+                            return Some(new_addr);
+                        }
+                    }
+                }
+            }
+
+            // Get peer_id for this address
+            if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
+                // Update peer_id_to_addr mapping
+                pool.peer_id_to_addr.insert(peer_id.clone(), new_addr);
+                // Add new address to addr_to_peer_id mapping
+                pool.add_addr_to_peer_id(new_addr, peer_id);
+
+                // Migrate connections_by_addr: move connection from old addr to new addr
+                if let Some((_, connection)) = pool.connections_by_addr.remove(&peer_addr) {
+                    pool.connections_by_addr.insert(new_addr, connection);
+                    debug!(
+                        old_addr = %peer_addr,
+                        new_addr = %new_addr,
+                        "DNS refresh: migrated connection from old to new address"
+                    );
+                }
+
+                // Clean up old addr_to_peer_id mapping
+                pool.addr_to_peer_id.remove(&peer_addr);
+            }
+        } // connection_pool lock released here
+
+        // PHASE 3: Migrate DashMap-based state (lock-free, no deadlock risk)
         // Migrate peer_capabilities from old address to new address
         if let Some((_, caps)) = self.peer_capabilities.remove(&peer_addr) {
             self.peer_capabilities.insert(new_addr, caps);
@@ -1009,6 +1047,16 @@ impl GossipRegistry {
                 old_addr = %peer_addr,
                 new_addr = %new_addr,
                 "DNS refresh: migrated peer capabilities from old to new address"
+            );
+        }
+
+        // Migrate peer_capability_addr_to_node
+        if let Some((_, node_id)) = self.peer_capability_addr_to_node.remove(&peer_addr) {
+            self.peer_capability_addr_to_node.insert(new_addr, node_id);
+            debug!(
+                old_addr = %peer_addr,
+                new_addr = %new_addr,
+                "DNS refresh: migrated peer_capability_addr_to_node"
             );
         }
 
