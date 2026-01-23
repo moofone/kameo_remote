@@ -876,6 +876,9 @@ impl GossipRegistry {
     ///
     /// This is called automatically by the gossip retry logic when a peer with
     /// a DNS name fails to connect.
+    ///
+    /// DNS round-robin handling: If the current address is still in the DNS results,
+    /// we keep it to avoid unnecessary churn. Only switch if current IP is not in results.
     pub async fn refresh_peer_dns(&self, peer_addr: SocketAddr) -> Option<SocketAddr> {
         let dns_name = {
             let gossip_state = self.gossip_state.lock().await;
@@ -890,9 +893,9 @@ impl GossipRegistry {
             None => return None, // No DNS name configured
         };
 
-        // Resolve DNS to get current IP - extract immediately to avoid lifetime issues
-        let resolved_addr: Option<SocketAddr> = match tokio::net::lookup_host(&dns_name).await {
-            Ok(mut addrs) => addrs.next(),
+        // Resolve DNS to get ALL current IPs - collect to Vec to check if current is valid
+        let resolved_addrs: Vec<SocketAddr> = match tokio::net::lookup_host(&dns_name).await {
+            Ok(addrs) => addrs.collect(),
             Err(e) => {
                 warn!(
                     dns_name = %dns_name,
@@ -903,28 +906,32 @@ impl GossipRegistry {
             }
         };
 
-        let new_addr = match resolved_addr {
-            Some(addr) => addr,
-            None => {
-                warn!(dns_name = %dns_name, "DNS resolution returned no addresses");
-                return None;
-            }
-        };
+        if resolved_addrs.is_empty() {
+            warn!(dns_name = %dns_name, "DNS resolution returned no addresses");
+            return None;
+        }
 
-        if new_addr == peer_addr {
+        // DNS round-robin fix: If current address is still in DNS results, keep it
+        // This avoids unnecessary churn when DNS returns multiple addresses
+        if resolved_addrs.iter().any(|addr| addr.ip() == peer_addr.ip()) {
             debug!(
                 addr = %peer_addr,
                 dns_name = %dns_name,
-                "DNS re-resolution: IP unchanged"
+                resolved_count = resolved_addrs.len(),
+                "DNS re-resolution: current IP still valid in DNS results"
             );
             return None;
         }
+
+        // Current IP is NOT in DNS results - need to switch to first available
+        let new_addr = resolved_addrs[0];
 
         info!(
             old_addr = %peer_addr,
             new_addr = %new_addr,
             dns_name = %dns_name,
-            "🔄 DNS re-resolution: peer IP changed"
+            resolved_count = resolved_addrs.len(),
+            "🔄 DNS re-resolution: peer IP changed (old IP not in DNS results)"
         );
 
         // Update the peer entry with the new address
@@ -971,13 +978,38 @@ impl GossipRegistry {
             }
         };
 
-        // Update connection pool mappings
+        // Update connection pool mappings and migrate connection
         if let Some(Some(peer_id)) = peer_id_opt {
             let pool = self.connection_pool.lock().await;
+
             // Update peer_id_to_addr mapping
             pool.peer_id_to_addr.insert(peer_id.clone(), new_addr);
-            // Add new address to addr_to_peer_id mapping (keep old for graceful transition)
-            pool.add_addr_to_peer_id(new_addr, peer_id);
+            // Add new address to addr_to_peer_id mapping
+            pool.add_addr_to_peer_id(new_addr, peer_id.clone());
+
+            // Migrate connections_by_addr: move connection from old addr to new addr
+            // This allows lookups by new address to find the existing connection
+            if let Some((_, connection)) = pool.connections_by_addr.remove(&peer_addr) {
+                pool.connections_by_addr.insert(new_addr, connection);
+                debug!(
+                    old_addr = %peer_addr,
+                    new_addr = %new_addr,
+                    "DNS refresh: migrated connection from old to new address"
+                );
+            }
+
+            // Clean up old addr_to_peer_id mapping
+            pool.addr_to_peer_id.remove(&peer_addr);
+        }
+
+        // Migrate peer_capabilities from old address to new address
+        if let Some((_, caps)) = self.peer_capabilities.remove(&peer_addr) {
+            self.peer_capabilities.insert(new_addr, caps);
+            debug!(
+                old_addr = %peer_addr,
+                new_addr = %new_addr,
+                "DNS refresh: migrated peer capabilities from old to new address"
+            );
         }
 
         Some(new_addr)
