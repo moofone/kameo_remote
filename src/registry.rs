@@ -924,12 +924,13 @@ impl GossipRegistry {
 
         // DNS round-robin fix: If current address is still in DNS results, keep it
         // This avoids unnecessary churn when DNS returns multiple addresses
-        if resolved_addrs.iter().any(|addr| addr.ip() == peer_addr.ip()) {
+        // Compare full SocketAddr (IP + port) to handle port changes
+        if resolved_addrs.iter().any(|addr| *addr == peer_addr) {
             debug!(
                 addr = %peer_addr,
                 dns_name = %dns_name,
                 resolved_count = resolved_addrs.len(),
-                "DNS re-resolution: current IP still valid in DNS results"
+                "DNS re-resolution: current address still valid in DNS results"
             );
             return None;
         }
@@ -945,7 +946,28 @@ impl GossipRegistry {
             "🔄 DNS re-resolution: peer IP changed (old IP not in DNS results)"
         );
 
-        // PHASE 1: Check for collisions and update gossip_state
+        // PRE-CHECK: Verify no collisions in connection pool BEFORE any migration
+        // This prevents inconsistent state if we migrate gossip_state but pool has collision
+        {
+            let pool = self.connection_pool.lock().await;
+            if pool.addr_to_peer_id.contains_key(&new_addr) {
+                if let Some(existing_peer_id) = pool.addr_to_peer_id.get(&new_addr) {
+                    if let Some(old_peer_id) = pool.addr_to_peer_id.get(&peer_addr) {
+                        if existing_peer_id.value() != old_peer_id.value() {
+                            warn!(
+                                old_addr = %peer_addr,
+                                new_addr = %new_addr,
+                                dns_name = %dns_name,
+                                "DNS refresh: new address already mapped to different peer in pool, aborting"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+        } // pool lock released
+
+        // PHASE 1: Check for gossip_state collisions and perform migration
         // Release lock before acquiring connection_pool to prevent deadlock
         let migration_result = {
             let mut gossip_state = self.gossip_state.lock().await;
@@ -966,7 +988,7 @@ impl GossipRegistry {
                 peer_info.address = new_addr;
                 peer_info.failures = 0; // Reset failures on DNS change
                 peer_info.last_failure_time = None;
-                gossip_state.peers.insert(new_addr, peer_info);
+                gossip_state.peers.insert(new_addr, peer_info.clone());
 
                 // Migrate peer_to_actors mapping if it exists
                 if let Some(actors) = gossip_state.peer_to_actors.remove(&peer_addr) {
@@ -989,6 +1011,10 @@ impl GossipRegistry {
                     gossip_state.pending_peer_failures.insert(new_addr, failure);
                 }
 
+                // Also update known_peers to avoid stale addresses being re-gossiped
+                gossip_state.known_peers.pop(&peer_addr);
+                gossip_state.known_peers.put(new_addr, peer_info);
+
                 true // Migration succeeded
             } else {
                 // Peer was removed between DNS lookup and update - don't proceed
@@ -1006,27 +1032,21 @@ impl GossipRegistry {
         }
 
         // PHASE 2: Update connection pool (separate lock acquisition)
+        // Re-check that peer still exists to avoid reintroducing stale entries
+        {
+            let gossip_state = self.gossip_state.lock().await;
+            if !gossip_state.peers.contains_key(&new_addr) {
+                debug!(
+                    new_addr = %new_addr,
+                    dns_name = %dns_name,
+                    "DNS refresh: peer was removed mid-refresh, skipping pool/capability update"
+                );
+                return None;
+            }
+        } // gossip_state lock released
+
         {
             let pool = self.connection_pool.lock().await;
-
-            // Check for pool-level collision before proceeding
-            if pool.addr_to_peer_id.contains_key(&new_addr) {
-                // Check if it's a different peer
-                if let Some(existing_peer_id) = pool.addr_to_peer_id.get(&new_addr) {
-                    if let Some(old_peer_id) = pool.addr_to_peer_id.get(&peer_addr) {
-                        if existing_peer_id.value() != old_peer_id.value() {
-                            warn!(
-                                old_addr = %peer_addr,
-                                new_addr = %new_addr,
-                                "DNS refresh: new address already mapped to different peer in pool, skipping pool update"
-                            );
-                            // Don't return None - gossip_state was already migrated
-                            // Just skip pool updates to avoid clobbering
-                            return Some(new_addr);
-                        }
-                    }
-                }
-            }
 
             // Get peer_id for this address
             if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
@@ -1051,6 +1071,19 @@ impl GossipRegistry {
         } // connection_pool lock released here
 
         // PHASE 3: Migrate DashMap-based state (lock-free, no deadlock risk)
+        // Re-check peer existence to avoid reintroducing stale entries
+        {
+            let gossip_state = self.gossip_state.lock().await;
+            if !gossip_state.peers.contains_key(&new_addr) {
+                debug!(
+                    new_addr = %new_addr,
+                    dns_name = %dns_name,
+                    "DNS refresh: peer was removed mid-refresh, skipping capability migration"
+                );
+                return None;
+            }
+        }
+
         // Migrate peer_capabilities from old address to new address
         if let Some((_, caps)) = self.peer_capabilities.remove(&peer_addr) {
             self.peer_capabilities.insert(new_addr, caps);
@@ -3879,7 +3912,7 @@ impl GossipRegistry {
         let candidates = {
             let mut gossip_state = self.gossip_state.lock().await;
 
-            // Update known_peers LRU cache
+            // Update known_peers LRU cache and active peers
             for peer_gossip in &peers {
                 if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
                     // Conservative merge: only update if newer
@@ -3897,7 +3930,22 @@ impl GossipRegistry {
                         }
                     } else {
                         // New peer, add to cache
-                        gossip_state.known_peers.put(peer_info.address, peer_info);
+                        gossip_state.known_peers.put(peer_info.address, peer_info.clone());
+                    }
+
+                    // Also update dns_name in active peers (gossip_state.peers)
+                    // This ensures existing connected peers get DNS refresh capability
+                    if peer_info.dns_name.is_some() {
+                        if let Some(active_peer) = gossip_state.peers.get_mut(&peer_info.address) {
+                            if active_peer.dns_name.is_none() {
+                                active_peer.dns_name = peer_info.dns_name;
+                                debug!(
+                                    addr = %peer_info.address,
+                                    dns_name = ?active_peer.dns_name,
+                                    "Updated active peer with DNS name from gossip"
+                                );
+                            }
+                        }
                     }
                 }
             }

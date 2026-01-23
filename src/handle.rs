@@ -261,7 +261,7 @@ impl GossipRegistryHandle {
         let monitor_handle = None;
 
         // Log startup with DNS gossip mode status
-        let dns_mode = config.advertise_dns.as_ref().map(|s| s.as_str()).unwrap_or("disabled");
+        let dns_mode = config.advertise_dns.as_deref().unwrap_or("disabled");
         info!(
             bind_addr = %actual_bind_addr,
             advertise_dns = dns_mode,
