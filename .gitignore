@@ -5,4 +5,9 @@ Cargo.lock
 sprints/
 qa/
 spec/
+baselines/
+logs/
+reports/
+scripts/
+test_layout/
 .DS_Store
