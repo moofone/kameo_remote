@@ -70,8 +70,8 @@ async fn test_mesh_formation_3_nodes() -> Result<(), Box<dyn std::error::Error>>
     node_c.registry.add_peer(addr_a).await;
 
     // Bootstrap connections non-blocking
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
-    node_c.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
+    node_c.bootstrap(vec![addr_a]).await;
 
     // Wait for gossip propagation (2 gossip intervals)
     sleep(Duration::from_secs(2)).await;
@@ -128,7 +128,7 @@ async fn test_local_connection_wins() -> Result<(), Box<dyn std::error::Error>> 
     // Add peers and bootstrap
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for connection
     sleep(Duration::from_secs(1)).await;
@@ -176,7 +176,7 @@ async fn test_feature_flag_disabled_no_discovery() -> Result<(), Box<dyn std::er
     // Add peers and bootstrap
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for gossip
     sleep(Duration::from_secs(1)).await;
@@ -298,7 +298,7 @@ async fn test_connect_on_demand_soft_cap() -> Result<(), Box<dyn std::error::Err
         node.registry.add_peer(addr_a).await;
 
         // Bootstrap connection
-        node.bootstrap_non_blocking(vec![addr_a]).await;
+        node.bootstrap(vec![addr_a]).await;
 
         node_addrs.push(addr);
         nodes.push(node);
@@ -341,7 +341,7 @@ async fn test_known_peers_no_amnesia() -> Result<(), Box<dyn std::error::Error>>
     // Add peers and bootstrap
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for connection and discovery
     sleep(Duration::from_secs(1)).await;
@@ -419,7 +419,7 @@ async fn test_peer_discovery_metrics() -> Result<(), Box<dyn std::error::Error>>
     // Add peers and bootstrap
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for gossip
     sleep(Duration::from_secs(2)).await;
@@ -468,8 +468,8 @@ async fn test_failure_recovery_backoff() -> Result<(), Box<dyn std::error::Error
     node_b.registry.add_peer(addr_a).await;
     node_c.registry.add_peer(addr_a).await;
 
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
-    node_c.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
+    node_c.bootstrap(vec![addr_a]).await;
 
     // Wait for mesh formation
     sleep(Duration::from_secs(2)).await;
@@ -522,8 +522,8 @@ async fn test_simultaneous_dial_tiebreaker() -> Result<(), Box<dyn std::error::E
     node_b.registry.add_peer(addr_a).await;
 
     // Both try to bootstrap to each other simultaneously
-    node_a.bootstrap_non_blocking(vec![addr_b]).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_a.bootstrap(vec![addr_b]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for connection race to resolve
     sleep(Duration::from_secs(2)).await;
@@ -566,7 +566,7 @@ async fn test_advertised_address_routing() -> Result<(), Box<dyn std::error::Err
 
     // Add peer and bootstrap
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for connection
     sleep(Duration::from_secs(1)).await;
@@ -644,7 +644,7 @@ async fn test_version_negotiation_v2_capabilities() -> Result<(), Box<dyn std::e
 
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     sleep(Duration::from_secs(1)).await;
 
@@ -689,8 +689,8 @@ async fn test_partition_heal_behavior() -> Result<(), Box<dyn std::error::Error>
     node_c.registry.add_peer(addr_d).await;
     node_d.registry.add_peer(addr_c).await;
 
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
-    node_d.bootstrap_non_blocking(vec![addr_c]).await;
+    node_b.bootstrap(vec![addr_a]).await;
+    node_d.bootstrap(vec![addr_c]).await;
 
     // Wait for partition formation
     sleep(Duration::from_secs(1)).await;
@@ -698,7 +698,7 @@ async fn test_partition_heal_behavior() -> Result<(), Box<dyn std::error::Error>
     // Heal partition by connecting B to C
     node_b.registry.add_peer(addr_c).await;
     node_c.registry.add_peer(addr_b).await;
-    node_b.bootstrap_non_blocking(vec![addr_c]).await;
+    node_b.bootstrap(vec![addr_c]).await;
 
     // Wait for mesh to reform
     sleep(Duration::from_secs(2)).await;
@@ -739,7 +739,7 @@ async fn test_identity_tls_verification() -> Result<(), Box<dyn std::error::Erro
     // Connect nodes
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for connection
     sleep(Duration::from_secs(1)).await;

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bytes::Bytes;
 use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
 use kameo_remote::{GossipConfig, GossipRegistryHandle, SecretKey};
 use std::fs;
@@ -62,22 +63,24 @@ impl ActorMessageHandler for ConsoleActorHandler {
     fn handle_actor_message(
         &self,
         actor_id: &str,
-        type_hash: u32,
+        _type_hash: u32,
         payload: &[u8],
         correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_> {
-        let actor_id = actor_id.to_string();
-        let payload = payload.to_vec();
-
-        Box::pin(async move {
-            let payload_str = String::from_utf8_lossy(&payload);
-            if correlation_id.is_some() {
-                let reply = format!("reply:{}:{}", actor_id, payload_str);
-                Ok(Some(reply.into_bytes()))
+        let should_reply = correlation_id.is_some();
+        let reply = if should_reply {
+            if std::env::var("KAMEO_CONSOLE_ECHO").is_ok() {
+                let actor_id = actor_id.to_string();
+                let payload_str = String::from_utf8_lossy(payload).into_owned();
+                Some(Bytes::from(format!("reply:{}:{}", actor_id, payload_str)))
             } else {
-                Ok(None)
+                Some(Bytes::from_static(b"ok"))
             }
-        })
+        } else {
+            None
+        };
+
+        Box::pin(async move { Ok(reply) })
     }
 }
 

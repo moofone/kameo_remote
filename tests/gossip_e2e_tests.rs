@@ -31,8 +31,8 @@ async fn connect_pair(a: &GossipRegistryHandle, b: &GossipRegistryHandle) {
     a.registry.add_peer(addr_b).await;
     b.registry.add_peer(addr_a).await;
 
-    a.bootstrap_non_blocking(vec![addr_b]).await;
-    b.bootstrap_non_blocking(vec![addr_a]).await;
+    a.bootstrap(vec![addr_b]).await;
+    b.bootstrap(vec![addr_a]).await;
 }
 
 async fn wait_for_actor(node: &GossipRegistryHandle, actor: &str, timeout: Duration) -> bool {

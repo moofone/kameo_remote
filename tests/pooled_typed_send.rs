@@ -1,5 +1,7 @@
 use kameo_remote::connection_pool::BufferConfig;
-use kameo_remote::typed::{encode_typed, encode_typed_pooled, typed_payload_parts};
+use kameo_remote::typed::{
+    encode_typed, encode_typed_pooled, pad_type_hash_prefix, typed_payload_parts,
+};
 use kameo_remote::{ChannelId, LockFreeStreamHandle};
 use tokio::io::AsyncReadExt;
 
@@ -25,11 +27,11 @@ async fn test_pooled_typed_send_matches_wire_bytes() {
 
     let pooled = encode_typed_pooled(&msg).expect("encode_typed_pooled");
     let (payload, prefix, payload_len) = typed_payload_parts::<WireMsg>(pooled);
-    let mut header = [0u8; 8];
+    let (prefix_padded, prefix_len) = pad_type_hash_prefix(prefix);
+    let mut header = [0u8; 16];
     header[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
-    let prefix_len = prefix.as_ref().map(|p| p.len()).unwrap_or(0) as u8;
     handle
-        .write_pooled_control_inline(header, 4, prefix, prefix_len, payload)
+        .write_pooled_control_inline(header, 4, prefix_padded, prefix_len, payload)
         .await
         .unwrap();
 

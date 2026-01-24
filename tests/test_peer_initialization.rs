@@ -1,5 +1,5 @@
 use kameo_remote::*;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 /// Test the proposed fix: Allow specifying peer names when initializing
@@ -15,13 +15,16 @@ async fn test_peer_initialization_with_names() {
     let node2_keypair = KeyPair::new_for_testing("node2");
     let node3_keypair = KeyPair::new_for_testing("node3");
 
+    let mk_config = |keypair: &KeyPair| GossipConfig {
+        key_pair: Some(keypair.clone()),
+        gossip_interval: Duration::from_millis(200),
+        ..Default::default()
+    };
+
     let handle1 = GossipRegistryHandle::new_with_tls(
         node1_addr,
         node1_keypair.to_secret_key(),
-        Some(GossipConfig {
-            key_pair: Some(node1_keypair.clone()),
-            ..Default::default()
-        }),
+        Some(mk_config(&node1_keypair)),
     )
     .await
     .unwrap();
@@ -29,10 +32,7 @@ async fn test_peer_initialization_with_names() {
     let handle2 = GossipRegistryHandle::new_with_tls(
         node2_addr,
         node2_keypair.to_secret_key(),
-        Some(GossipConfig {
-            key_pair: Some(node2_keypair.clone()),
-            ..Default::default()
-        }),
+        Some(mk_config(&node2_keypair)),
     )
     .await
     .unwrap();
@@ -40,10 +40,7 @@ async fn test_peer_initialization_with_names() {
     let handle3 = GossipRegistryHandle::new_with_tls(
         node3_addr,
         node3_keypair.to_secret_key(),
-        Some(GossipConfig {
-            key_pair: Some(node3_keypair.clone()),
-            ..Default::default()
-        }),
+        Some(mk_config(&node3_keypair)),
     )
     .await
     .unwrap();
@@ -84,8 +81,28 @@ async fn test_peer_initialization_with_names() {
         .await
         .unwrap();
 
-    // Wait for gossip
-    sleep(Duration::from_millis(500)).await;
+    // Wait for gossip to propagate (poll with timeout to avoid flakes)
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mut all_visible = true;
+        for handle in [&handle1, &handle2, &handle3] {
+            for service in ["service1", "service2", "service3"] {
+                if handle.lookup(service).await.is_none() {
+                    all_visible = false;
+                    break;
+                }
+            }
+            if !all_visible {
+                break;
+            }
+        }
+
+        if all_visible || Instant::now() >= deadline {
+            break;
+        }
+
+        sleep(Duration::from_millis(50)).await;
+    }
 
     // Test discovery from all nodes
     println!("\n🔍 Testing full mesh discovery:");

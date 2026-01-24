@@ -1,5 +1,15 @@
-use kameo_remote::{GossipRegistryHandle, SecretKey};
+mod common;
+
+use common::{wait_for_active_peers, wait_for_actor, wait_for_condition};
+use kameo_remote::{GossipConfig, GossipRegistryHandle, SecretKey};
 use std::time::Duration;
+
+fn tls_test_config() -> GossipConfig {
+    GossipConfig {
+        gossip_interval: Duration::from_millis(200),
+        ..Default::default()
+    }
+}
 
 /// Test mutual authentication between two TLS-enabled nodes
 #[tokio::test]
@@ -22,15 +32,21 @@ async fn test_mutual_authentication() {
     let node_id_b = secret_key_b.public();
 
     // Create TLS-enabled registries
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, None)
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, None)
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry B");
 
     // Get their addresses
     let addr_a = registry_a.registry.bind_addr;
@@ -52,25 +68,13 @@ async fn test_mutual_authentication() {
         .await
         .expect("Failed to register actor");
 
-    // Wait for gossip to propagate
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let propagated = wait_for_actor(&registry_b, "test_actor", Duration::from_secs(3)).await;
+    assert!(propagated, "Actor should be found on registry B");
 
-    // Verify B can find the actor
-    let location = registry_b.lookup("test_actor").await;
-    assert!(location.is_some(), "Actor should be found on registry B");
-
-    // Both registries should be connected with TLS
-    let stats_a = registry_a.registry.get_stats().await;
-    let stats_b = registry_b.registry.get_stats().await;
-
-    assert_eq!(
-        stats_a.active_peers, 1,
-        "Registry A should have 1 connected peer"
-    );
-    assert_eq!(
-        stats_b.active_peers, 1,
-        "Registry B should have 1 connected peer"
-    );
+    let a_connected = wait_for_active_peers(&registry_a, 1, Duration::from_secs(3)).await;
+    let b_connected = wait_for_active_peers(&registry_b, 1, Duration::from_secs(3)).await;
+    assert!(a_connected, "Registry A should have 1 connected peer");
+    assert!(b_connected, "Registry B should have 1 connected peer");
 }
 
 /// Test that impersonation is prevented - wrong NodeId rejects connection
@@ -98,15 +102,18 @@ async fn test_impersonation_prevention() {
     let node_id_imposter = secret_key_imposter.public();
 
     // Create registries
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, None)
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
     let registry_imposter = GossipRegistryHandle::new_with_tls(
         "127.0.0.1:0".parse().unwrap(),
         secret_key_imposter,
-        None,
+        Some(tls_test_config()),
     )
     .await
     .expect("Failed to create imposter registry");
@@ -134,8 +141,11 @@ async fn test_impersonation_prevention() {
         .await
         .expect("Failed to register actor");
 
-    // Wait a bit for connection attempts
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let failed = wait_for_condition(Duration::from_secs(3), || async {
+        registry_a.registry.get_stats().await.failed_peers >= 1
+    })
+    .await;
+    assert!(failed, "Expected failed peer due to NodeId mismatch");
 
     // The actor should NOT propagate because TLS handshake should fail
     let location = registry_a.lookup("secret_actor").await;
@@ -144,10 +154,14 @@ async fn test_impersonation_prevention() {
         "Actor from imposter should not be found"
     );
 
-    // Stats should show failed connection
-    let stats_a = registry_a.registry.get_stats().await;
+    let connected_count = registry_a
+        .registry
+        .connection_pool
+        .lock()
+        .await
+        .connection_count();
     assert_eq!(
-        stats_a.active_peers, 0,
+        connected_count, 0,
         "Should have no connected peers due to NodeId mismatch"
     );
 }
@@ -172,15 +186,21 @@ async fn test_bidirectional_tls_communication() {
     let node_id_b = secret_key_b.public();
 
     // Create registries
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, None)
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, None)
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry B");
 
     let _addr_a = registry_a.registry.bind_addr;
     let addr_b = registry_b.registry.bind_addr;
@@ -202,15 +222,10 @@ async fn test_bidirectional_tls_communication() {
         .await
         .expect("Failed to register actor B");
 
-    // Wait for bidirectional discovery and gossip
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // Both should know about each other's actors
-    let location_b_on_a = registry_a.lookup("actor_b").await;
-    let location_a_on_b = registry_b.lookup("actor_a").await;
-
-    assert!(location_b_on_a.is_some(), "A should know about B's actor");
-    assert!(location_a_on_b.is_some(), "B should know about A's actor");
+    let a_knows_b = wait_for_actor(&registry_a, "actor_b", Duration::from_secs(3)).await;
+    let b_knows_a = wait_for_actor(&registry_b, "actor_a", Duration::from_secs(3)).await;
+    assert!(a_knows_b, "A should know about B's actor");
+    assert!(b_knows_a, "B should know about A's actor");
 }
 
 /// Test multiple nodes with TLS in a chain topology
@@ -236,20 +251,29 @@ async fn test_multi_node_tls_chain() {
     let secret_key_c = SecretKey::generate();
     let node_id_c = secret_key_c.public();
 
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, None)
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, None)
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry B");
 
-    let registry_c =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_c, None)
-            .await
-            .expect("Failed to create registry C");
+    let registry_c = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_c,
+        Some(tls_test_config()),
+    )
+    .await
+    .expect("Failed to create registry C");
 
     let _addr_a = registry_a.registry.bind_addr;
     let addr_b = registry_b.registry.bind_addr;
@@ -279,24 +303,15 @@ async fn test_multi_node_tls_chain() {
         .await
         .unwrap();
 
-    // Wait for gossip to propagate through the chain
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    let b_knows_a = wait_for_actor(&registry_b, "actor_a", Duration::from_secs(3)).await;
+    let b_knows_c = wait_for_actor(&registry_b, "actor_c", Duration::from_secs(3)).await;
+    assert!(b_knows_a, "B should know about A's actor");
+    assert!(b_knows_c, "B should know about C's actor");
 
-    // Check that information propagates through the chain
-    // B should know about A's and C's actors
-    let b_knows_a = registry_b.lookup("actor_a").await;
-    let b_knows_c = registry_b.lookup("actor_c").await;
-
-    assert!(b_knows_a.is_some(), "B should know about A's actor");
-    assert!(b_knows_c.is_some(), "B should know about C's actor");
-
-    // A and C might not directly know about each other (depends on gossip)
-    // But they should at least know about B
-    let a_knows_b = registry_a.lookup("actor_b").await;
-    let c_knows_b = registry_c.lookup("actor_b").await;
-
-    assert!(a_knows_b.is_some(), "A should know about B's actor");
-    assert!(c_knows_b.is_some(), "C should know about B's actor");
+    let a_knows_b = wait_for_actor(&registry_a, "actor_b", Duration::from_secs(3)).await;
+    let c_knows_b = wait_for_actor(&registry_c, "actor_b", Duration::from_secs(3)).await;
+    assert!(a_knows_b, "A should know about B's actor");
+    assert!(c_knows_b, "C should know about B's actor");
 }
 
 /// Test that TLS connections handle disconnection and reconnection
@@ -322,7 +337,7 @@ async fn test_tls_reconnection() {
     let registry_a = GossipRegistryHandle::new_with_tls(
         "127.0.0.1:0".parse().unwrap(),
         secret_key_a.clone(),
-        None,
+        Some(tls_test_config()),
     )
     .await
     .expect("Failed to create registry A");
@@ -331,7 +346,7 @@ async fn test_tls_reconnection() {
     let registry_b = GossipRegistryHandle::new_with_tls(
         "127.0.0.1:0".parse().unwrap(),
         secret_key_b.clone(),
-        None,
+        Some(tls_test_config()),
     )
     .await
     .expect("Failed to create registry B");
@@ -358,38 +373,66 @@ async fn test_tls_reconnection() {
         .await
         .unwrap();
 
-    // Wait for propagation
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let propagated = wait_for_actor(&registry_b, "persistent_actor", Duration::from_secs(3)).await;
+    assert!(propagated, "B should know about A's actor");
 
-    // Verify B knows about it
-    let location = registry_b.lookup("persistent_actor").await;
-    assert!(location.is_some(), "B should know about A's actor");
+    // Shutdown B and wait for port to be released
+    registry_b.shutdown().await;
+    let released = wait_for_condition(Duration::from_secs(2), || async {
+        tokio::net::TcpListener::bind(addr_b).await.is_ok()
+    })
+    .await;
+    assert!(
+        released,
+        "B's listen port should be released after shutdown"
+    );
 
-    // Shutdown B
-    drop(registry_b);
-
-    // Wait a bit
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // A should detect disconnection
-    let stats = registry_a.registry.get_stats().await;
-    assert_eq!(
-        stats.active_peers, 0,
+    let disconnected = wait_for_condition(Duration::from_secs(3), || async {
+        registry_a
+            .registry
+            .connection_pool
+            .lock()
+            .await
+            .connection_count()
+            == 0
+    })
+    .await;
+    if !disconnected {
+        let _ = registry_a
+            .registry
+            .handle_peer_connection_failure(addr_b)
+            .await;
+    }
+    let disconnected = wait_for_condition(Duration::from_secs(2), || async {
+        registry_a
+            .registry
+            .connection_pool
+            .lock()
+            .await
+            .connection_count()
+            == 0
+    })
+    .await;
+    assert!(
+        disconnected,
         "A should have no connected peers after B shutdown"
     );
 
     // Restart B with same key and port
-    let registry_b_new = GossipRegistryHandle::new_with_tls(addr_b, secret_key_b, None)
-        .await
-        .expect("Failed to recreate registry B");
+    let registry_b_new =
+        GossipRegistryHandle::new_with_tls(addr_b, secret_key_b, Some(tls_test_config()))
+            .await
+            .expect("Failed to recreate registry B");
 
-    // Wait for reconnection
-    tokio::time::sleep(Duration::from_secs(6)).await; // Retry interval is 5 seconds
+    registry_a.bootstrap(vec![addr_b]).await;
+
+    // bootstrap() is blocking and will panic if the handshake fails
 
     // They should reconnect and B should learn about the actor again
-    let location = registry_b_new.lookup("persistent_actor").await;
+    let propagated =
+        wait_for_actor(&registry_b_new, "persistent_actor", Duration::from_secs(3)).await;
     assert!(
-        location.is_some(),
+        propagated,
         "B should know about A's actor after reconnection"
     );
 

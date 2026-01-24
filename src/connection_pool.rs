@@ -1,10 +1,14 @@
 use bytes::Buf;
 use futures::FutureExt;
+use rkyv::Archive;
+use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::future::Future;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
-use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::sync::OnceLock;
+use std::{collections::HashMap, io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -15,8 +19,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     current_timestamp, framing,
-    registry::{resolve_peer_addr, GossipRegistry, RegistryMessage},
-    GossipError, Result,
+    registry::{resolve_peer_addr, GossipRegistry, RegistryMessage, RegistryMessageFrame},
+    streaming, GossipError, Result,
 };
 
 // ==== SINGLE SOURCE OF TRUTH FOR ALL BUFFER SIZES ====
@@ -35,6 +39,15 @@ pub const RING_BUFFER_SLOTS: usize = 1024; // Number of WriteCommand slots in ri
                                            // Note: Streaming threshold ensures messages fit within TCP_BUFFER_SIZE
 const CONTROL_RESERVED_SLOTS: usize = 32; // Reserved permits for control/tell/response lanes
 const WRITER_MAX_LATENCY: Duration = Duration::from_micros(100);
+
+#[cfg_attr(
+    not(any(test, feature = "test-helpers", debug_assertions)),
+    allow(dead_code)
+)]
+fn typed_tell_capture_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok())
+}
 
 /// Tracks spawned tasks for a connection.
 ///
@@ -79,6 +92,30 @@ impl TaskTracker {
         if let Some(h) = self.reader_handle.take() {
             h.abort();
         }
+    }
+
+    /// Abort only the reader task.
+    pub fn abort_reader(&mut self) {
+        if let Some(h) = self.reader_handle.take() {
+            h.abort();
+        }
+    }
+
+    /// Abort only the writer task.
+    pub fn abort_writer(&mut self) {
+        if let Some(h) = self.writer_handle.take() {
+            h.abort();
+        }
+    }
+
+    /// Detach the writer task without aborting (allow graceful shutdown).
+    pub fn detach_writer(&mut self) {
+        let _ = self.writer_handle.take();
+    }
+
+    /// Detach the reader task without aborting.
+    pub fn detach_reader(&mut self) {
+        let _ = self.reader_handle.take();
     }
 }
 
@@ -378,6 +415,16 @@ impl LockFreeConnection {
         self.task_tracker.lock().abort_all();
     }
 
+    /// Gracefully shutdown writer and abort reader to avoid abrupt TLS close.
+    pub fn shutdown_tasks_gracefully(&self) {
+        if let Some(ref stream_handle) = self.stream_handle {
+            stream_handle.shutdown();
+        }
+        let mut tracker = self.task_tracker.lock();
+        tracker.detach_writer();
+        tracker.abort_reader();
+    }
+
     pub fn get_state(&self) -> ConnectionState {
         self.state.load(Ordering::Acquire).into()
     }
@@ -427,7 +474,7 @@ pub enum WritePayload {
         payload: bytes::Bytes,
     },
     HeaderInline {
-        header: [u8; 8],
+        header: [u8; 16],
         header_len: u8,
         payload: bytes::Bytes,
     },
@@ -437,11 +484,16 @@ pub enum WritePayload {
         payload: crate::typed::PooledPayload,
     },
     HeaderInlinePooled {
-        header: [u8; 8],
+        header: [u8; 16],
         header_len: u8,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
+    },
+    HeaderInlineBuf {
+        header: [u8; 16],
+        header_len: u8,
+        payload: Box<dyn Buf + Send>,
     },
     Buf(Box<dyn Buf + Send>),
 }
@@ -488,6 +540,15 @@ impl std::fmt::Debug for WritePayload {
                     &if prefix.is_some() { *prefix_len } else { 0 },
                 )
                 .field("payload_len", &payload.len())
+                .finish(),
+            WritePayload::HeaderInlineBuf {
+                header_len,
+                payload,
+                ..
+            } => f
+                .debug_struct("HeaderInlineBuf")
+                .field("header_len", &header_len)
+                .field("payload_len", &payload.remaining())
                 .finish(),
             WritePayload::Buf(_) => f.debug_tuple("Buf").field(&"<buf>").finish(),
         }
@@ -709,6 +770,53 @@ enum StreamingCommand {
     OwnedChunks(Vec<bytes::Bytes>),
 }
 
+async fn write_bytes_vectored_all<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    chunks: &[bytes::Bytes],
+) -> std::io::Result<usize> {
+    let mut total_written = 0usize;
+    let mut idx = 0usize;
+    let mut offset = 0usize;
+
+    while idx < chunks.len() {
+        let current = &chunks[idx];
+        let current_slice = &current[offset..];
+        let mut bufs = [
+            std::io::IoSlice::new(current_slice),
+            std::io::IoSlice::new(&[]),
+        ];
+
+        if offset == 0 && idx + 1 < chunks.len() {
+            bufs[1] = std::io::IoSlice::new(&chunks[idx + 1]);
+        }
+
+        let written = writer.write_vectored(&bufs).await?;
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write message",
+            ));
+        }
+
+        total_written += written;
+
+        let mut remaining = written;
+        while remaining > 0 && idx < chunks.len() {
+            let available = chunks[idx].len().saturating_sub(offset);
+            if remaining < available {
+                offset += remaining;
+                remaining = 0;
+            } else {
+                remaining -= available;
+                idx += 1;
+                offset = 0;
+            }
+        }
+    }
+
+    Ok(total_written)
+}
+
 /// Truly lock-free streaming handle with dedicated background writer
 #[derive(Clone)]
 pub struct LockFreeStreamHandle {
@@ -890,11 +998,9 @@ impl LockFreeStreamHandle {
                         bytes_since_flush = 0;
                     }
                     StreamingCommand::VectoredWrite(cmd) => {
-                        let header_slice = std::io::IoSlice::new(&cmd.header);
-                        let payload_slice = std::io::IoSlice::new(&cmd.payload);
-                        let bufs = &[header_slice, payload_slice];
-
-                        match writer.write_vectored(bufs).await {
+                        let VectoredWriteCommand { header, payload } = cmd;
+                        let chunks = [header, payload];
+                        match write_bytes_vectored_all(&mut writer, &chunks).await {
                             Ok(n) => {
                                 bytes_written_counter.fetch_add(n, Ordering::Relaxed);
                                 total_bytes_written += n;
@@ -906,12 +1012,7 @@ impl LockFreeStreamHandle {
                         }
                     }
                     StreamingCommand::OwnedChunks(chunks) => {
-                        let slices: Vec<std::io::IoSlice> = chunks
-                            .iter()
-                            .map(|chunk| std::io::IoSlice::new(chunk))
-                            .collect();
-
-                        match writer.write_vectored(&slices).await {
+                        match write_bytes_vectored_all(&mut writer, &chunks).await {
                             Ok(n) => {
                                 bytes_written_counter.fetch_add(n, Ordering::Relaxed);
                                 total_bytes_written += n;
@@ -1031,6 +1132,87 @@ impl LockFreeStreamHandle {
                                             } else {
                                                 payload_off += n;
                                             }
+                                        }
+                                        Err(_) => return,
+                                    }
+                                }
+                            }
+                            WritePayload::HeaderInlineBuf {
+                                header,
+                                header_len,
+                                mut payload,
+                            } => {
+                                if !write_chunks.is_empty() {
+                                    const MAX_IOV: usize = 64;
+                                    let chunks = std::mem::take(&mut write_chunks);
+                                    let mut idx = 0;
+                                    let mut iov: [std::mem::MaybeUninit<IoSlice<'_>>; MAX_IOV] =
+                                        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+
+                                    for chunk in &chunks {
+                                        iov[idx].write(IoSlice::new(chunk));
+                                        idx += 1;
+                                        if idx == MAX_IOV {
+                                            let slices = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    iov.as_ptr() as *const IoSlice<'_>,
+                                                    idx,
+                                                )
+                                            };
+                                            match writer.write_vectored(slices).await {
+                                                Ok(bytes_written) => {
+                                                    bytes_written_counter.fetch_add(
+                                                        bytes_written,
+                                                        Ordering::Relaxed,
+                                                    );
+                                                    total_bytes_written += bytes_written;
+                                                }
+                                                Err(_) => return,
+                                            }
+                                            idx = 0;
+                                        }
+                                    }
+
+                                    if idx > 0 {
+                                        let slices = unsafe {
+                                            std::slice::from_raw_parts(
+                                                iov.as_ptr() as *const IoSlice<'_>,
+                                                idx,
+                                            )
+                                        };
+                                        match writer.write_vectored(slices).await {
+                                            Ok(bytes_written) => {
+                                                bytes_written_counter
+                                                    .fetch_add(bytes_written, Ordering::Relaxed);
+                                                total_bytes_written += bytes_written;
+                                            }
+                                            Err(_) => return,
+                                        }
+                                    }
+                                }
+
+                                let header_len = header_len as usize;
+                                let mut header_off = 0usize;
+
+                                while header_off < header_len {
+                                    let h = &header[header_off..header_len];
+                                    match writer.write_vectored(&[IoSlice::new(h)]).await {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            total_bytes_written += n;
+                                            header_off += n;
+                                        }
+                                        Err(_) => return,
+                                    }
+                                }
+
+                                while payload.has_remaining() {
+                                    match writer.write_buf(&mut payload).await {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            total_bytes_written += n;
                                         }
                                         Err(_) => return,
                                     }
@@ -1325,28 +1507,25 @@ impl LockFreeStreamHandle {
                                     last_flush = std::time::Instant::now();
                                 }
                                 StreamingCommand::VectoredWrite(cmd) => {
-                                    let header_slice = std::io::IoSlice::new(&cmd.header);
-                                    let payload_slice = std::io::IoSlice::new(&cmd.payload);
-                                    let bufs = &[header_slice, payload_slice];
-                                    if let Ok(n) = writer.write_vectored(bufs).await {
-                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                        bytes_since_flush += n;
-                                        last_flush = std::time::Instant::now();
-                                    } else {
-                                        return;
+                                    let VectoredWriteCommand { header, payload } = cmd;
+                                    let chunks = [header, payload];
+                                    match write_bytes_vectored_all(&mut writer, &chunks).await {
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            bytes_since_flush += n;
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                        Err(_) => return,
                                     }
                                 }
                                 StreamingCommand::OwnedChunks(chunks) => {
-                                    let slices: Vec<std::io::IoSlice> = chunks
-                                        .iter()
-                                        .map(|chunk| std::io::IoSlice::new(chunk))
-                                        .collect();
-                                    if let Ok(n) = writer.write_vectored(&slices).await {
-                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                        bytes_since_flush += n;
-                                        last_flush = std::time::Instant::now();
-                                    } else {
-                                        return;
+                                    match write_bytes_vectored_all(&mut writer, &chunks).await {
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            bytes_since_flush += n;
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                        Err(_) => return,
                                     }
                                 }
                             }
@@ -1378,28 +1557,25 @@ impl LockFreeStreamHandle {
                                     last_flush = std::time::Instant::now();
                                 }
                                 StreamingCommand::VectoredWrite(cmd) => {
-                                    let header_slice = std::io::IoSlice::new(&cmd.header);
-                                    let payload_slice = std::io::IoSlice::new(&cmd.payload);
-                                    let bufs = &[header_slice, payload_slice];
-                                    if let Ok(n) = writer.write_vectored(bufs).await {
-                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                        bytes_since_flush += n;
-                                        last_flush = std::time::Instant::now();
-                                    } else {
-                                        return;
+                                    let VectoredWriteCommand { header, payload } = cmd;
+                                    let chunks = [header, payload];
+                                    match write_bytes_vectored_all(&mut writer, &chunks).await {
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            bytes_since_flush += n;
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                        Err(_) => return,
                                     }
                                 }
                                 StreamingCommand::OwnedChunks(chunks) => {
-                                    let slices: Vec<std::io::IoSlice> = chunks
-                                        .iter()
-                                        .map(|chunk| std::io::IoSlice::new(chunk))
-                                        .collect();
-                                    if let Ok(n) = writer.write_vectored(&slices).await {
-                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                        bytes_since_flush += n;
-                                        last_flush = std::time::Instant::now();
-                                    } else {
-                                        return;
+                                    match write_bytes_vectored_all(&mut writer, &chunks).await {
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            bytes_since_flush += n;
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                        Err(_) => return,
                                     }
                                 }
                             }
@@ -1411,6 +1587,9 @@ impl LockFreeStreamHandle {
                 }
             }
         }
+
+        let _ = writer.flush().await;
+        let _ = writer.shutdown().await;
     }
 
     async fn acquire_ask_permit(&self) -> OwnedSemaphorePermit {
@@ -1426,22 +1605,13 @@ impl LockFreeStreamHandle {
         static ACQUIRE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let count = ACQUIRE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        let available = self.control_permits.available_permits();
-        if count.is_multiple_of(1000) || available == 0 {
-            eprintln!(
-                "🎫 [PERMIT] #{} acquiring control permit (available: {}/{})",
-                count,
-                available,
-                self.buffer_config.ring_buffer_slots() / 4 // roughly the reserved amount
-            );
-        }
-
         // Add timeout to detect permit stalls - return error instead of panic
         let start = std::time::Instant::now();
         let permit = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.control_permits.clone().acquire_owned()
-        ).await;
+            self.control_permits.clone().acquire_owned(),
+        )
+        .await;
 
         match permit {
             Ok(Ok(p)) => {
@@ -1491,7 +1661,9 @@ impl LockFreeStreamHandle {
 
     #[cfg(test)]
     async fn acquire_control_permit_for_test(&self) -> OwnedSemaphorePermit {
-        self.acquire_control_permit().await.expect("test: control permit acquisition failed")
+        self.acquire_control_permit()
+            .await
+            .expect("test: control permit acquisition failed")
     }
 
     fn enqueue_with_permit(&self, data: WritePayload, permit: OwnedSemaphorePermit) -> Result<()> {
@@ -1524,11 +1696,13 @@ impl LockFreeStreamHandle {
         }
     }
 
+    #[inline]
     pub async fn write_bytes_ask(&self, data: bytes::Bytes) -> Result<()> {
         let permit = self.acquire_ask_permit().await;
         self.enqueue_with_permit(WritePayload::Single(data), permit)
     }
 
+    #[inline]
     pub async fn write_bytes_control(&self, data: bytes::Bytes) -> Result<()> {
         let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(WritePayload::Single(data), permit)
@@ -1545,7 +1719,7 @@ impl LockFreeStreamHandle {
 
     pub async fn write_header_and_payload_control_inline(
         &self,
-        header: [u8; 8],
+        header: [u8; 16],
         header_len: u8,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -1571,7 +1745,7 @@ impl LockFreeStreamHandle {
 
     pub async fn write_header_and_payload_ask_inline(
         &self,
-        header: [u8; 8],
+        header: [u8; 16],
         header_len: u8,
         payload: bytes::Bytes,
     ) -> Result<()> {
@@ -1605,9 +1779,9 @@ impl LockFreeStreamHandle {
 
     pub async fn write_pooled_control_inline(
         &self,
-        header: [u8; 8],
+        header: [u8; 16],
         header_len: u8,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
     ) -> Result<()> {
@@ -1643,9 +1817,9 @@ impl LockFreeStreamHandle {
 
     pub async fn write_pooled_ask_inline(
         &self,
-        header: [u8; 8],
+        header: [u8; 16],
         header_len: u8,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
     ) -> Result<()> {
@@ -1668,6 +1842,26 @@ impl LockFreeStreamHandle {
     {
         let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(WritePayload::Buf(Box::new(buf)), permit)
+    }
+
+    pub async fn write_header_and_payload_control_inline_buf<B>(
+        &self,
+        header: [u8; 16],
+        header_len: u8,
+        payload: B,
+    ) -> Result<()>
+    where
+        B: Buf + Send + 'static,
+    {
+        let permit = self.acquire_control_permit().await?;
+        self.enqueue_with_permit(
+            WritePayload::HeaderInlineBuf {
+                header,
+                header_len,
+                payload: Box::new(payload),
+            },
+            permit,
+        )
     }
 
     pub async fn write_buf_ask<B>(&self, buf: B) -> Result<()>
@@ -1732,6 +1926,42 @@ impl LockFreeStreamHandle {
                 channel_id = ?self.channel_id,
                 sequence = sequence,
                 "Ring buffer full (header+payload) - message dropped!"
+            );
+            Err(GossipError::Network(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "write buffer full",
+            )))
+        }
+    }
+
+    /// Write header + payload without concatenating, using an inline header to avoid allocations.
+    pub fn write_header_and_payload_nonblocking_inline(
+        &self,
+        header: [u8; 16],
+        header_len: u8,
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        let sequence = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
+
+        let command = WriteCommand {
+            channel_id: self.channel_id,
+            data: WritePayload::HeaderInline {
+                header,
+                header_len,
+                payload,
+            },
+            sequence: sequence as u64,
+            permit: None,
+        };
+
+        if self.ring_buffer.try_push(command) {
+            self.wake_writer_if_idle();
+            Ok(())
+        } else {
+            warn!(
+                channel_id = ?self.channel_id,
+                sequence = sequence,
+                "Ring buffer full (header inline) - message dropped!"
             );
             Err(GossipError::Network(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -1813,15 +2043,28 @@ impl LockFreeStreamHandle {
             return Ok(());
         }
 
-        // Use BytesMut for efficient concatenation
-        let total_len: usize = data_chunks.iter().map(|chunk| chunk.len()).sum();
-        let mut combined_buffer = bytes::BytesMut::with_capacity(total_len);
-
-        for chunk in data_chunks {
-            combined_buffer.extend_from_slice(chunk);
+        if data_chunks.len() == 1 {
+            return self.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data_chunks[0]));
         }
 
-        self.write_bytes_nonblocking(combined_buffer.freeze())
+        let mut chunks = Vec::with_capacity(data_chunks.len());
+        for chunk in data_chunks {
+            chunks.push(bytes::Bytes::copy_from_slice(chunk));
+        }
+        self.write_vectored_nonblocking_bytes(chunks)
+    }
+
+    /// Write already-owned chunks without concatenation.
+    pub fn write_vectored_nonblocking_bytes(&self, chunks: Vec<bytes::Bytes>) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        if chunks.len() == 1 {
+            return self.write_bytes_nonblocking(chunks[0].clone());
+        }
+        self.streaming_tx
+            .send(StreamingCommand::OwnedChunks(chunks))
+            .map_err(|_| GossipError::Shutdown)
     }
 
     /// Write large data in chunks to avoid blocking
@@ -1830,8 +2073,13 @@ impl LockFreeStreamHandle {
             return Ok(());
         }
 
-        for chunk in data.chunks(chunk_size) {
-            let _ = self.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(chunk));
+        let bytes = bytes::Bytes::copy_from_slice(data);
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let end = (offset + chunk_size).min(bytes.len());
+            let chunk = bytes.slice(offset..end);
+            let _ = self.write_bytes_nonblocking(chunk);
+            offset = end;
         }
 
         Ok(())
@@ -1877,6 +2125,7 @@ impl LockFreeStreamHandle {
     /// Shutdown the background writer task
     pub fn shutdown(&self) {
         self.shutdown_signal.store(true, Ordering::Relaxed);
+        self.writer_notify.notify_one();
     }
 
     /// Get the streaming threshold for this connection
@@ -1887,15 +2136,14 @@ impl LockFreeStreamHandle {
         self.buffer_config.streaming_threshold()
     }
 
-    /// Stream a large message directly to the socket, bypassing the ring buffer
-    /// This provides maximum performance for large messages like PreBacktest
-    pub async fn stream_large_message(
+    async fn stream_large_message_zoned(
         &self,
-        msg: &[u8],
+        msg: bytes::Bytes,
         type_hash: u32,
         actor_id: u64,
+        correlation_id: u16,
     ) -> Result<()> {
-        use crate::{current_timestamp, MessageType, StreamHeader};
+        use crate::current_timestamp;
 
         const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
 
@@ -1916,83 +2164,58 @@ impl LockFreeStreamHandle {
         // Generate unique stream ID
         let stream_id = current_timestamp();
 
-        // Helper to serialize message with type and header
-        fn serialize_stream_message(msg_type: MessageType, header: &StreamHeader) -> Vec<u8> {
-            // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36]
-            let inner_size = 12 + StreamHeader::SERIALIZED_SIZE; // type(1) + corr(2) + reserved(9) + header
-            let mut message = Vec::with_capacity(4 + inner_size);
-
-            // Length prefix (required by protocol)
-            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
-
-            // Header
-            message.push(msg_type as u8);
-            message.extend_from_slice(&[0, 0]); // correlation_id (not used for streaming)
-            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes for 32-byte alignment
-            message.extend_from_slice(&header.to_bytes());
-            message
-        }
-
-        // Send StreamStart header
-        let start_header = StreamHeader {
+        // Emit StreamStart descriptor (always using the zero-copy layout)
+        let descriptor = streaming::StreamDescriptor {
             stream_id,
-            total_size: msg.len() as u64,
-            chunk_size: 0,
-            chunk_index: 0,
+            payload_len: msg.len() as u64,
+            chunk_len: STREAM_CHUNK_SIZE as u32,
             type_hash,
             actor_id,
+            flags: 0,
+            reserved: 0,
         };
-
-        let start_msg = serialize_stream_message(MessageType::StreamStart, &start_header);
+        let header = streaming::encode_stream_start_frame(&descriptor, correlation_id);
         self.streaming_tx
-            .send(StreamingCommand::WriteBytes(start_msg.into()))
+            .send(StreamingCommand::WriteBytes(bytes::Bytes::copy_from_slice(
+                &header,
+            )))
             .map_err(|_| GossipError::Shutdown)?;
 
-        // Stream chunks directly
-        for (idx, chunk) in msg.chunks(CHUNK_SIZE).enumerate() {
-            let data_header = StreamHeader {
-                stream_id,
-                total_size: msg.len() as u64,
-                chunk_size: chunk.len() as u32,
-                chunk_index: idx as u32,
-                type_hash,
-                actor_id,
-            };
-
-            // Create combined message with proper length prefix
-            // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36][chunk_data:N]
-            let inner_size = 12 + StreamHeader::SERIALIZED_SIZE + chunk.len(); // type(1) + corr(2) + reserved(9) + header + data
-            let mut chunk_msg = Vec::with_capacity(4 + inner_size);
-
-            // Length prefix (includes header + chunk data)
-            chunk_msg.extend_from_slice(&(inner_size as u32).to_be_bytes());
-
-            // Header
-            chunk_msg.push(MessageType::StreamData as u8);
-            chunk_msg.extend_from_slice(&[0, 0]); // correlation_id
-            chunk_msg.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes for 32-byte alignment
-            chunk_msg.extend_from_slice(&data_header.to_bytes());
-
-            // Chunk data
-            chunk_msg.extend_from_slice(chunk);
-
+        // Stream chunks directly (zero-copy payload slices)
+        let total_len = msg.len();
+        let total_chunks = total_len.div_ceil(CHUNK_SIZE);
+        let mut idx = 0u32;
+        let mut offset = 0usize;
+        let mut data_header = streaming::stream_data_header_template(correlation_id);
+        while offset < total_len {
+            let chunk_len = std::cmp::min(CHUNK_SIZE, total_len - offset);
+            let prefix = (framing::STREAM_HEADER_PREFIX_LEN + chunk_len) as u32;
+            data_header[..4].copy_from_slice(&prefix.to_be_bytes());
+            let header_bytes = bytes::Bytes::copy_from_slice(&data_header);
+            let payload = msg.slice(offset..offset + chunk_len);
             self.streaming_tx
-                .send(StreamingCommand::WriteBytes(chunk_msg.into()))
+                .send(StreamingCommand::VectoredWrite(VectoredWriteCommand {
+                    header: header_bytes,
+                    payload,
+                }))
                 .map_err(|_| GossipError::Shutdown)?;
 
             // Yield periodically to prevent blocking
-            if idx % 10 == 0 {
+            if total_chunks > 1 && idx.is_multiple_of(10) {
                 self.streaming_tx
                     .send(StreamingCommand::Flush)
                     .map_err(|_| GossipError::Shutdown)?;
                 tokio::task::yield_now().await;
             }
+            idx += 1;
+            offset += chunk_len;
         }
 
-        // Send StreamEnd
-        let end_msg = serialize_stream_message(MessageType::StreamEnd, &start_header);
+        let header = streaming::encode_stream_end_header(correlation_id);
         self.streaming_tx
-            .send(StreamingCommand::WriteBytes(end_msg.into()))
+            .send(StreamingCommand::WriteBytes(bytes::Bytes::copy_from_slice(
+                &header,
+            )))
             .map_err(|_| GossipError::Shutdown)?;
         self.streaming_tx
             .send(StreamingCommand::Flush)
@@ -2007,32 +2230,89 @@ impl LockFreeStreamHandle {
         Ok(())
     }
 
+    async fn stream_large_message_internal_bytes(
+        &self,
+        msg: bytes::Bytes,
+        type_hash: u32,
+        actor_id: u64,
+        correlation_id: u16,
+    ) -> Result<()> {
+        self.stream_large_message_zoned(msg, type_hash, actor_id, correlation_id)
+            .await
+    }
+
+    async fn stream_large_message_internal(
+        &self,
+        msg: &[u8],
+        type_hash: u32,
+        actor_id: u64,
+        correlation_id: u16,
+    ) -> Result<()> {
+        self.stream_large_message_internal_bytes(
+            bytes::Bytes::copy_from_slice(msg),
+            type_hash,
+            actor_id,
+            correlation_id,
+        )
+        .await
+    }
+
+    /// Stream a large message directly to the socket, bypassing the ring buffer
+    /// This provides maximum performance for large messages like PreBacktest
+    pub async fn stream_large_message(
+        &self,
+        msg: &[u8],
+        type_hash: u32,
+        actor_id: u64,
+    ) -> Result<()> {
+        self.stream_large_message_internal(msg, type_hash, actor_id, 0)
+            .await
+    }
+
+    pub async fn stream_large_message_bytes(
+        &self,
+        msg: bytes::Bytes,
+        type_hash: u32,
+        actor_id: u64,
+    ) -> Result<()> {
+        self.stream_large_message_internal_bytes(msg, type_hash, actor_id, 0)
+            .await
+    }
+
+    /// Stream a large ask message directly to the socket with correlation ID.
+    pub async fn stream_large_message_with_correlation(
+        &self,
+        msg: &[u8],
+        type_hash: u32,
+        actor_id: u64,
+        correlation_id: u16,
+    ) -> Result<()> {
+        self.stream_large_message_internal(msg, type_hash, actor_id, correlation_id)
+            .await
+    }
+
+    pub async fn stream_large_message_with_correlation_bytes(
+        &self,
+        msg: bytes::Bytes,
+        type_hash: u32,
+        actor_id: u64,
+        correlation_id: u16,
+    ) -> Result<()> {
+        self.stream_large_message_internal_bytes(msg, type_hash, actor_id, correlation_id)
+            .await
+    }
+
     /// Zero-copy vectored write for header + payload in single operation
     /// This eliminates copying payload data into frame buffer - optimal for streaming
     pub fn write_bytes_vectored(&self, header: bytes::Bytes, payload: bytes::Bytes) -> Result<()> {
         // Create vectored command that preserves both header and payload as separate Bytes
         let command = VectoredWriteCommand { header, payload };
 
-        // Try to send via streaming channel first for vectored operations
-        match self
-            .streaming_tx
+        // Try to send via streaming channel first for vectored operations.
+        // No fallback to ring-buffer: streaming is explicit and must succeed or error.
+        self.streaming_tx
             .send(StreamingCommand::VectoredWrite(command))
-        {
-            Ok(_) => Ok(()),
-            Err(send_error) => {
-                // Fallback: combine into single write if streaming channel is closed
-                let cmd = send_error.0;
-                if let StreamingCommand::VectoredWrite(vectored_cmd) = cmd {
-                    let total_len = vectored_cmd.header.len() + vectored_cmd.payload.len();
-                    let mut combined = bytes::BytesMut::with_capacity(total_len);
-                    combined.extend_from_slice(&vectored_cmd.header);
-                    combined.extend_from_slice(&vectored_cmd.payload);
-                    self.write_bytes_nonblocking(combined.freeze())
-                } else {
-                    Err(GossipError::Shutdown)
-                }
-            }
-        }
+            .map_err(|_| GossipError::Shutdown)
     }
 
     /// Send owned chunks without copying - optimal for streaming large messages
@@ -2074,47 +2354,58 @@ impl Debug for LockFreeStreamHandle {
 }
 
 /// Message types for seamless batching with tell()
+#[cfg_attr(
+    feature = "legacy_tell_bytes",
+    deprecated(
+        since = "0.1.0",
+        note = "TellMessage is deprecated. Switch to tell_bytes()/tell_typed() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+    )
+)]
 pub enum TellMessage<'a> {
     Single(&'a [u8]),
     Batch(Vec<&'a [u8]>),
+    BatchSlice(&'a [&'a [u8]]),
 }
 
+#[cfg(feature = "legacy_tell_bytes")]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
 impl<'a> TellMessage<'a> {
-    /// Create a single message
     pub fn single(data: &'a [u8]) -> Self {
         Self::Single(data)
     }
 
-    /// Create a batch message
     pub fn batch(messages: Vec<&'a [u8]>) -> Self {
         Self::Batch(messages)
     }
 
-    /// Create from a slice - automatically detects single vs batch
     pub fn from_slice(messages: &'a [&'a [u8]]) -> Self {
         if messages.len() == 1 {
             Self::Single(messages[0])
         } else {
-            Self::Batch(messages.to_vec())
+            Self::BatchSlice(messages)
         }
     }
 
-    /// Send this message via the connection handle
     pub async fn send_via(self, handle: &ConnectionHandle) -> Result<()> {
         match self {
             TellMessage::Single(data) => handle.tell_raw(data).await,
             TellMessage::Batch(messages) => handle.tell_batch(&messages).await,
+            TellMessage::BatchSlice(messages) => handle.tell_batch(messages).await,
         }
     }
 }
 
-/// Implement From trait for automatic conversion
+#[cfg(feature = "legacy_tell_bytes")]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
 impl<'a> From<&'a [u8]> for TellMessage<'a> {
     fn from(data: &'a [u8]) -> Self {
         Self::Single(data)
     }
 }
 
+#[cfg(feature = "legacy_tell_bytes")]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
 impl<'a> From<Vec<&'a [u8]>> for TellMessage<'a> {
     fn from(messages: Vec<&'a [u8]>) -> Self {
         if messages.len() == 1 {
@@ -2125,29 +2416,100 @@ impl<'a> From<Vec<&'a [u8]>> for TellMessage<'a> {
     }
 }
 
+#[cfg(feature = "legacy_tell_bytes")]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
 impl<'a> From<&'a [&'a [u8]]> for TellMessage<'a> {
     fn from(messages: &'a [&'a [u8]]) -> Self {
         if messages.len() == 1 {
             Self::Single(messages[0])
         } else {
-            Self::Batch(messages.to_vec())
+            Self::BatchSlice(messages)
         }
     }
 }
 
+#[cfg(feature = "legacy_tell_bytes")]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
 impl<'a, const N: usize> From<&'a [u8; N]> for TellMessage<'a> {
     fn from(data: &'a [u8; N]) -> Self {
         Self::Single(data.as_slice())
     }
 }
 
+#[cfg(feature = "legacy_tell_bytes")]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
 impl<'a> From<&'a Vec<u8>> for TellMessage<'a> {
     fn from(data: &'a Vec<u8>) -> Self {
         Self::Single(data.as_slice())
     }
 }
 
-/// Macro for ergonomic tell message creation
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
+impl<'a> TellMessage<'a> {
+    pub fn single(_: &'a [u8]) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+
+    pub fn batch(_: Vec<&'a [u8]>) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+
+    pub fn from_slice(_: &'a [&'a [u8]]) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+
+    pub async fn send_via(self, _: &ConnectionHandle) -> Result<()> {
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+}
+
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
+impl<'a> From<&'a [u8]> for TellMessage<'a> {
+    fn from(_: &'a [u8]) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+}
+
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
+impl<'a> From<Vec<&'a [u8]>> for TellMessage<'a> {
+    fn from(_: Vec<&'a [u8]>) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+}
+
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
+impl<'a> From<&'a [&'a [u8]]> for TellMessage<'a> {
+    fn from(_: &'a [&'a [u8]]) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+}
+
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
+impl<'a, const N: usize> From<&'a [u8; N]> for TellMessage<'a> {
+    fn from(_: &'a [u8; N]) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+}
+
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
+impl<'a> From<&'a Vec<u8>> for TellMessage<'a> {
+    fn from(_: &'a Vec<u8>) -> Self {
+        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
+    }
+}
+
+#[cfg(feature = "legacy_tell_bytes")]
+#[deprecated(
+    since = "0.1.0",
+    note = "tell_msg! macro is deprecated. Use tell_bytes()/tell_typed() or enable \
+'legacy_tell_bytes_unlocked' alongside 'legacy_tell_bytes' to temporarily opt back in."
+)]
 #[macro_export]
 macro_rules! tell_msg {
     ($single:expr) => {
@@ -2155,6 +2517,14 @@ macro_rules! tell_msg {
     };
     ($($msg:expr),+ $(,)?) => {
         TellMessage::batch(vec![$($msg),+])
+    };
+}
+
+#[cfg(not(feature = "legacy_tell_bytes"))]
+#[macro_export]
+macro_rules! tell_msg {
+    ($($msg:expr),+ $(,)?) => {
+        compile_error!("tell_msg! macro requires the 'legacy_tell_bytes' feature or migration to tell_bytes()/tell_typed() APIs");
     };
 }
 
@@ -2181,6 +2551,9 @@ pub struct ConnectionPool {
     message_buffer_pool: Arc<MessageBufferPool>,
     /// Connection counter for load balancing
     connection_counter: AtomicUsize,
+    /// Shared view of negotiated peer capabilities (set by registry)
+    peer_capabilities:
+        Option<Arc<dashmap::DashMap<SocketAddr, crate::handshake::PeerCapabilities>>>,
 }
 
 unsafe impl Send for ConnectionPool {}
@@ -2193,8 +2566,11 @@ const PENDING_RESPONSES_SIZE: usize = 1024;
 struct PendingResponseSlot {
     notify: tokio::sync::Notify,
     in_use: AtomicBool,
-    response: parking_lot::Mutex<Option<bytes::Bytes>>,
+    ready: AtomicBool,
+    response: UnsafeCell<MaybeUninit<bytes::Bytes>>,
 }
+
+unsafe impl Sync for PendingResponseSlot {}
 
 /// Shared state for correlation tracking
 pub(crate) struct CorrelationTracker {
@@ -2217,12 +2593,29 @@ impl CorrelationTracker {
         let pending = std::array::from_fn(|_| PendingResponseSlot {
             notify: tokio::sync::Notify::new(),
             in_use: AtomicBool::new(false),
-            response: parking_lot::Mutex::new(None),
+            ready: AtomicBool::new(false),
+            response: UnsafeCell::new(MaybeUninit::uninit()),
         });
         Arc::new(Self {
             next_id: AtomicU16::new(1),
             pending,
         })
+    }
+
+    fn clear_response(slot_ref: &PendingResponseSlot) {
+        if slot_ref.ready.swap(false, Ordering::AcqRel) {
+            unsafe {
+                (*slot_ref.response.get()).assume_init_drop();
+            }
+        }
+    }
+
+    fn take_response(slot_ref: &PendingResponseSlot) -> Option<bytes::Bytes> {
+        if !slot_ref.ready.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        // Safety: writer sets ready true only after initializing response.
+        Some(unsafe { (*slot_ref.response.get()).assume_init_read() })
     }
 
     /// Allocate a correlation ID and reserve the response slot.
@@ -2236,8 +2629,7 @@ impl CorrelationTracker {
             let slot = (id as usize) % PENDING_RESPONSES_SIZE;
             let slot_ref = &self.pending[slot];
             if !slot_ref.in_use.swap(true, Ordering::AcqRel) {
-                let mut response = slot_ref.response.lock();
-                *response = None;
+                Self::clear_response(slot_ref);
                 debug!(
                     "CorrelationTracker: Allocated correlation_id {} in slot {}",
                     id, slot
@@ -2263,8 +2655,11 @@ impl CorrelationTracker {
         if !slot_ref.in_use.load(Ordering::Acquire) {
             return;
         }
-        let mut stored = slot_ref.response.lock();
-        *stored = Some(response);
+        Self::clear_response(slot_ref);
+        unsafe {
+            (*slot_ref.response.get()).write(response);
+        }
+        slot_ref.ready.store(true, Ordering::Release);
         slot_ref.notify.notify_waiters();
     }
 
@@ -2273,8 +2668,7 @@ impl CorrelationTracker {
         let slot = (correlation_id as usize) % PENDING_RESPONSES_SIZE;
         let slot_ref = &self.pending[slot];
         slot_ref.in_use.store(false, Ordering::Release);
-        let mut stored = slot_ref.response.lock();
-        *stored = None;
+        Self::clear_response(slot_ref);
         slot_ref.notify.notify_waiters();
     }
 
@@ -2287,7 +2681,7 @@ impl CorrelationTracker {
         let slot_ref = &self.pending[slot];
 
         loop {
-            if let Some(response) = slot_ref.response.lock().take() {
+            if let Some(response) = Self::take_response(slot_ref) {
                 slot_ref.in_use.store(false, Ordering::Release);
                 return Ok(response);
             }
@@ -2297,6 +2691,7 @@ impl CorrelationTracker {
                 Ok(()) => continue,
                 Err(_) => {
                     slot_ref.in_use.store(false, Ordering::Release);
+                    Self::clear_response(slot_ref);
                     return Err(crate::GossipError::Timeout);
                 }
             }
@@ -2312,6 +2707,8 @@ pub struct ConnectionHandle {
     stream_handle: Arc<LockFreeStreamHandle>,
     // Correlation tracker for ask/response
     correlation: Arc<CorrelationTracker>,
+    peer_capabilities:
+        Option<Arc<dashmap::DashMap<SocketAddr, crate::handshake::PeerCapabilities>>>,
 }
 
 impl std::fmt::Debug for ConnectionHandle {
@@ -2319,6 +2716,14 @@ impl std::fmt::Debug for ConnectionHandle {
         f.debug_struct("ConnectionHandle")
             .field("addr", &self.addr)
             .field("stream_handle", &self.stream_handle)
+            .field(
+                "has_capabilities",
+                &self
+                    .peer_capabilities
+                    .as_ref()
+                    .map(|_| true)
+                    .unwrap_or(false),
+            )
             .finish()
     }
 }
@@ -2454,6 +2859,24 @@ impl std::fmt::Debug for DelegatedReplySender {
 }
 
 impl ConnectionHandle {
+    fn peer_supports_streaming(&self) -> bool {
+        self.peer_capabilities
+            .as_ref()
+            .and_then(|caps| caps.get(&self.addr))
+            .map(|entry| entry.value().supports_streaming())
+            .unwrap_or(true)
+    }
+
+    fn ensure_streaming(&self) -> Result<()> {
+        if self.peer_supports_streaming() {
+            Ok(())
+        } else {
+            Err(GossipError::InvalidStreamFrame(
+                "Peer does not support streaming capability".into(),
+            ))
+        }
+    }
+
     /// Send pre-serialized data through this connection - LOCK-FREE
     pub async fn send_data(&self, data: Vec<u8>) -> Result<()> {
         self.stream_handle
@@ -2462,11 +2885,20 @@ impl ConnectionHandle {
     }
 
     /// Send raw bytes without any framing - used by ReplyTo
+    #[cfg(feature = "legacy_tell_bytes")]
     pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
-        // Must copy here since we don't own the data
         self.stream_handle
             .write_bytes_control(bytes::Bytes::copy_from_slice(data))
             .await
+    }
+
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "send_raw_bytes() is disabled; use tell_bytes()/tell_typed() or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
+        let _ = data;
+        Err(GossipError::LegacyTellApiDisabled)
     }
 
     /// Send a response payload with framing, without copying the payload.
@@ -2482,7 +2914,7 @@ impl ConnectionHandle {
         );
 
         self.stream_handle
-            .write_header_and_payload_control_inline(header, 8, payload)
+            .write_header_and_payload_control_inline(header, 16, payload)
             .await
     }
 
@@ -2501,8 +2933,9 @@ impl ConnectionHandle {
             correlation_id,
             payload_len,
         );
-        let buf = bytes::Bytes::copy_from_slice(&header).chain(payload);
-        self.stream_handle.write_buf_control(buf).await
+        self.stream_handle
+            .write_header_and_payload_control_inline_buf(header, 16, payload)
+            .await
     }
 
     /// Send a response payload using a pooled payload without dynamic dispatch.
@@ -2510,7 +2943,7 @@ impl ConnectionHandle {
         &self,
         correlation_id: u16,
         payload: crate::typed::PooledPayload,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         payload_len: usize,
     ) -> Result<()> {
         let header = framing::write_ask_response_header(
@@ -2520,7 +2953,7 @@ impl ConnectionHandle {
         );
         let prefix_len = prefix.as_ref().map(|p| p.len()).unwrap_or(0) as u8;
         self.stream_handle
-            .write_pooled_control_inline(header, 8, prefix, prefix_len, payload)
+            .write_pooled_control_inline(header, 16, prefix, prefix_len, payload)
             .await
     }
 
@@ -2536,8 +2969,57 @@ impl ConnectionHandle {
         type_hash: u32,
         actor_id: u64,
     ) -> Result<()> {
+        self.ensure_streaming()?;
         self.stream_handle
             .stream_large_message(msg, type_hash, actor_id)
+            .await
+    }
+
+    /// Stream a large ask message directly and wait for response (lock-free).
+    pub async fn ask_streaming(
+        &self,
+        msg: &[u8],
+        type_hash: u32,
+        actor_id: u64,
+        timeout: Duration,
+    ) -> Result<bytes::Bytes> {
+        self.ensure_streaming()?;
+        let correlation_id = self.correlation.allocate();
+        if let Err(e) = self
+            .stream_handle
+            .stream_large_message_with_correlation(msg, type_hash, actor_id, correlation_id)
+            .await
+        {
+            self.correlation.cancel(correlation_id);
+            return Err(e);
+        }
+
+        self.correlation
+            .wait_for_response(correlation_id, timeout)
+            .await
+    }
+
+    /// Stream a large ask message using owned Bytes (avoids payload copy).
+    pub async fn ask_streaming_bytes(
+        &self,
+        msg: bytes::Bytes,
+        type_hash: u32,
+        actor_id: u64,
+        timeout: Duration,
+    ) -> Result<bytes::Bytes> {
+        self.ensure_streaming()?;
+        let correlation_id = self.correlation.allocate();
+        if let Err(e) = self
+            .stream_handle
+            .stream_large_message_with_correlation_bytes(msg, type_hash, actor_id, correlation_id)
+            .await
+        {
+            self.correlation.cancel(correlation_id);
+            return Err(e);
+        }
+
+        self.correlation
+            .wait_for_response(correlation_id, timeout)
             .await
     }
 
@@ -2550,8 +3032,16 @@ impl ConnectionHandle {
     }
 
     /// Raw tell() - LOCK-FREE write (used internally)
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
-        // Create message with length header using BytesMut for efficiency
         let mut message = bytes::BytesMut::with_capacity(4 + data.len());
         message.extend_from_slice(&(data.len() as u32).to_be_bytes());
         message.extend_from_slice(data);
@@ -2561,13 +3051,57 @@ impl ConnectionHandle {
             .await
     }
 
+    /// Raw tell() - disabled without `legacy_tell_bytes`
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "tell_raw() is disabled; enable the 'legacy_tell_bytes' feature or switch to tell_bytes()/tell_typed()"
+    )]
+    pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
+        let _ = data;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Tell using owned bytes to avoid payload copies.
     pub async fn tell_bytes(&self, data: bytes::Bytes) -> Result<()> {
-        let mut header = [0u8; 8];
+        let mut header = [0u8; 16]; // Changed from 8 to 16 for alignment
         header[..4].copy_from_slice(&(data.len() as u32).to_be_bytes());
 
         self.stream_handle
             .write_header_and_payload_control_inline(header, 4, data)
+            .await
+    }
+
+    /// Tell multiple messages using owned bytes (zero copy per entry).
+    pub async fn tell_bytes_batch(&self, messages: &[bytes::Bytes]) -> Result<()> {
+        for msg in messages {
+            self.tell_bytes(msg.clone()).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_typed_payload<T>(&self, payload: crate::typed::PooledPayload) -> Result<()>
+    where
+        T: crate::typed::WireEncode,
+    {
+        let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<T>(payload);
+        let (prefix_padded, prefix_len) = crate::typed::pad_type_hash_prefix(prefix);
+        let mut header = [0u8; 16]; // Changed from 8 to 16 for alignment
+        header[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
+
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        {
+            if typed_tell_capture_enabled() {
+                let mut capture = bytes::BytesMut::with_capacity(prefix_len as usize + payload_len);
+                if let Some(prefix) = prefix_padded {
+                    capture.extend_from_slice(&prefix[..prefix_len as usize]);
+                }
+                capture.extend_from_slice(payload.as_bytes());
+                crate::test_helpers::record_raw_payload(capture.freeze());
+            }
+        }
+
+        self.stream_handle
+            .write_pooled_control_inline(header, 4, prefix_padded, prefix_len, payload)
             .await
     }
 
@@ -2577,13 +3111,27 @@ impl ConnectionHandle {
         T: crate::typed::WireEncode,
     {
         let payload = crate::typed::encode_typed_pooled(value)?;
-        let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<T>(payload);
-        let mut header = [0u8; 8];
-        header[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
-        let prefix_len = prefix.as_ref().map(|p| p.len()).unwrap_or(0) as u8;
-        self.stream_handle
-            .write_pooled_control_inline(header, 4, prefix, prefix_len, payload)
-            .await
+        self.send_typed_payload::<T>(payload).await
+    }
+
+    /// Tell multiple typed payloads (each sent zero copy via pooled buffers).
+    pub async fn tell_typed_batch<T>(&self, values: &[T]) -> Result<()>
+    where
+        T: crate::typed::WireEncode,
+    {
+        let batch = crate::typed::TypedBatch::from_slice(values)?;
+        self.tell_typed_pooled_batch(batch).await
+    }
+
+    /// Tell multiple pre-encoded typed payloads without extra copies.
+    pub async fn tell_typed_pooled_batch<T>(&self, batch: crate::typed::TypedBatch<T>) -> Result<()>
+    where
+        T: crate::typed::WireEncode,
+    {
+        for payload in batch {
+            self.send_typed_payload::<T>(payload).await?;
+        }
+        Ok(())
     }
 
     /// Send a pre-formatted binary message (already has length prefix)
@@ -2595,51 +3143,138 @@ impl ConnectionHandle {
     }
 
     /// Smart tell() - accepts TellMessage with automatic batch detection
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn tell<'a, T: Into<TellMessage<'a>>>(&self, message: T) -> Result<()> {
         let tell_message = message.into();
         tell_message.send_via(self).await
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "tell() is disabled; use tell_bytes()/tell_typed() or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn tell<'a, T: Into<TellMessage<'a>>>(&self, message: T) -> Result<()> {
+        let _ = message.into();
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Smart tell() - automatically uses batching for Vec<T>
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn tell_smart<T: AsRef<[u8]>>(&self, payload: &[T]) -> Result<()> {
         if payload.len() == 1 {
-            // Single message - use regular tell
             self.tell(payload[0].as_ref()).await
         } else {
-            // Multiple messages - use batch
             let batch: Vec<&[u8]> = payload.iter().map(|item| item.as_ref()).collect();
             self.tell_batch(&batch).await
         }
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(note = "tell_smart() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
+    pub async fn tell_smart<T: AsRef<[u8]>>(&self, payload: &[T]) -> Result<()> {
+        let _ = payload;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Tell with automatic batching detection
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn tell_auto(&self, data: &[u8]) -> Result<()> {
-        // Single message path
         self.tell(data).await
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(note = "tell_auto() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
+    pub async fn tell_auto(&self, data: &[u8]) -> Result<()> {
+        let _ = data;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Tell multiple messages with a single call
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn tell_many<T: AsRef<[u8]>>(&self, messages: &[T]) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
 
         if messages.len() == 1 {
-            // Single message optimization
             self.tell(messages[0].as_ref()).await
         } else {
-            // Batch multiple messages
             let batch: Vec<&[u8]> = messages.iter().map(|msg| msg.as_ref()).collect();
             self.tell_batch(&batch).await
         }
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(note = "tell_many() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
+    pub async fn tell_many<T: AsRef<[u8]>>(&self, messages: &[T]) -> Result<()> {
+        let _ = messages;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Send a TellMessage (single or batch) - same as tell() but explicit
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn send_tell_message(&self, message: TellMessage<'_>) -> Result<()> {
         message.send_via(self).await
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "send_tell_message() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn send_tell_message(&self, _message: TellMessage<'_>) -> Result<()> {
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Universal send() - detects single vs multiple messages automatically
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn send_messages(&self, messages: &[&[u8]]) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
@@ -2652,9 +3287,26 @@ impl ConnectionHandle {
         }
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "send_messages() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn send_messages(&self, messages: &[&[u8]]) -> Result<()> {
+        let _ = messages;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Batch tell() for multiple messages - LOCK-FREE
+    #[cfg(feature = "legacy_tell_bytes")]
+    #[cfg_attr(
+        feature = "legacy_tell_bytes",
+        deprecated(
+            since = "0.1.0",
+            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
+or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
+        )
+    )]
     pub async fn tell_batch(&self, messages: &[&[u8]]) -> Result<()> {
-        // OPTIMIZATION: Pre-calculate total size and write in one go
         let total_size: usize = messages.iter().map(|m| 4 + m.len()).sum();
         let mut batch_buffer = bytes::BytesMut::with_capacity(total_size);
 
@@ -2668,6 +3320,13 @@ impl ConnectionHandle {
             .await
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(note = "tell_batch() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
+    pub async fn tell_batch(&self, messages: &[&[u8]]) -> Result<()> {
+        let _ = messages;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Direct access to try_send for maximum performance testing
     pub fn try_send_direct(&self, _data: &[u8]) -> Result<()> {
         // Direct TCP doesn't support try_send - would need try_lock
@@ -2678,100 +3337,24 @@ impl ConnectionHandle {
     }
 
     /// Send raw bytes through existing connection (zero-copy where possible)
+    #[cfg(feature = "legacy_tell_bytes")]
     pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
-        // Direct TCP write
         self.tell_raw(data).await
     }
 
-    /// Ask method for request-response (Note: This is a simplified implementation)
-    /// For full request-response, you would need a proper protocol with correlation IDs
-    pub async fn ask(&self, request: &[u8]) -> Result<Vec<u8>> {
-        // Use default timeout of 30 seconds
-        self.ask_with_timeout(request, Duration::from_secs(30))
-            .await
-    }
-
-    /// Ask method with custom timeout for request-response
-    pub async fn ask_with_timeout(&self, request: &[u8], timeout: Duration) -> Result<Vec<u8>> {
-        // Allocate correlation ID
-        let correlation_id = self.correlation.allocate();
-
-        let header = framing::write_ask_response_header(
-            crate::MessageType::Ask,
-            correlation_id,
-            request.len(),
-        );
-
-        if let Err(e) = self
-            .stream_handle
-            .write_header_and_payload_ask_inline(header, 8, bytes::Bytes::copy_from_slice(request))
-            .await
-        {
-            self.correlation.cancel(correlation_id);
-            return Err(e);
-        }
-
-        let response = self
-            .correlation
-            .wait_for_response(correlation_id, timeout)
-            .await?;
-        Ok(response.to_vec())
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "send_raw() is disabled; use tell_bytes()/tell_typed() or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
+        let _ = data;
+        Err(GossipError::LegacyTellApiDisabled)
     }
 
     /// Ask using owned bytes to avoid payload copies. Returns response as Bytes.
-    pub async fn ask_bytes(&self, request: bytes::Bytes) -> Result<bytes::Bytes> {
-        self.ask_with_timeout_bytes(request, Duration::from_secs(30))
+    pub async fn ask(&self, request: bytes::Bytes) -> Result<bytes::Bytes> {
+        self.ask_with_timeout(request, Duration::from_secs(30))
             .await
-    }
-
-    /// Ask with typed request/response (rkyv) and debug-only type hash verification.
-    pub async fn ask_typed<Req, Resp>(&self, request: &Req) -> Result<Resp>
-    where
-        Req: crate::typed::WireEncode,
-        Resp: crate::typed::WireType + rkyv::Archive,
-        for<'a> Resp::Archived: rkyv::bytecheck::CheckBytes<
-                rkyv::rancor::Strategy<
-                    rkyv::validation::Validator<
-                        rkyv::validation::archive::ArchiveValidator<'a>,
-                        rkyv::validation::shared::SharedValidator,
-                    >,
-                    rkyv::rancor::Error,
-                >,
-            > + rkyv::Deserialize<Resp, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
-    {
-        let payload = crate::typed::encode_typed_pooled(request)?;
-        let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<Req>(payload);
-        let response = self
-            .ask_with_timeout_pooled(payload, prefix, payload_len, Duration::from_secs(30))
-            .await?;
-        crate::typed::decode_typed::<Resp>(response.as_ref())
-    }
-
-    /// Ask with typed request/response and custom timeout.
-    pub async fn ask_typed_with_timeout<Req, Resp>(
-        &self,
-        request: &Req,
-        timeout: Duration,
-    ) -> Result<Resp>
-    where
-        Req: crate::typed::WireEncode,
-        Resp: crate::typed::WireType + rkyv::Archive,
-        for<'a> Resp::Archived: rkyv::bytecheck::CheckBytes<
-                rkyv::rancor::Strategy<
-                    rkyv::validation::Validator<
-                        rkyv::validation::archive::ArchiveValidator<'a>,
-                        rkyv::validation::shared::SharedValidator,
-                    >,
-                    rkyv::rancor::Error,
-                >,
-            > + rkyv::Deserialize<Resp, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
-    {
-        let payload = crate::typed::encode_typed_pooled(request)?;
-        let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<Req>(payload);
-        let response = self
-            .ask_with_timeout_pooled(payload, prefix, payload_len, timeout)
-            .await?;
-        crate::typed::decode_typed::<Resp>(response.as_ref())
     }
 
     /// Ask with typed request and return a zero-copy archived response.
@@ -2795,8 +3378,15 @@ impl ConnectionHandle {
     {
         let payload = crate::typed::encode_typed_pooled(request)?;
         let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<Req>(payload);
+        let (prefix_padded, prefix_len) = crate::typed::pad_type_hash_prefix(prefix);
         let response = self
-            .ask_with_timeout_pooled(payload, prefix, payload_len, Duration::from_secs(30))
+            .ask_with_timeout_pooled(
+                payload,
+                prefix_padded,
+                prefix_len,
+                payload_len,
+                Duration::from_secs(30),
+            )
             .await?;
         crate::typed::decode_typed_archived::<Resp>(response)
     }
@@ -2823,8 +3413,9 @@ impl ConnectionHandle {
     {
         let payload = crate::typed::encode_typed_pooled(request)?;
         let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<Req>(payload);
+        let (prefix_padded, prefix_len) = crate::typed::pad_type_hash_prefix(prefix);
         let response = self
-            .ask_with_timeout_pooled(payload, prefix, payload_len, timeout)
+            .ask_with_timeout_pooled(payload, prefix_padded, prefix_len, payload_len, timeout)
             .await?;
         crate::typed::decode_typed_archived::<Resp>(response)
     }
@@ -2832,7 +3423,8 @@ impl ConnectionHandle {
     async fn ask_with_timeout_pooled(
         &self,
         payload: crate::typed::PooledPayload,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
+        prefix_len: u8,
         payload_len: usize,
         timeout: Duration,
     ) -> Result<bytes::Bytes> {
@@ -2842,11 +3434,9 @@ impl ConnectionHandle {
             correlation_id,
             payload_len,
         );
-        let prefix_len = prefix.as_ref().map(|p| p.len()).unwrap_or(0) as u8;
-
         if let Err(e) = self
             .stream_handle
-            .write_pooled_ask_inline(header, 8, prefix, prefix_len, payload)
+            .write_pooled_ask_inline(header, 16, prefix, prefix_len, payload)
             .await
         {
             self.correlation.cancel(correlation_id);
@@ -2859,7 +3449,7 @@ impl ConnectionHandle {
     }
 
     /// Ask using owned bytes and custom timeout. Returns response as Bytes.
-    pub async fn ask_with_timeout_bytes(
+    pub async fn ask_with_timeout(
         &self,
         request: bytes::Bytes,
         timeout: Duration,
@@ -2874,7 +3464,7 @@ impl ConnectionHandle {
 
         if let Err(e) = self
             .stream_handle
-            .write_header_and_payload_ask_inline(header, 8, request)
+            .write_header_and_payload_ask_inline(header, 16, request)
             .await
         {
             self.correlation.cancel(correlation_id);
@@ -2891,18 +3481,17 @@ impl ConnectionHandle {
         // Allocate correlation ID
         let correlation_id = self.correlation.allocate();
 
-        // Create ask message with length prefix + 4-byte header + payload
-        let mut message =
-            bytes::BytesMut::with_capacity(framing::ASK_RESPONSE_FRAME_HEADER_LEN + request.len());
         let header = framing::write_ask_response_header(
             crate::MessageType::Ask,
             correlation_id,
             request.len(),
         );
-        message.extend_from_slice(&header);
-        message.extend_from_slice(request);
 
-        if let Err(e) = self.stream_handle.write_bytes_ask(message.freeze()).await {
+        if let Err(e) = self
+            .stream_handle
+            .write_header_and_payload_ask_inline(header, 16, bytes::Bytes::copy_from_slice(request))
+            .await
+        {
             self.correlation.cancel(correlation_id);
             return Err(e);
         }
@@ -2916,6 +3505,7 @@ impl ConnectionHandle {
 
     /// Ask method with delegated reply sender for asynchronous response handling
     /// Returns a DelegatedReplySender that can be passed around to handle the response elsewhere
+    #[cfg(feature = "legacy_tell_bytes")]
     pub async fn ask_with_reply_sender(&self, request: &[u8]) -> Result<DelegatedReplySender> {
         // Create a oneshot channel for the response
         let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel::<bytes::Bytes>();
@@ -2931,7 +3521,17 @@ impl ConnectionHandle {
         ))
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "ask_with_reply_sender() is disabled; use ask()/ask_typed_* or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn ask_with_reply_sender(&self, request: &[u8]) -> Result<DelegatedReplySender> {
+        let _ = request;
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Ask method with timeout and delegated reply
+    #[cfg(feature = "legacy_tell_bytes")]
     pub async fn ask_with_timeout_and_reply(
         &self,
         request: &[u8],
@@ -2952,6 +3552,19 @@ impl ConnectionHandle {
         ))
     }
 
+    #[cfg(not(feature = "legacy_tell_bytes"))]
+    #[deprecated(
+        note = "ask_with_timeout_and_reply() is disabled; use ask()/ask_typed_* or enable 'legacy_tell_bytes'"
+    )]
+    pub async fn ask_with_timeout_and_reply(
+        &self,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<DelegatedReplySender> {
+        let _ = (request, timeout);
+        Err(GossipError::LegacyTellApiDisabled)
+    }
+
     /// Batch ask method for multiple requests in a single network round-trip
     /// Returns a vector of response futures that can be awaited independently
     pub async fn ask_batch(
@@ -2963,18 +3576,20 @@ impl ConnectionHandle {
         }
 
         let mut receivers = Vec::with_capacity(requests.len());
+        let mut pending = Vec::with_capacity(requests.len());
         let mut correlation_ids = Vec::with_capacity(requests.len());
         let mut batch_message = Vec::new();
 
         // Process each request
         for request in requests {
             // Create oneshot channel for this response
-            let (_tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
+            let (tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
             receivers.push(rx);
 
             // Allocate correlation ID
             let correlation_id = self.correlation.allocate();
             correlation_ids.push(correlation_id);
+            pending.push((correlation_id, tx));
 
             // Build ask message: [type:1][correlation_id:2][pad:1] + payload
             let header = framing::write_ask_response_header(
@@ -2995,6 +3610,24 @@ impl ConnectionHandle {
                 self.correlation.cancel(correlation_id);
             }
             return Err(e);
+        }
+
+        let correlation = self.correlation.clone();
+        for (correlation_id, tx) in pending {
+            let correlation = correlation.clone();
+            tokio::spawn(async move {
+                match correlation
+                    .wait_for_response(correlation_id, Duration::from_secs(30))
+                    .await
+                {
+                    Ok(response) => {
+                        let _ = tx.send(response);
+                    }
+                    Err(_) => {
+                        // Drop sender to signal failure to receiver.
+                    }
+                }
+            });
         }
 
         Ok(receivers)
@@ -3046,17 +3679,19 @@ impl ConnectionHandle {
             .sum();
 
         let mut batch_message = bytes::BytesMut::with_capacity(total_size);
+        let mut pending = Vec::with_capacity(requests.len());
         let mut correlation_ids = Vec::with_capacity(requests.len());
 
         // Build all messages
         for request in requests {
             // Create oneshot channel for this response
-            let (_tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
+            let (tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
             response_buffer.push(rx);
 
             // Allocate correlation ID
             let correlation_id = self.correlation.allocate();
             correlation_ids.push(correlation_id);
+            pending.push((correlation_id, tx));
 
             // Build ask message
             let header = framing::write_ask_response_header(
@@ -3079,6 +3714,24 @@ impl ConnectionHandle {
             return Err(e);
         }
 
+        let correlation = self.correlation.clone();
+        for (correlation_id, tx) in pending {
+            let correlation = correlation.clone();
+            tokio::spawn(async move {
+                match correlation
+                    .wait_for_response(correlation_id, Duration::from_secs(30))
+                    .await
+                {
+                    Ok(response) => {
+                        let _ = tx.send(response);
+                    }
+                    Err(_) => {
+                        // Drop sender to signal failure to receiver.
+                    }
+                }
+            });
+        }
+
         Ok(())
     }
 
@@ -3099,6 +3752,7 @@ impl ConnectionHandle {
         // Serialize the data using rkyv for maximum performance
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(data)
             .map_err(crate::GossipError::Serialization)?;
+        let payload = bytes::Bytes::from(payload.into_boxed_slice());
 
         // Create stream frame: [frame_type, channel_id, flags, seq_id[2], payload_len[4]]
         let frame_header = StreamFrameHeader {
@@ -3111,15 +3765,11 @@ impl ConnectionHandle {
 
         let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&frame_header)
             .map_err(crate::GossipError::Serialization)?;
+        let header_bytes = bytes::Bytes::from(header_bytes.into_boxed_slice());
 
-        // Combine header and payload for single write
-        let mut combined = bytes::BytesMut::with_capacity(header_bytes.len() + payload.len());
-        combined.extend_from_slice(&header_bytes);
-        combined.extend_from_slice(&payload);
-
-        // Use lock-free ring buffer - NO MUTEX!
+        // Use lock-free ring buffer without concatenating header+payload.
         self.stream_handle
-            .write_bytes_nonblocking(combined.freeze())
+            .write_header_and_payload_nonblocking(header_bytes, payload)
     }
 
     /// High-performance streaming API - send batch of structured data - LOCK-FREE
@@ -3203,6 +3853,7 @@ impl ConnectionPool {
             registry: None,
             message_buffer_pool: Arc::new(MessageBufferPool::new(POOL_SIZE, BUFFER_SIZE)),
             connection_counter: AtomicUsize::new(0),
+            peer_capabilities: None,
         };
 
         // Log the pool's address for debugging
@@ -3216,6 +3867,7 @@ impl ConnectionPool {
     /// Set the registry reference for handling incoming messages
     pub fn set_registry(&mut self, registry: std::sync::Arc<GossipRegistry>) {
         self.registry = Some(std::sync::Arc::downgrade(&registry));
+        self.peer_capabilities = Some(registry.peer_capabilities.clone());
     }
 
     fn clear_capabilities_for_addr(&self, addr: &SocketAddr) {
@@ -3283,7 +3935,9 @@ impl ConnectionPool {
                 // This can happen if an old connection wasn't fully cleaned up
                 warn!(
                     "CONNECTION POOL: Removing stale address mapping {} (was peer {}, now peer {})",
-                    new_addr, existing_peer_id.value(), peer_id
+                    new_addr,
+                    existing_peer_id.value(),
+                    peer_id
                 );
                 self.connections_by_addr.remove(&new_addr);
                 self.addr_to_peer_id.remove(&new_addr);
@@ -3298,7 +3952,8 @@ impl ConnectionPool {
         }
 
         // Insert the connection under the new (advertised) address
-        self.connections_by_addr.insert(new_addr, connection.clone());
+        self.connections_by_addr
+            .insert(new_addr, connection.clone());
         self.addr_to_peer_id.insert(new_addr, peer_id.clone());
         // Also update peer_id_to_addr so disconnect uses the correct address
         self.peer_id_to_addr.insert(peer_id.clone(), new_addr);
@@ -3351,7 +4006,8 @@ impl ConnectionPool {
                         peer_id, addr
                     );
                     // Index by peer_id for future lookups
-                    self.connections_by_peer.insert(peer_id.clone(), conn.clone());
+                    self.connections_by_peer
+                        .insert(peer_id.clone(), conn.clone());
                     return Some(conn);
                 }
             }
@@ -3406,7 +4062,9 @@ impl ConnectionPool {
         &self,
         peer_id: &crate::PeerId,
     ) -> Option<Arc<CorrelationTracker>> {
-        self.correlation_trackers.get(peer_id).map(|e| e.value().clone())
+        self.correlation_trackers
+            .get(peer_id)
+            .map(|e| e.value().clone())
     }
 
     /// Get or create a correlation tracker for a peer
@@ -3601,7 +4259,10 @@ impl ConnectionPool {
         connection.update_last_used();
 
         // Track the writer task handle (H-004)
-        connection.task_tracker.lock().set_writer(writer_task_handle);
+        connection
+            .task_tracker
+            .lock()
+            .set_writer(writer_task_handle);
 
         let connection_arc = Arc::new(connection);
 
@@ -3611,13 +4272,23 @@ impl ConnectionPool {
         let registry_weak = self.registry.clone();
         let reader_task_handle = tokio::spawn(async move {
             info!(peer = %addr, "Starting reader task for outgoing connection");
-            Self::handle_persistent_connection_reader(reader, None, addr, registry_weak).await;
+            Self::handle_persistent_connection_reader(
+                reader,
+                None,
+                addr,
+                registry_weak,
+                Some(reader_connection.clone()),
+            )
+            .await;
             reader_connection.set_state(ConnectionState::Disconnected);
             info!(peer = %addr, "Reader task for outgoing connection ended");
         });
 
         // Track the reader task handle (H-004)
-        connection_arc.task_tracker.lock().set_reader(reader_task_handle);
+        connection_arc
+            .task_tracker
+            .lock()
+            .set_reader(reader_task_handle);
 
         // Insert into lock-free hash map
         self.connections_by_addr
@@ -3665,6 +4336,31 @@ impl ConnectionPool {
         if let Some(connection) = self.get_lock_free_connection(addr) {
             if let Some(ref stream_handle) = connection.stream_handle {
                 stream_handle.write_header_and_payload_nonblocking_checked(header, payload)?;
+                return Ok(());
+            } else {
+                warn!(addr = %addr, "Connection found but no stream handle");
+            }
+        } else {
+            warn!(addr = %addr, "No connection found for address");
+        }
+        Err(crate::GossipError::Network(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Connection not found",
+        )))
+    }
+
+    /// Send header + payload without copying the payload, using an inline header.
+    pub fn send_lock_free_parts_inline(
+        &self,
+        addr: SocketAddr,
+        header: [u8; 16],
+        header_len: u8,
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        if let Some(connection) = self.get_lock_free_connection(addr) {
+            if let Some(ref stream_handle) = connection.stream_handle {
+                stream_handle
+                    .write_header_and_payload_nonblocking_inline(header, header_len, payload)?;
                 return Ok(());
             } else {
                 warn!(addr = %addr, "Connection found but no stream handle");
@@ -3726,8 +4422,8 @@ impl ConnectionPool {
             self.connection_counter.fetch_sub(1, Ordering::AcqRel);
             self.clear_capabilities_for_addr(&addr);
 
-            // H-004: Abort background tasks (writer, reader) to prevent resource leaks
-            connection.abort_tasks();
+            // H-004: Gracefully shut down writer; abort reader to prevent resource leaks
+            connection.shutdown_tasks_gracefully();
 
             Some(connection)
         } else {
@@ -3769,8 +4465,8 @@ impl ConnectionPool {
 
             self.connection_counter.fetch_sub(1, Ordering::AcqRel);
 
-            // H-004: Abort background tasks (writer, reader) to prevent resource leaks
-            connection.abort_tasks();
+            // H-004: Gracefully shut down writer; abort reader to prevent resource leaks
+            connection.shutdown_tasks_gracefully();
 
             Some(connection)
         } else {
@@ -3852,6 +4548,10 @@ impl ConnectionPool {
         let mut buffer = self.get_buffer(header.len() + data.len());
         buffer.extend_from_slice(&header);
         buffer.extend_from_slice(data);
+        crate::telemetry::gossip_zero_copy::record_outbound_frame(
+            "connection_pool::create_message_buffer",
+            buffer.len(),
+        );
         buffer
     }
 
@@ -3874,6 +4574,7 @@ impl ConnectionPool {
                             .correlation
                             .clone()
                             .unwrap_or_else(CorrelationTracker::new),
+                        peer_capabilities: self.peer_capabilities.clone(),
                     });
                 }
 
@@ -3918,6 +4619,7 @@ impl ConnectionPool {
                             .correlation
                             .clone()
                             .unwrap_or_else(CorrelationTracker::new),
+                        peer_capabilities: self.peer_capabilities.clone(),
                     });
                 } else {
                     return Err(crate::GossipError::Network(std::io::Error::other(
@@ -3944,6 +4646,19 @@ impl ConnectionPool {
                 format!("No address configured for peer '{}'", peer_id),
             )));
         };
+
+        // If this address is already mapped to a different peer_id, tear down the stale mapping.
+        if let Some(existing_peer_id) = self.addr_to_peer_id.get(&addr).map(|e| e.value().clone()) {
+            if existing_peer_id != *peer_id {
+                warn!(
+                    addr = %addr,
+                    expected = %peer_id,
+                    found = %existing_peer_id,
+                    "address already mapped to a different peer_id - disconnecting stale mapping"
+                );
+                let _ = self.disconnect_connection_by_peer_id(&existing_peer_id);
+            }
+        }
 
         debug!(
             "CONNECTION POOL: Creating new connection to peer '{}' at {}",
@@ -4005,6 +4720,7 @@ impl ConnectionPool {
                             .correlation
                             .clone()
                             .unwrap_or_else(CorrelationTracker::new),
+                        peer_capabilities: self.peer_capabilities.clone(),
                     });
                 } else {
                     // Connection exists but no stream handle - this shouldn't happen
@@ -4074,6 +4790,7 @@ impl ConnectionPool {
                                 .correlation
                                 .clone()
                                 .unwrap_or_else(CorrelationTracker::new),
+                            peer_capabilities: self.peer_capabilities.clone(),
                         });
                     } else {
                         return Err(GossipError::Network(std::io::Error::other(
@@ -4164,32 +4881,41 @@ impl ConnectionPool {
                 .await
                 {
                     Ok(Ok(mut tls_stream)) => {
+                        let cert_node_id = tls_stream
+                            .get_ref()
+                            .1
+                            .peer_certificates()
+                            .and_then(|certs| certs.first())
+                            .and_then(|cert| crate::tls::extract_node_id_from_cert(cert).ok());
+
+                        if let (Some(expected), Some(actual)) = (discovered_node_id, cert_node_id) {
+                            if expected != actual {
+                                return Err(crate::GossipError::TlsHandshakeFailed(format!(
+                                    "NodeId mismatch: expected {}, got {}",
+                                    expected.fmt_short(),
+                                    actual.fmt_short()
+                                )));
+                            }
+                        }
+
                         if discovered_node_id.is_none() {
-                            if let Some(certs) = tls_stream.get_ref().1.peer_certificates() {
-                                if let Some(cert) = certs.first() {
-                                    match crate::tls::extract_node_id_from_cert(cert) {
-                                        Ok(node_id) => {
-                                            debug!(
-                                                addr = %addr,
-                                                "Extracted NodeId {} from peer certificate",
-                                                node_id.fmt_short()
-                                            );
-                                            if registry_arc.lookup_node_id(&addr).await.is_none() {
-                                                registry_arc
-                                                    .add_peer_with_node_id(addr, Some(node_id))
-                                                    .await;
-                                            }
-                                            discovered_node_id = Some(node_id);
-                                        }
-                                        Err(err) => {
-                                            warn!(
-                                                addr = %addr,
-                                                error = %err,
-                                                "Failed to extract NodeId from peer certificate"
-                                            );
-                                        }
-                                    }
+                            if let Some(node_id) = cert_node_id {
+                                debug!(
+                                    addr = %addr,
+                                    "Extracted NodeId {} from peer certificate",
+                                    node_id.fmt_short()
+                                );
+                                if registry_arc.lookup_node_id(&addr).await.is_none() {
+                                    registry_arc
+                                        .add_peer_with_node_id(addr, Some(node_id))
+                                        .await;
                                 }
+                                discovered_node_id = Some(node_id);
+                            } else {
+                                warn!(
+                                    addr = %addr,
+                                    "Failed to extract NodeId from peer certificate"
+                                );
                             }
                         }
 
@@ -4277,12 +5003,8 @@ impl ConnectionPool {
                 BufferConfig::default().with_ask_inflight_limit(registry.config.ask_inflight_limit)
             })
             .unwrap_or_default();
-        let (stream_handle, writer_task_handle) = LockFreeStreamHandle::new(
-            writer,
-            addr,
-            ChannelId::Global,
-            buffer_config,
-        );
+        let (stream_handle, writer_task_handle) =
+            LockFreeStreamHandle::new(writer, addr, ChannelId::Global, buffer_config);
         let stream_handle = Arc::new(stream_handle);
 
         let mut conn = LockFreeConnection::new(addr, ConnectionDirection::Outbound);
@@ -4360,6 +5082,10 @@ impl ConnectionPool {
                     let mut msg_buffer = Vec::with_capacity(header.len() + data.len());
                     msg_buffer.extend_from_slice(&header);
                     msg_buffer.extend_from_slice(&data);
+                    crate::telemetry::gossip_zero_copy::record_outbound_frame(
+                        "connection_pool::initial_full_sync",
+                        msg_buffer.len(),
+                    );
 
                     // Create a connection handle to send the message
                     let conn_handle = ConnectionHandle {
@@ -4369,6 +5095,7 @@ impl ConnectionPool {
                             .correlation
                             .clone()
                             .unwrap_or_else(CorrelationTracker::new),
+                        peer_capabilities: self.peer_capabilities.clone(),
                     };
                     if let Err(e) = conn_handle.send_data(msg_buffer).await {
                         warn!(peer = %addr, error = %e, "Failed to send initial FullSync message");
@@ -4397,34 +5124,23 @@ impl ConnectionPool {
                 .and_then(|w| w.upgrade())
                 .map(|registry| registry.config.max_message_size)
                 .unwrap_or(10 * 1024 * 1024);
+            let mut streaming_state = streaming::StreamAssembler::new(max_message_size);
+            let gossip_buffer = crate::gossip_buffer::GossipFrameBuffer::new();
 
             loop {
-                match crate::handle::read_message_from_tls_reader(&mut reader, max_message_size)
-                    .await
+                match crate::handle::read_message_from_tls_reader(
+                    &mut reader,
+                    max_message_size,
+                    &gossip_buffer,
+                )
+                .await
                 {
-                    Ok(crate::handle::MessageReadResult::Gossip(msg, correlation_id)) => {
-                        let msg_to_handle = if let RegistryMessage::ActorMessage {
-                            actor_id,
-                            type_hash,
-                            payload,
-                            correlation_id: _,
-                        } = msg
-                        {
-                            RegistryMessage::ActorMessage {
-                                actor_id,
-                                type_hash,
-                                payload,
-                                correlation_id,
-                            }
-                        } else {
-                            msg
-                        };
-
+                    Ok(crate::handle::MessageReadResult::Gossip(frame, correlation_id)) => {
                         if let Some(registry) =
                             registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
                         {
                             if let Err(e) =
-                                handle_incoming_message(registry, addr, msg_to_handle).await
+                                handle_incoming_message(registry, addr, frame, correlation_id).await
                             {
                                 warn!(peer = %addr, error = %e, "Failed to handle gossip message");
                             }
@@ -4441,7 +5157,7 @@ impl ConnectionPool {
                                 &registry,
                                 addr,
                                 correlation_id,
-                                &payload,
+                                payload,
                             )
                             .await;
                         }
@@ -4472,8 +5188,9 @@ impl ConnectionPool {
                         if let Some(registry) =
                             registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
                         {
-                            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                                let actor_id_str = actor_id.to_string();
+                            if let Some(handler) = registry.load_actor_message_handler() {
+                                let mut id_buf = itoa::Buffer::new();
+                                let actor_id_str = id_buf.format(actor_id);
                                 let correlation = if msg_type == crate::MessageType::ActorAsk as u8
                                 {
                                     Some(correlation_id)
@@ -4484,20 +5201,35 @@ impl ConnectionPool {
                                     .handle_actor_message(
                                         &actor_id_str,
                                         type_hash,
-                                        &payload,
+                                        payload.as_slice(),
                                         correlation,
                                     )
                                     .await;
                             }
                         }
                     }
-                    Ok(crate::handle::MessageReadResult::Streaming { .. }) => {
-                        // Streaming messages are not handled on outgoing readers yet.
+                    Ok(crate::handle::MessageReadResult::Streaming {
+                        frame,
+                        correlation_id,
+                    }) => {
+                        if let Some(registry) =
+                            registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
+                        {
+                            Self::process_reader_streaming_frame(
+                                &registry,
+                                &mut streaming_state,
+                                &mut reader,
+                                addr,
+                                frame,
+                                correlation_id,
+                            )
+                            .await;
+                        }
                     }
                     Ok(crate::handle::MessageReadResult::Raw(_payload)) => {
                         #[cfg(any(test, feature = "test-helpers", debug_assertions))]
                         {
-                            if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
+                            if typed_tell_capture_enabled() {
                                 crate::test_helpers::record_raw_payload(_payload.clone());
                             }
                         }
@@ -4515,7 +5247,10 @@ impl ConnectionPool {
         });
 
         // Track the reader task handle (H-004)
-        connection_arc.task_tracker.lock().set_reader(reader_task_handle);
+        connection_arc
+            .task_tracker
+            .lock()
+            .set_reader(reader_task_handle);
 
         // Reset failure state for this peer since we successfully connected
         if let Some(ref registry_weak) = registry_weak {
@@ -4572,6 +5307,7 @@ impl ConnectionPool {
                 .correlation
                 .clone()
                 .unwrap_or_else(CorrelationTracker::new),
+            peer_capabilities: self.peer_capabilities.clone(),
         })
     }
 
@@ -4586,8 +5322,8 @@ impl ConnectionPool {
     /// Remove a connection from the pool by address
     pub fn remove_connection_mut(&mut self, addr: SocketAddr) {
         if let Some((_, conn)) = self.connections_by_addr.remove(&addr) {
-            // H-004: Abort background tasks (writer, reader) to prevent resource leaks
-            conn.abort_tasks();
+            // H-004: Gracefully shut down writer; abort reader to prevent resource leaks
+            conn.shutdown_tasks_gracefully();
 
             info!(addr = %addr, "removed connection from pool");
             // Dropping the sender will cause the receiver to return None,
@@ -4658,13 +5394,12 @@ impl ConnectionPool {
         writer: Option<tokio::net::tcp::OwnedWriteHalf>,
         peer_addr: SocketAddr,
         registry_weak: Option<std::sync::Weak<GossipRegistry>>,
+        connection: Option<Arc<LockFreeConnection>>,
     ) {
         use tokio::io::AsyncReadExt;
 
-        let mut partial_msg_buf = Vec::new();
-        // Increase buffer size to handle large messages more efficiently
-        let mut read_buf = vec![0u8; 1024 * 1024]; // 1MB read buffer
-
+        let mut partial_msg_buf = bytes::BytesMut::new();
+        const READ_BUF_SIZE: usize = 64 * 1024;
         // For incoming connections with a writer, create a stream handle
         // For outgoing connections, we'll use the existing handle from the pool
         // Note: The writer_task_handle is not tracked here as this is for response handling
@@ -4678,24 +5413,19 @@ impl ConnectionPool {
                         .with_ask_inflight_limit(registry.config.ask_inflight_limit)
                 })
                 .unwrap_or_default();
-            let (handle, _writer_task_handle) = LockFreeStreamHandle::new(
-                writer,
-                peer_addr,
-                ChannelId::Global,
-                buffer_config,
-            );
+            let (handle, _writer_task_handle) =
+                LockFreeStreamHandle::new(writer, peer_addr, ChannelId::Global, buffer_config);
             Arc::new(handle)
         });
 
         loop {
-            match reader.read(&mut read_buf).await {
+            partial_msg_buf.reserve(READ_BUF_SIZE);
+            match reader.read_buf(&mut partial_msg_buf).await {
                 Ok(0) => {
                     info!(peer = %peer_addr, "Connection closed by peer");
                     break;
                 }
-                Ok(n) => {
-                    partial_msg_buf.extend_from_slice(&read_buf[..n]);
-
+                Ok(_n) => {
                     // Process complete messages
                     while partial_msg_buf.len() >= 4 {
                         let len = u32::from_be_bytes([
@@ -4742,8 +5472,9 @@ impl ConnectionPool {
                             break;
                         }
                         if partial_msg_buf.len() >= total_len {
+                            let msg_buf = partial_msg_buf.split_to(total_len).freeze();
                             let msg_data =
-                                &partial_msg_buf[crate::framing::LENGTH_PREFIX_LEN..total_len];
+                                msg_buf.slice(crate::framing::LENGTH_PREFIX_LEN..total_len);
 
                             // Log when we have the complete large message
                             // if len > 1024 * 1024 {
@@ -4778,130 +5509,176 @@ impl ConnectionPool {
                                     // This is an Ask/Response message
                                     if msg_data.len() < crate::framing::ASK_RESPONSE_HEADER_LEN {
                                         warn!(peer = %peer_addr, "Ask/Response message too small");
-                                        partial_msg_buf.drain(..total_len);
                                         continue;
                                     }
 
                                     let correlation_id =
                                         u16::from_be_bytes([msg_data[1], msg_data[2]]);
                                     let payload =
-                                        &msg_data[crate::framing::ASK_RESPONSE_HEADER_LEN..];
+                                        msg_data.slice(crate::framing::ASK_RESPONSE_HEADER_LEN..);
 
                                     match msg_type {
                                         crate::MessageType::Ask => {
                                             info!(peer = %peer_addr, correlation_id = correlation_id, payload_len = payload.len(),
                                               "📨 ASK DEBUG: Received Ask message on bidirectional connection");
 
-                                            // Try to deserialize the payload as a RegistryMessage
-                                            // Note: payload might not be aligned, so we need to copy it to an aligned buffer
-                                            let aligned_payload = payload.to_vec();
-                                            match rkyv::from_bytes::<
-                                                crate::registry::RegistryMessage,
-                                                rkyv::rancor::Error,
-                                            >(
-                                                &aligned_payload
-                                            ) {
-                                                Ok(mut registry_msg) => {
-                                                    info!(peer = %peer_addr, correlation_id = correlation_id,
-                                                      "✅ ASK DEBUG: Successfully deserialized RegistryMessage");
-                                                    debug!(peer = %peer_addr, correlation_id = correlation_id, "Received Ask with RegistryMessage payload");
-
-                                                    // If it's an ActorMessage, ensure it has the correlation_id from the Ask envelope
-                                                    if let crate::registry::RegistryMessage::ActorMessage {
-                                                ref actor_id,
-                                                ref type_hash,
-                                                payload: _,
-                                                correlation_id: ref mut inner_correlation_id,
-                                            } = registry_msg {
-                                                if inner_correlation_id.is_none() {
-                                                    // Use the Ask envelope's correlation_id
-                                                    *inner_correlation_id = Some(correlation_id);
-                                                    debug!(
-                                                        peer = %peer_addr,
-                                                        correlation_id = correlation_id,
-                                                        actor_id = %actor_id,
-                                                        type_hash = %format!("{:08x}", type_hash),
-                                                        "Set ActorMessage correlation_id from Ask envelope"
-                                                    );
-                                                }
+                                            // Verify alignment (panic in production, allow in tests)
+                                            #[cfg(not(test))]
+                                            {
+                                                let required_alignment = std::mem::align_of::<<
+                                                    crate::registry::RegistryMessage as rkyv::Archive
+                                                >::Archived>();
+                                                let is_aligned = (payload.as_ptr() as usize)
+                                                    .is_multiple_of(required_alignment);
+                                                assert!(
+                                                    is_aligned,
+                                                    "Ask payload must be {}-byte aligned! Pointer: {:p}, offset: {}",
+                                                    required_alignment,
+                                                    payload.as_ptr(),
+                                                    payload.as_ptr() as usize
+                                                );
                                             }
 
-                                                    // Handle the registry message and get the response
-                                                    // For Ask messages, we need to handle the reply ourselves
-                                                    if let Some(ref registry_weak) = registry_weak {
-                                                        if let Some(registry) =
-                                                            registry_weak.upgrade()
-                                                        {
-                                                            // Special handling for ActorMessage with correlation_id
-                                                            if let crate::registry::RegistryMessage::ActorMessage {
-                                                        ref actor_id,
-                                                        ref type_hash,
-                                                        ref payload,
-                                                        correlation_id: Some(corr_id),
-                                                    } = registry_msg {
-                                                        info!(peer = %peer_addr, actor_id = %actor_id, type_hash = %format!("{:08x}", type_hash),
-                                                              payload_len = payload.len(), correlation_id = corr_id,
-                                                              "🎯 ASK DEBUG: Processing ActorMessage ask");
-                                                        // Handle the actor message directly
-                                                        match registry.handle_actor_message(actor_id, *type_hash, payload, Some(corr_id)).await {
-                                                            Ok(Some(reply_payload)) => {
-                                                                debug!(peer = %peer_addr, correlation_id = corr_id, reply_len = reply_payload.len(),
-                                                                       "Got reply from actor, sending response back");
+                                            // ZERO-COPY: Access archived RegistryMessage without allocation
+                                            match rkyv::access::<
+                                                <crate::registry::RegistryMessage as rkyv::Archive>::Archived,
+                                                rkyv::rancor::Error,
+                                            >(
+                                                payload.as_ref()
+                                            ) {
+                                                Ok(archived_msg) => {
+                                                    info!(peer = %peer_addr, correlation_id = correlation_id,
+                                                      "✅ ZERO-COPY: Successfully accessed archived RegistryMessage");
+                                                    debug!(peer = %peer_addr, correlation_id = correlation_id, "Received Ask with RegistryMessage payload");
 
-                                                                let header = framing::write_ask_response_header(
-                                                                    crate::MessageType::Response,
-                                                                    corr_id,
-                                                                    reply_payload.len(),
-                                                                );
-                                                                let payload = bytes::Bytes::from(reply_payload);
+                                                    // Use zero-copy accessor trait to extract fields
+                                                    use crate::registry::RegistryMessageArchivedAccess;
 
-                                                                // For both incoming and outgoing connections, find the stream handle from the pool
-                                                                let pool = registry.connection_pool.lock().await;
-                                                                if let Some(conn) = pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone()) {
-                                                                    if let Some(ref stream_handle) = conn.stream_handle {
-                                                                        if let Err(e) = stream_handle
-                                                                            .write_header_and_payload_control(
-                                                                                bytes::Bytes::copy_from_slice(&header),
-                                                                                payload,
-                                                                            )
-                                                                            .await
-                                                                        {
-                                                                            warn!(peer = %peer_addr, error = %e, "Failed to send ask reply");
+                                                    let actor_id = archived_msg.actor_id();
+                                                    let type_hash = archived_msg.type_hash();
+                                                    let payload_slice = archived_msg.payload();
+                                                    let correlation_id_opt = archived_msg.correlation_id();
+
+                                                    // Special handling for ActorMessage with correlation_id
+                                                    if let (Some(actor_id_str), Some(type_hash_val), Some(payload_bytes), Some(corr_id_opt)) =
+                                                       (actor_id, type_hash, payload_slice, correlation_id_opt)
+                                                    {
+                                                        // Use Ask envelope's correlation_id if not set in message
+                                                        let corr_id = corr_id_opt.unwrap_or(correlation_id);
+
+                                                        info!(peer = %peer_addr, actor_id = %actor_id_str, type_hash = %format!("{:08x}", type_hash_val),
+                                                              payload_len = payload_bytes.len(), correlation_id = corr_id,
+                                                              "🎯 ZERO-COPY: Processing ActorMessage ask");
+
+                                                        if let Some(ref registry_weak) = registry_weak {
+                                                            if let Some(registry) = registry_weak.upgrade() {
+                                                                let registry_for_reply = registry.clone();
+                                                                let send_peer_addr = peer_addr;
+                                                                let send_reply = move |reply_payload: bytes::Bytes, corr_id: u16| {
+                                                                    let registry = registry_for_reply.clone();
+                                                                    async move {
+                                                                        let reply_len = reply_payload.len();
+                                                                        debug!(peer = %send_peer_addr, correlation_id = corr_id, reply_len = reply_len,
+                                                                               "Got reply from actor, sending response back");
+
+                                                                        let header = framing::write_ask_response_header(
+                                                                            crate::MessageType::Response,
+                                                                            corr_id,
+                                                                            reply_len,
+                                                                        );
+
+                                                                        let pool = registry.connection_pool.lock().await;
+                                                                        if let Some(conn) = pool.connections_by_addr.get(&send_peer_addr).map(|c| c.value().clone()) {
+                                                                            if let Some(ref stream_handle) = conn.stream_handle {
+                                                                                stream_handle
+                                                                                    .write_header_and_payload_control_inline(
+                                                                                        header,
+                                                                                        16,
+                                                                                        reply_payload,
+                                                                                    )
+                                                                                    .await
+                                                                            } else {
+                                                                                warn!(peer = %send_peer_addr, "Connection has no stream handle");
+                                                                                Err(GossipError::Network(io::Error::new(
+                                                                                    io::ErrorKind::NotConnected,
+                                                                                    "missing stream handle for ask reply",
+                                                                                )))
+                                                                            }
                                                                         } else {
-                                                                            debug!(peer = %peer_addr, correlation_id = corr_id, "Sent ask reply through connection pool");
+                                                                            warn!(peer = %send_peer_addr, "No connection found in pool to send ask reply");
+                                                                            Err(GossipError::Network(io::Error::new(
+                                                                                io::ErrorKind::NotFound,
+                                                                                "connection not found for ask reply",
+                                                                            )))
                                                                         }
-                                                                    } else {
-                                                                        warn!(peer = %peer_addr, "Connection has no stream handle");
                                                                     }
-                                                                } else {
-                                                                    warn!(peer = %peer_addr, "No connection found in pool to send ask reply");
+                                                                };
+
+                                                                match dispatch_actor_message_zero_copy(
+                                                                    &registry,
+                                                                    actor_id_str,
+                                                                    type_hash_val,
+                                                                    payload_bytes,
+                                                                    Some(corr_id),
+                                                                    send_reply,
+                                                                )
+                                                                .await
+                                                                {
+                                                                    Ok(true) => {
+                                                                        debug!(peer = %peer_addr, correlation_id = corr_id, "Sent ask reply through connection pool");
+                                                                    }
+                                                                    Ok(false) => {
+                                                                        debug!(peer = %peer_addr, correlation_id = corr_id, "Actor handled ask with no reply");
+                                                                    }
+                                                                    Err(e) => {
+                                                                        warn!(peer = %peer_addr, error = %e, correlation_id = corr_id, "Failed to handle actor message");
+                                                                    }
                                                                 }
-                                                            }
-                                                            Ok(None) => {
-                                                                debug!(peer = %peer_addr, correlation_id = corr_id, "No reply from actor");
-                                                            }
-                                                            Err(e) => {
-                                                                warn!(peer = %peer_addr, error = %e, correlation_id = corr_id, "Failed to handle actor message");
                                                             }
                                                         }
                                                     } else {
-                                                        // For other messages, use the normal handler
-                                                        match handle_incoming_message(registry.clone(), peer_addr, registry_msg).await {
-                                                        Ok(()) => {
-                                                            debug!(peer = %peer_addr, correlation_id = correlation_id, "Ask message processed");
-                                                        }
-                                                        Err(e) => {
-                                                            warn!(peer = %peer_addr, error = %e, correlation_id = correlation_id, "Failed to handle Ask message");
-                                                        }
-                                                    }
-                                                    }
+                                                        // For other message types (DeltaGossip, FullSync, etc.), we need owned RegistryMessage
+                                                        // This is acceptable for these less frequent message types
+                                                        let payload_bytes = payload.clone();
+                                                        match RegistryMessageFrame::new(
+                                                            payload_bytes,
+                                                        ) {
+                                                            Ok(frame) => {
+                                                                if let Some(ref registry_weak) =
+                                                                    registry_weak
+                                                                {
+                                                                    if let Some(registry) =
+                                                                        registry_weak.upgrade()
+                                                                    {
+                                                                        match handle_incoming_message(
+                                                                            registry.clone(),
+                                                                            peer_addr,
+                                                                            frame,
+                                                                            Some(correlation_id),
+                                                                        )
+                                                                        .await
+                                                                        {
+                                                                            Ok(()) => {
+                                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, "Ask message processed");
+                                                                            }
+                                                                            Err(e) => {
+                                                                                warn!(peer = %peer_addr, error = %e, correlation_id = correlation_id, "Failed to handle Ask message");
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(peer = %peer_addr, error = %e, correlation_id = correlation_id,
+                                                                      "Failed to deserialize non-ActorMessage RegistryMessage");
+                                                            }
                                                         }
                                                     }
                                                 }
                                                 Err(e) => {
                                                     warn!(peer = %peer_addr, correlation_id = correlation_id, error = %e,
                                                        payload_len = payload.len(),
-                                                       "HANDLE ASK: Failed to deserialize as RegistryMessage, trying MessageWrapper");
+                                                       "HANDLE ASK: Failed to access archived RegistryMessage, falling back");
 
                                                     // Not a RegistryMessage, handle as before for test helpers
                                                     #[cfg(any(
@@ -4932,7 +5709,7 @@ impl ConnectionPool {
                                                                     // Process the request and generate response
                                                                     let response_data =
                                                                     process_mock_request_payload(
-                                                                        payload,
+                                                                        payload.as_ref(),
                                                                     );
 
                                                                     // Build response message
@@ -5021,33 +5798,32 @@ impl ConnectionPool {
                                                                         registry_weak.upgrade()
                                                                     {
                                                                         // Handle the actor message
-                                                                        let actor_id_str =
-                                                                            actor_id.to_string();
                                                                         match registry
-                                                                            .handle_actor_message(
-                                                                                &actor_id_str,
+                                                                            .handle_actor_message_id(
+                                                                                actor_id,
                                                                                 type_hash,
                                                                                 inner_payload,
-                                                                                Some(
-                                                                                    correlation_id,
-                                                                                ),
+                                                                                Some(correlation_id),
                                                                             )
                                                                             .await
                                                                         {
                                                                             Ok(Some(
                                                                                 reply_payload,
                                                                             )) => {
-                                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, reply_len = reply_payload.len(),
+                                                                                let reply_len =
+                                                                                    reply_payload
+                                                                                        .len();
+                                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, reply_len = reply_len,
                                                                            "Got reply from kameo actor, sending response back");
 
                                                                                 let header =
                                                                                 framing::write_ask_response_header(
                                                                                     crate::MessageType::Response,
                                                                                     correlation_id,
-                                                                                    reply_payload.len(),
+                                                                                    reply_len,
                                                                                 );
                                                                                 let payload =
-                                                                                bytes::Bytes::from(reply_payload);
+                                                                                    reply_payload;
 
                                                                                 // Send response back through the response handle we saved
                                                                                 if let Some(
@@ -5056,8 +5832,9 @@ impl ConnectionPool {
                                                                                     response_handle
                                                                                 {
                                                                                     if let Err(e) = handle
-                                                                                    .write_header_and_payload_control(
-                                                                                        bytes::Bytes::copy_from_slice(&header),
+                                                                                    .write_header_and_payload_control_inline(
+                                                                                        header,
+                                                                                        16,
                                                                                         payload.clone(),
                                                                                     )
                                                                                     .await
@@ -5076,8 +5853,9 @@ impl ConnectionPool {
                                                                                     if let Some(conn) = pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone()) {
                                                                                     if let Some(ref stream_handle) = conn.stream_handle {
                                                                                         if let Err(e) = stream_handle
-                                                                                            .write_header_and_payload_control(
-                                                                                                bytes::Bytes::copy_from_slice(&header),
+                                                                                            .write_header_and_payload_control_inline(
+                                                                                                header,
+                                                                                                16,
                                                                                                 payload.clone(),
                                                                                             )
                                                                                             .await
@@ -5117,21 +5895,43 @@ impl ConnectionPool {
                                                 }
                                             }
                                         }
+                                        crate::MessageType::StreamStart
+                                        | crate::MessageType::StreamData
+                                        | crate::MessageType::StreamEnd => {
+                                            // Streaming frames are handled elsewhere (streaming assembler).
+                                            debug!(peer = %peer_addr, msg_type = ?msg_type,
+                                                "Ignoring streaming frame in ask/response fast path");
+                                            continue;
+                                        }
                                         crate::MessageType::Response => {
-                                            // Handle incoming response
+                                            // Handle incoming response (fast path via connection correlation)
+                                            let response_payload = payload;
+
+                                            if let Some(conn) = connection.as_ref() {
+                                                if let Some(ref correlation) = conn.correlation {
+                                                    if correlation.has_pending(correlation_id) {
+                                                        correlation.complete(
+                                                            correlation_id,
+                                                            response_payload,
+                                                        );
+                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, "Delivered response via connection correlation tracker");
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+
+                                            // Fallback: shared correlation tracker via peer_id
                                             if let Some(ref registry_weak) = registry_weak {
                                                 if let Some(registry) = registry_weak.upgrade() {
                                                     let pool =
                                                         registry.connection_pool.lock().await;
                                                     let mut delivered = false;
 
-                                                    // Look up peer ID for this address
                                                     if let Some(peer_id) = pool
                                                         .addr_to_peer_id
                                                         .get(&peer_addr)
                                                         .map(|e| e.clone())
                                                     {
-                                                        // Use shared correlation tracker
                                                         if let Some(correlation) =
                                                             pool.correlation_trackers.get(&peer_id)
                                                         {
@@ -5140,9 +5940,7 @@ impl ConnectionPool {
                                                             {
                                                                 correlation.complete(
                                                                     correlation_id,
-                                                                    bytes::Bytes::copy_from_slice(
-                                                                        payload,
-                                                                    ),
+                                                                    response_payload,
                                                                 );
                                                                 debug!(peer = %peer_addr, correlation_id = correlation_id, "Delivered response to shared correlation tracker");
                                                                 delivered = true;
@@ -5181,6 +5979,25 @@ impl ConnectionPool {
                                                     let actor_payload =
                                                         &payload[24..24 + payload_len];
 
+                                                    #[cfg(any(
+                                                        test,
+                                                        feature = "test-helpers",
+                                                        debug_assertions
+                                                    ))]
+                                                    {
+                                                        if std::env::var(
+                                                            "KAMEO_REMOTE_TYPED_TELL_CAPTURE",
+                                                        )
+                                                        .is_ok()
+                                                        {
+                                                            crate::test_helpers::record_raw_payload(
+                                                                bytes::Bytes::copy_from_slice(
+                                                                    actor_payload,
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+
                                                     // Log large ActorTell messages
                                                     if payload_len > 1024 * 1024 {
                                                         info!(peer = %peer_addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash),
@@ -5192,10 +6009,8 @@ impl ConnectionPool {
                                                         if let Some(registry) =
                                                             registry_weak.upgrade()
                                                         {
-                                                            if let Some(ref handler) = &*registry
-                                                                .actor_message_handler
-                                                                .lock()
-                                                                .await
+                                                            if let Some(handler) = registry
+                                                                .load_actor_message_handler()
                                                             {
                                                                 if payload_len > 1024 * 1024 {
                                                                     info!(peer = %peer_addr, actor_id = actor_id, type_hash = %format!("{:08x}", type_hash),
@@ -5205,8 +6020,8 @@ impl ConnectionPool {
                                                                        "Calling actor message handler for ActorTell");
                                                                 }
                                                                 match handler
-                                                                    .handle_actor_message(
-                                                                        &actor_id.to_string(),
+                                                                    .handle_actor_message_id(
+                                                                        actor_id,
                                                                         type_hash,
                                                                         actor_payload,
                                                                         None, // No correlation for tell
@@ -5270,10 +6085,9 @@ impl ConnectionPool {
                                                         if let Some(registry) =
                                                             registry_weak.upgrade()
                                                         {
-                                                            let actor_id_str = actor_id.to_string();
                                                             match registry
-                                                                .handle_actor_message(
-                                                                    &actor_id_str,
+                                                                .handle_actor_message_id(
+                                                                    actor_id,
                                                                     type_hash,
                                                                     actor_payload,
                                                                     Some(correlation_id),
@@ -5281,23 +6095,23 @@ impl ConnectionPool {
                                                                 .await
                                                             {
                                                                 Ok(Some(reply_payload)) => {
+                                                                    let reply_len =
+                                                                        reply_payload.len();
                                                                     let header =
                                                                     framing::write_ask_response_header(
                                                                         crate::MessageType::Response,
                                                                         correlation_id,
-                                                                        reply_payload.len(),
+                                                                        reply_len,
                                                                     );
-                                                                    let payload =
-                                                                        bytes::Bytes::from(
-                                                                            reply_payload,
-                                                                        );
+                                                                    let payload = reply_payload;
 
                                                                     if let Some(ref handle) =
                                                                         response_handle
                                                                     {
                                                                         if let Err(e) = handle
-                                                                        .write_header_and_payload_control(
-                                                                            bytes::Bytes::copy_from_slice(&header),
+                                                                        .write_header_and_payload_control_inline(
+                                                                            header,
+                                                                            16,
                                                                             payload.clone(),
                                                                         )
                                                                         .await
@@ -5324,8 +6138,9 @@ impl ConnectionPool {
                                                                                 conn.stream_handle
                                                                             {
                                                                                 if let Err(e) = stream_handle
-                                                                                .write_header_and_payload_control(
-                                                                                    bytes::Bytes::copy_from_slice(&header),
+                                                                                .write_header_and_payload_control_inline(
+                                                                                    header,
+                                                                                    16,
                                                                                     payload.clone(),
                                                                                 )
                                                                                 .await
@@ -5363,182 +6178,51 @@ impl ConnectionPool {
                                                 warn!(peer = %peer_addr, payload_len = payload.len(), "ActorAsk header too short (need at least 24)");
                                             }
                                         }
-                                        crate::MessageType::StreamStart => {
-                                            // Parse stream header from payload
-                                            // Wire format: [type:1][correlation_id:2][reserved:9][StreamHeader:36]
-                                            // After ASK_RESPONSE_HEADER_LEN (4) slice, payload has reserved(8) then StreamHeader
-                                            // So we need to skip 8 bytes to get to StreamHeader
-                                            const RESERVED_BYTES: usize = 8;
-                                            if payload.len() >= RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE
-                                            {
-                                                if let Some(header) =
-                                                    crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
-                                                {
-                                                    info!(peer = %peer_addr, stream_id = header.stream_id, total_size = header.total_size,
-                                                      type_hash = %format!("{:08x}", header.type_hash), actor_id = header.actor_id,
-                                                      "📥 StreamStart: Beginning streaming transfer");
-
-                                                    // Initialize stream assembly
-                                                    if let Some(ref registry_weak) = registry_weak {
-                                                        if let Some(registry) =
-                                                            registry_weak.upgrade()
-                                                        {
-                                                            registry
-                                                                .start_stream_assembly(header)
-                                                                .await;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::MessageType::StreamData => {
-                                            // Parse stream header and data
-                                            // Wire format: [type:1][correlation_id:2][reserved:9][StreamHeader:36][chunk_data:N]
-                                            // After ASK_RESPONSE_HEADER_LEN (4) slice, payload has reserved(8) then StreamHeader
-                                            const RESERVED_BYTES: usize = 8;
-                                            if payload.len() >= RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE
-                                            {
-                                                if let Some(header) =
-                                                    crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
-                                                {
-                                                    let data_start =
-                                                        RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE;
-                                                    if payload.len()
-                                                        >= data_start + header.chunk_size as usize
-                                                    {
-                                                        let chunk_data = &payload[data_start
-                                                            ..data_start
-                                                                + header.chunk_size as usize];
-
-                                                        // debug!(peer = %peer_addr, stream_id = header.stream_id, chunk_index = header.chunk_index,
-                                                        //        chunk_size = header.chunk_size, "📦 StreamData: Received chunk");
-
-                                                        // Add chunk to stream assembly
-                                                        if let Some(ref registry_weak) =
-                                                            registry_weak
-                                                        {
-                                                            if let Some(registry) =
-                                                                registry_weak.upgrade()
-                                                            {
-                                                                registry
-                                                                    .add_stream_chunk(
-                                                                        header,
-                                                                        chunk_data.to_vec(),
-                                                                    )
-                                                                    .await;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        crate::MessageType::StreamEnd => {
-                                            // Parse stream header and complete assembly
-                                            // Wire format: [type:1][correlation_id:2][reserved:9][StreamHeader:36]
-                                            // After ASK_RESPONSE_HEADER_LEN (4) slice, payload has reserved(8) then StreamHeader
-                                            const RESERVED_BYTES: usize = 8;
-                                            if payload.len() >= RESERVED_BYTES + crate::StreamHeader::SERIALIZED_SIZE
-                                            {
-                                                if let Some(header) =
-                                                    crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
-                                                {
-                                                    info!(peer = %peer_addr, stream_id = header.stream_id,
-                                                      "📤 StreamEnd: Completing streaming transfer");
-
-                                                    // Complete stream assembly and deliver to actor
-                                                    if let Some(ref registry_weak) = registry_weak {
-                                                        if let Some(registry) =
-                                                            registry_weak.upgrade()
-                                                        {
-                                                            if let Some(complete_msg) = registry
-                                                                .complete_stream_assembly(
-                                                                    header.stream_id,
-                                                                )
-                                                                .await
-                                                            {
-                                                                // Deliver to actor
-                                                                if let Some(ref handler) =
-                                                                    &*registry
-                                                                        .actor_message_handler
-                                                                        .lock()
-                                                                        .await
-                                                                {
-                                                                    match handler
-                                                                        .handle_actor_message(
-                                                                            &header
-                                                                                .actor_id
-                                                                                .to_string(),
-                                                                            header.type_hash,
-                                                                            &complete_msg,
-                                                                            None,
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        Ok(_) => {
-                                                                            info!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                  "✅ Successfully delivered streamed message to actor")
-                                                                        }
-                                                                        Err(e) => {
-                                                                            error!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                    error = %e, "❌ Failed to deliver streamed message")
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
                                     }
 
                                     // if len > 1024 * 1024 {
                                     //     eprintln!("📦 SERVER: Drained {} bytes from buffer after processing large message", total_len);
                                     // }
-                                    partial_msg_buf.drain(..total_len);
                                     continue;
                                 }
                             }
 
                             // This is a gossip protocol message
 
-                            // Add timing right after TCP read - BEFORE any deserialization
-                            let tcp_read_timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_nanos();
+                            // Verify alignment (panic in production, allow in tests)
+                            #[cfg(not(test))]
+                            {
+                                let required_alignment = std::mem::align_of::<
+                                    <crate::registry::RegistryMessage as rkyv::Archive>::Archived,
+                                >();
+                                let is_aligned =
+                                    (msg_data.as_ptr() as usize).is_multiple_of(required_alignment);
+                                assert!(
+                                    is_aligned,
+                                    "Gossip payload must be {}-byte aligned! Pointer: {:p}, offset: {}",
+                                    required_alignment,
+                                    msg_data.as_ptr(),
+                                    msg_data.as_ptr() as usize
+                                );
+                            }
 
                             // Process message
                             if let Some(ref registry_weak) = registry_weak {
                                 if let Some(registry) = registry_weak.upgrade() {
-                                    if let Ok(msg) = rkyv::from_bytes::<
-                                        crate::registry::RegistryMessage,
-                                        rkyv::rancor::Error,
-                                    >(msg_data)
+                                    let frame_bytes = msg_data.clone();
+                                    if let Ok(frame) =
+                                        crate::registry::RegistryMessageFrame::new(frame_bytes)
                                     {
-                                        // Debug: Show timing right after TCP read, before any processing
-                                        if let crate::registry::RegistryMessage::DeltaGossip {
-                                            delta,
-                                        } = &msg
-                                        {
-                                            let tcp_transmission_nanos = tcp_read_timestamp
-                                                - delta.precise_timing_nanos as u128;
-                                            let _tcp_transmission_ms =
-                                                tcp_transmission_nanos as f64 / 1_000_000.0;
-                                            // eprintln!("🔍 TCP_TRANSMISSION_TIME: {}ms ({}ns)", _tcp_transmission_ms, tcp_transmission_nanos);
-                                        }
-
-                                        if let Err(e) =
-                                            handle_incoming_message(registry, peer_addr, msg).await
+                                        if let Err(e) = handle_incoming_message(
+                                            registry, peer_addr, frame, None,
+                                        )
+                                        .await
                                         {
                                             warn!(peer = %peer_addr, error = %e, "Failed to handle message");
                                         }
                                     }
                                 }
                             }
-
-                            // Drain after processing to avoid invalidating msg_data
-                            partial_msg_buf.drain(..total_len);
                         } else {
                             break;
                         }
@@ -5558,6 +6242,126 @@ impl ConnectionPool {
                 if let Err(e) = registry.handle_peer_connection_failure(peer_addr).await {
                     warn!(error = %e, peer = %peer_addr, "CONNECTION_POOL: Failed to handle peer connection failure");
                 }
+            }
+        }
+    }
+
+    async fn process_reader_streaming_frame<R>(
+        registry: &Arc<GossipRegistry>,
+        assembler: &mut streaming::StreamAssembler,
+        reader: &mut R,
+        peer_addr: SocketAddr,
+        frame: crate::handle::StreamingFrame,
+        correlation_id: u16,
+    ) where
+        R: tokio::io::AsyncReadExt + Unpin,
+    {
+        let correlation = if correlation_id == 0 {
+            None
+        } else {
+            Some(correlation_id)
+        };
+
+        match frame {
+            crate::handle::StreamingFrame::Start { descriptor } => {
+                if let Err(err) = assembler.start_stream(descriptor, correlation) {
+                    warn!(peer = %peer_addr, error = %err, "Failed to start streaming session");
+                }
+            }
+            crate::handle::StreamingFrame::Data { payload } => match payload {
+                crate::handle::StreamingData::Direct { chunk_len } => {
+                    match assembler.read_data_direct(reader, chunk_len).await {
+                        Ok(Some(complete)) => {
+                            Self::deliver_streaming_completion(registry, peer_addr, complete).await;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            warn!(peer = %peer_addr, error = %err, "Streaming direct read error");
+                            if let Some(descriptor) = assembler.abort_if_stale(Duration::ZERO) {
+                                warn!(
+                                    peer = %peer_addr,
+                                    stream_id = descriptor.stream_id,
+                                    "Streaming state reset after direct read error"
+                                );
+                            }
+                        }
+                    }
+                }
+            },
+            crate::handle::StreamingFrame::End => match assembler.finish_with_end() {
+                Ok(Some(complete)) => {
+                    Self::deliver_streaming_completion(registry, peer_addr, complete).await;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(peer = %peer_addr, error = %err, "Streaming end frame error");
+                    if let Some(descriptor) = assembler.abort_if_stale(Duration::ZERO) {
+                        warn!(
+                            peer = %peer_addr,
+                            stream_id = descriptor.stream_id,
+                            "Streaming state reset after end error"
+                        );
+                    }
+                }
+            },
+        }
+    }
+
+    async fn deliver_streaming_completion(
+        registry: &Arc<GossipRegistry>,
+        peer_addr: SocketAddr,
+        completion: streaming::CompletedStream,
+    ) {
+        let actor_id_str = completion.descriptor.actor_id.to_string();
+        match registry
+            .handle_actor_message(
+                &actor_id_str,
+                completion.descriptor.type_hash,
+                &completion.payload,
+                completion.correlation_id,
+            )
+            .await
+        {
+            Ok(Some(reply_payload)) => {
+                if let Some(corr_id) = completion.correlation_id {
+                    let reply_len = reply_payload.len();
+                    let header = framing::write_ask_response_header(
+                        crate::MessageType::Response,
+                        corr_id,
+                        reply_len,
+                    );
+                    let pool = registry.connection_pool.lock().await;
+                    if let Some(conn) = pool
+                        .connections_by_addr
+                        .get(&peer_addr)
+                        .map(|c| c.value().clone())
+                    {
+                        if let Some(ref stream_handle) = conn.stream_handle {
+                            if let Err(e) = stream_handle
+                                .write_header_and_payload_control_inline(
+                                    header,
+                                    crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN as u8,
+                                    reply_payload,
+                                )
+                                .await
+                            {
+                                warn!(peer = %peer_addr, error = %e, "Failed to send streaming response");
+                            }
+                        } else {
+                            warn!(peer = %peer_addr, "Connection has no stream handle for streaming response");
+                        }
+                    } else {
+                        warn!(peer = %peer_addr, "No connection found in pool for streaming response");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    peer = %peer_addr,
+                    error = %e,
+                    "Failed to handle streaming actor payload"
+                );
             }
         }
     }
@@ -5598,32 +6402,247 @@ async fn resolve_peer_state_addr(
     socket_addr
 }
 
+async fn dispatch_actor_message_zero_copy<F, Fut>(
+    registry: &Arc<GossipRegistry>,
+    actor_id: &str,
+    type_hash: u32,
+    payload: &[u8],
+    correlation_id: Option<u16>,
+    mut send_reply: F,
+) -> Result<bool>
+where
+    F: FnMut(bytes::Bytes, u16) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    match registry
+        .handle_actor_message(actor_id, type_hash, payload, correlation_id)
+        .await
+    {
+        Ok(Some(reply_payload)) => {
+            if let Some(corr_id) = correlation_id {
+                send_reply(reply_payload, corr_id).await?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        Ok(None) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+enum RegistryMessageKind {
+    DeltaGossip,
+    DeltaGossipResponse,
+    FullSync,
+    FullSyncResponse,
+    FullSyncRequest,
+    PeerHealthQuery,
+    PeerHealthReport,
+    ActorMessage,
+    ImmediateAck,
+    PeerListGossip,
+}
+
+type ArchivedRegistryMessage = <RegistryMessage as Archive>::Archived;
+type ArchivedRegistryChange = <crate::registry::RegistryChange as Archive>::Archived;
+
+fn registry_message_kind(frame: &RegistryMessageFrame) -> Result<RegistryMessageKind> {
+    let archived = frame.archived()?;
+    Ok(match archived {
+        ArchivedRegistryMessage::DeltaGossip { .. } => RegistryMessageKind::DeltaGossip,
+        ArchivedRegistryMessage::DeltaGossipResponse { .. } => {
+            RegistryMessageKind::DeltaGossipResponse
+        }
+        ArchivedRegistryMessage::FullSync { .. } => RegistryMessageKind::FullSync,
+        ArchivedRegistryMessage::FullSyncResponse { .. } => RegistryMessageKind::FullSyncResponse,
+        ArchivedRegistryMessage::FullSyncRequest { .. } => RegistryMessageKind::FullSyncRequest,
+        ArchivedRegistryMessage::PeerHealthQuery { .. } => RegistryMessageKind::PeerHealthQuery,
+        ArchivedRegistryMessage::PeerHealthReport { .. } => RegistryMessageKind::PeerHealthReport,
+        ArchivedRegistryMessage::ActorMessage { .. } => RegistryMessageKind::ActorMessage,
+        ArchivedRegistryMessage::ImmediateAck { .. } => RegistryMessageKind::ImmediateAck,
+        ArchivedRegistryMessage::PeerListGossip { .. } => RegistryMessageKind::PeerListGossip,
+    })
+}
+
+fn archived_peer_id(archived: &<crate::PeerId as Archive>::Archived) -> Result<crate::PeerId> {
+    Ok(crate::rkyv_utils::deserialize_archived::<crate::PeerId>(
+        archived,
+    )?)
+}
+
+fn archived_node_id(archived: &<crate::NodeId as Archive>::Archived) -> Result<crate::NodeId> {
+    Ok(crate::rkyv_utils::deserialize_archived::<crate::NodeId>(
+        archived,
+    )?)
+}
+
+fn archived_priority_is_immediate(
+    priority: &<crate::RegistrationPriority as Archive>::Archived,
+) -> bool {
+    crate::rkyv_utils::deserialize_archived::<crate::RegistrationPriority>(priority)
+        .map(|p| p.should_trigger_immediate_gossip())
+        .unwrap_or(false)
+}
+
+fn archived_option_str(
+    value: &rkyv::option::ArchivedOption<rkyv::string::ArchivedString>,
+) -> Option<&str> {
+    match value {
+        rkyv::option::ArchivedOption::Some(inner) => Some(inner.as_str()),
+        rkyv::option::ArchivedOption::None => None,
+    }
+}
+
+fn compare_archived_vector_clock(
+    archived: &<crate::VectorClock as Archive>::Archived,
+    existing: &crate::VectorClock,
+) -> crate::ClockOrdering {
+    use std::cmp::Ordering;
+
+    let mut incoming_greater = false;
+    let mut existing_greater = false;
+
+    let incoming_clock_for = |node: &crate::NodeId| -> u64 {
+        for entry in archived.clocks.iter() {
+            let arch_node = &entry.0;
+            let arch_clock = &entry.1;
+            if let Ok(node_id) = crate::rkyv_utils::deserialize_archived::<crate::NodeId>(arch_node)
+            {
+                if &node_id == node {
+                    return u64::from(*arch_clock);
+                }
+            }
+        }
+        0
+    };
+
+    for entry in archived.clocks.iter() {
+        let arch_node = &entry.0;
+        let arch_clock = &entry.1;
+        let Ok(node_id) = crate::rkyv_utils::deserialize_archived::<crate::NodeId>(arch_node)
+        else {
+            continue;
+        };
+        let incoming_clock = u64::from(*arch_clock);
+        let existing_clock = existing.get(&node_id);
+        match incoming_clock.cmp(&existing_clock) {
+            Ordering::Greater => incoming_greater = true,
+            Ordering::Less => existing_greater = true,
+            Ordering::Equal => {}
+        }
+    }
+
+    for (node_id, existing_clock) in existing.iter_entries() {
+        let incoming_clock = incoming_clock_for(&node_id);
+        match existing_clock.cmp(&incoming_clock) {
+            Ordering::Greater => existing_greater = true,
+            Ordering::Less => incoming_greater = true,
+            Ordering::Equal => {}
+        }
+    }
+
+    match (incoming_greater, existing_greater) {
+        (true, false) => crate::ClockOrdering::After,
+        (false, true) => crate::ClockOrdering::Before,
+        (false, false) => crate::ClockOrdering::Equal,
+        (true, true) => crate::ClockOrdering::Concurrent,
+    }
+}
+
+fn hash_archived_vector_clock<H: std::hash::Hasher>(
+    archived: &<crate::VectorClock as Archive>::Archived,
+    state: &mut H,
+) {
+    use std::hash::Hash;
+
+    for entry in archived.clocks.iter() {
+        let arch_node = &entry.0;
+        let arch_clock = &entry.1;
+        if let Ok(node_id) = crate::rkyv_utils::deserialize_archived::<crate::NodeId>(arch_node) {
+            node_id.hash(state);
+            let clock = u64::from(*arch_clock);
+            clock.hash(state);
+        }
+    }
+}
+
+fn collect_actor_map_from_archived(
+    entries: &<Vec<(String, crate::RemoteActorLocation)> as Archive>::Archived,
+) -> Result<HashMap<String, crate::RemoteActorLocation>> {
+    let mut map = HashMap::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let name = &entry.0;
+        let location = &entry.1;
+        let name = name.as_str().to_string();
+        let location =
+            crate::rkyv_utils::deserialize_archived::<crate::RemoteActorLocation>(location)?;
+        map.insert(name, location);
+    }
+    Ok(map)
+}
+
+fn peer_health_status_from_archived(
+    status: &<crate::registry::PeerHealthStatus as Archive>::Archived,
+) -> crate::registry::PeerHealthStatus {
+    crate::registry::PeerHealthStatus {
+        is_alive: status.is_alive,
+        last_contact: u64::from(status.last_contact),
+        failure_count: u32::from(status.failure_count),
+    }
+}
+
 /// Handle an incoming message on a bidirectional connection
 pub(crate) fn handle_incoming_message(
     registry: Arc<GossipRegistry>,
     _peer_addr: SocketAddr,
-    msg: RegistryMessage,
+    frame: RegistryMessageFrame,
+    ask_correlation_id: Option<u16>,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(async move {
-        match msg {
-            RegistryMessage::DeltaGossip { delta } => {
-                debug!(
-                    sender = %delta.sender_peer_id,
-                    since_sequence = delta.since_sequence,
-                    changes = delta.changes.len(),
-                    "received delta gossip message on bidirectional connection"
-                );
+        let kind = match registry_message_kind(&frame) {
+            Ok(kind) => kind,
+            Err(err) => {
+                warn!(error = %err, "Failed to access archived RegistryMessage frame");
+                return Err(err);
+            }
+        };
+
+        match kind {
+            RegistryMessageKind::DeltaGossip => {
+                let sender_peer_id = {
+                    let archived = frame.archived()?;
+                    let delta = match archived {
+                        ArchivedRegistryMessage::DeltaGossip { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    archived_peer_id(&delta.sender_peer_id)?
+                };
 
                 let sender_socket_addr =
-                    resolve_peer_state_addr(&registry, Some(&delta.sender_peer_id), _peer_addr)
-                        .await;
+                    resolve_peer_state_addr(&registry, Some(&sender_peer_id), _peer_addr).await;
 
                 // OPTIMIZATION: Do all peer management in one lock acquisition
                 {
                     let mut gossip_state = registry.gossip_state.lock().await;
+                    let delta = match frame.archived()? {
+                        ArchivedRegistryMessage::DeltaGossip { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    let since_sequence = u64::from(delta.since_sequence);
+                    let current_sequence = u64::from(delta.current_sequence);
+                    let change_count = delta.changes.len();
+
+                    debug!(
+                        sender = %sender_peer_id,
+                        since_sequence = since_sequence,
+                        changes = change_count,
+                        "received delta gossip message on bidirectional connection"
+                    );
 
                     // Add the sender as a peer (inlined to avoid separate lock)
-                    if delta.sender_peer_id != registry.peer_id {
+                    if sender_peer_id != registry.peer_id {
                         if let std::collections::hash_map::Entry::Vacant(e) =
                             gossip_state.peers.entry(sender_socket_addr)
                         {
@@ -5652,7 +6671,7 @@ pub(crate) fn handle_incoming_message(
 
                     if was_failed {
                         info!(
-                            peer = %delta.sender_peer_id,
+                            peer = %sender_peer_id,
                             "✅ Received delta from previously failed peer - connection restored!"
                         );
 
@@ -5669,7 +6688,7 @@ pub(crate) fn handle_incoming_message(
                             // This proves the peer is alive and communicating
                             let had_failures = peer_info.failures > 0;
                             if had_failures {
-                                info!(peer = %delta.sender_peer_id,
+                                info!(peer = %sender_peer_id,
                               prev_failures = peer_info.failures,
                               "🔄 Resetting failure state after receiving DeltaGossip");
                                 peer_info.failures = 0;
@@ -5678,7 +6697,7 @@ pub(crate) fn handle_incoming_message(
                             peer_info.last_success = crate::current_timestamp();
 
                             peer_info.last_sequence =
-                                std::cmp::max(peer_info.last_sequence, delta.current_sequence);
+                                std::cmp::max(peer_info.last_sequence, current_sequence);
                             peer_info.consecutive_deltas += 1;
 
                             had_failures
@@ -5697,276 +6716,227 @@ pub(crate) fn handle_incoming_message(
 
                 // CRITICAL OPTIMIZATION: Inline apply_delta to eliminate function call overhead
                 // Apply the delta directly here to minimize async scheduling delays
-                {
+                let (total_changes, has_immediate) = {
+                    let delta = match frame.archived()? {
+                        ArchivedRegistryMessage::DeltaGossip { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
                     let total_changes = delta.changes.len();
-                    let sender_addr = sender_socket_addr;
-
-                    // Pre-compute priority flags to avoid redundant checks
                     let has_immediate = delta.changes.iter().any(|change| match change {
-                        crate::registry::RegistryChange::ActorAdded { priority, .. } => {
-                            priority.should_trigger_immediate_gossip()
+                        ArchivedRegistryChange::ActorAdded { priority, .. } => {
+                            archived_priority_is_immediate(priority)
                         }
-                        crate::registry::RegistryChange::ActorRemoved { priority, .. } => {
-                            priority.should_trigger_immediate_gossip()
+                        ArchivedRegistryChange::ActorRemoved { priority, .. } => {
+                            archived_priority_is_immediate(priority)
                         }
                     });
+                    (total_changes, has_immediate)
+                };
 
-                    if has_immediate {
-                        info!(
-                            "🎯 RECEIVING IMMEDIATE CHANGES: {} total changes from {}",
-                            total_changes, sender_addr
-                        );
-                    }
+                if has_immediate {
+                    info!(
+                        "🎯 RECEIVING IMMEDIATE CHANGES: {} total changes from {}",
+                        total_changes, sender_socket_addr
+                    );
+                }
 
-                    // Pre-capture timing info outside lock for better performance - use high resolution timing
-                    let _received_instant = std::time::Instant::now();
-                    let received_timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos();
+                // Pre-capture timing info outside lock for better performance - use high resolution timing
+                let _received_instant = std::time::Instant::now();
+                let received_timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
 
-                    // eprintln!("🔍 RECEIVED_TIMESTAMP: {}ns", received_timestamp);
-
-                    // Collect immediate actors for ACK before consuming changes
+                // Collect immediate actors for ACK before consuming changes
+                let immediate_actors = {
+                    let delta = match frame.archived()? {
+                        ArchivedRegistryMessage::DeltaGossip { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
                     let mut immediate_actors = Vec::new();
-                    for change in &delta.changes {
-                        if let crate::registry::RegistryChange::ActorAdded {
-                            name, priority, ..
-                        } = change
-                        {
-                            if priority.should_trigger_immediate_gossip() {
-                                immediate_actors.push(name.clone());
+                    for change in delta.changes.iter() {
+                        if let ArchivedRegistryChange::ActorAdded { name, priority, .. } = change {
+                            if archived_priority_is_immediate(priority) {
+                                immediate_actors.push(name.as_str().to_string());
+                            }
+                        }
+                    }
+                    immediate_actors
+                };
+
+                // OPTIMIZATION: Fast-path state updates with try_lock to avoid blocking
+                let applied_count = if let Ok(mut actor_state) = registry.actor_state.try_write() {
+                    let delta = match frame.archived()? {
+                        ArchivedRegistryMessage::DeltaGossip { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    let precise_timing_nanos = u64::from(delta.precise_timing_nanos);
+                    let mut applied = 0;
+
+                    for change in delta.changes.iter() {
+                        match change {
+                            ArchivedRegistryChange::ActorAdded {
+                                name,
+                                location,
+                                priority: _,
+                            } => {
+                                let name_str = name.as_str();
+                                // Don't override local actors
+                                if actor_state.local_actors.contains_key(name_str) {
+                                    continue;
+                                }
+
+                                // Quick conflict check
+                                let should_apply = match actor_state.known_actors.get(name_str) {
+                                    Some(existing) => {
+                                        let incoming_wall = u64::from(location.wall_clock_time);
+                                        incoming_wall > existing.wall_clock_time
+                                            || (incoming_wall == existing.wall_clock_time
+                                                && location.address.as_str()
+                                                    > existing.address.as_str())
+                                    }
+                                    None => true,
+                                };
+
+                                if should_apply {
+                                    let owned_location =
+                                        crate::rkyv_utils::deserialize_archived::<
+                                            crate::RemoteActorLocation,
+                                        >(location)?;
+                                    let owned_name = name_str.to_string();
+                                    actor_state
+                                        .known_actors
+                                        .insert(owned_name.clone(), owned_location.clone());
+                                    applied += 1;
+
+                                    // Inline timing calculation for immediate priority
+                                    if owned_location.priority.should_trigger_immediate_gossip() {
+                                        let network_time_nanos =
+                                            received_timestamp - precise_timing_nanos as u128;
+                                        let network_time_ms =
+                                            network_time_nanos as f64 / 1_000_000.0;
+                                        let propagation_time_ms = network_time_ms; // Same as network time for now
+                                        let processing_only_time_ms = 0.0; // No additional processing time beyond network
+
+                                        eprintln!("🔍 FAST_PATH: Processing immediate priority actor: {} propagation_time_ms={:.3}ms", owned_name, propagation_time_ms);
+
+                                        info!(
+                                            actor_name = %owned_name,
+                                            priority = ?owned_location.priority,
+                                            propagation_time_ms = propagation_time_ms,
+                                            network_processing_time_ms = network_time_ms,
+                                            processing_only_time_ms = processing_only_time_ms,
+                                            "RECEIVED_ACTOR"
+                                        );
+                                    }
+                                }
+                            }
+                            ArchivedRegistryChange::ActorRemoved {
+                                name,
+                                vector_clock,
+                                removing_node_id,
+                                priority: _,
+                            } => {
+                                let name_str = name.as_str();
+                                // Check vector clock ordering before applying removal
+                                let should_remove = match actor_state.known_actors.get(name_str) {
+                                    Some(existing_location) => match compare_archived_vector_clock(
+                                        vector_clock,
+                                        &existing_location.vector_clock,
+                                    ) {
+                                        crate::ClockOrdering::After => true,
+                                        crate::ClockOrdering::Concurrent => {
+                                            // For concurrent removals, use node_id as deterministic tiebreaker
+                                            // This ensures all nodes make the same decision
+                                            let removing_node_id =
+                                                archived_node_id(removing_node_id)?;
+                                            removing_node_id > existing_location.node_id
+                                        }
+                                        _ => false, // Ignore outdated removals (Before or Equal)
+                                    },
+                                    None => false, // Actor doesn't exist
+                                };
+
+                                if should_remove
+                                    && actor_state.known_actors.remove(name_str).is_some()
+                                {
+                                    applied += 1;
+                                }
                             }
                         }
                     }
 
-                    // OPTIMIZATION: Fast-path state updates with try_lock to avoid blocking
-                    let (applied_count, _pending_updates) = {
-                        // Try non-blocking access first
-                        if let Ok(mut actor_state) = registry.actor_state.try_write() {
-                            // Fast path - direct update without batching overhead
-                            let mut applied = 0;
-                            for change in delta.changes {
-                                match change {
-                                    crate::registry::RegistryChange::ActorAdded {
-                                        name,
-                                        location,
-                                        priority: _,
-                                    } => {
-                                        // Don't override local actors
-                                        if actor_state.local_actors.contains_key(name.as_str()) {
-                                            continue;
-                                        }
+                    applied
+                } else {
+                    // Fallback to write lock if contended
+                    let mut actor_state = registry.actor_state.write().await;
+                    let delta = match frame.archived()? {
+                        ArchivedRegistryMessage::DeltaGossip { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    let precise_timing_nanos = u64::from(delta.precise_timing_nanos);
+                    let mut applied = 0;
 
-                                        // Quick conflict check
-                                        let should_apply =
-                                            match actor_state.known_actors.get(name.as_str()) {
-                                                Some(existing) => {
-                                                    location.wall_clock_time
-                                                        > existing.wall_clock_time
-                                                        || (location.wall_clock_time
-                                                            == existing.wall_clock_time
-                                                            && location.address > existing.address)
-                                                }
-                                                None => true,
-                                            };
-
-                                        if should_apply {
-                                            actor_state
-                                                .known_actors
-                                                .insert(name.clone(), location.clone());
-                                            applied += 1;
-
-                                            // Inline timing calculation for immediate priority
-                                            if location.priority.should_trigger_immediate_gossip() {
-                                                let network_time_nanos = received_timestamp
-                                                    - delta.precise_timing_nanos as u128;
-                                                let network_time_ms =
-                                                    network_time_nanos as f64 / 1_000_000.0;
-                                                let propagation_time_ms = network_time_ms; // Same as network time for now
-                                                let processing_only_time_ms = 0.0; // No additional processing time beyond network
-
-                                                eprintln!("🔍 FAST_PATH: Processing immediate priority actor: {} propagation_time_ms={:.3}ms", name, propagation_time_ms);
-
-                                                info!(
-                                                    actor_name = %name,
-                                                    priority = ?location.priority,
-                                                    propagation_time_ms = propagation_time_ms,
-                                                    network_processing_time_ms = network_time_ms,
-                                                    processing_only_time_ms = processing_only_time_ms,
-                                                    "RECEIVED_ACTOR"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    crate::registry::RegistryChange::ActorRemoved {
-                                        name,
-                                        vector_clock,
-                                        removing_node_id,
-                                        priority: _,
-                                    } => {
-                                        // Check vector clock ordering before applying removal
-                                        let should_remove =
-                                            match actor_state.known_actors.get(name.as_str()) {
-                                                Some(existing_location) => {
-                                                    match vector_clock
-                                                        .compare(&existing_location.vector_clock)
-                                                    {
-                                                        crate::ClockOrdering::After => true,
-                                                        crate::ClockOrdering::Concurrent => {
-                                                            // For concurrent removals, use node_id as deterministic tiebreaker
-                                                            // This ensures all nodes make the same decision
-                                                            removing_node_id
-                                                                > existing_location.node_id
-                                                        }
-                                                        _ => false, // Ignore outdated removals (Before or Equal)
-                                                    }
-                                                }
-                                                None => false, // Actor doesn't exist
-                                            };
-
-                                        if should_remove
-                                            && actor_state
-                                                .known_actors
-                                                .remove(name.as_str())
-                                                .is_some()
-                                        {
-                                            applied += 1;
-                                        }
-                                    }
+                    for change in delta.changes.iter() {
+                        match change {
+                            ArchivedRegistryChange::ActorAdded {
+                                name,
+                                location,
+                                priority: _,
+                            } => {
+                                let name_str = name.as_str();
+                                // Don't override local actors - early exit
+                                if actor_state.local_actors.contains_key(name_str) {
+                                    debug!(
+                                        actor_name = %name_str,
+                                        "skipping remote actor update - actor is local"
+                                    );
+                                    continue;
                                 }
-                            }
-                            (applied, Vec::new())
-                        } else {
-                            // Fallback to batched approach if lock is contended
-                            let actor_state = registry.actor_state.read().await;
-                            let mut pending_updates = Vec::new();
-                            let mut pending_removals = Vec::new();
 
-                            for change in &delta.changes {
-                                match change {
-                                    crate::registry::RegistryChange::ActorAdded {
-                                        name,
-                                        location,
-                                        priority: _,
-                                    } => {
-                                        // Don't override local actors - early exit
-                                        if actor_state.local_actors.contains_key(name.as_str()) {
-                                            debug!(
-                                                actor_name = %name,
-                                                "skipping remote actor update - actor is local"
-                                            );
-                                            continue;
-                                        }
-
-                                        // Check if we already know about this actor
-                                        let should_apply =
-                                            match actor_state.known_actors.get(name.as_str()) {
-                                                Some(existing_location) => {
-                                                    // Use vector clock for causal ordering
-                                                    match location
-                                                        .vector_clock
-                                                        .compare(&existing_location.vector_clock)
-                                                    {
-                                                        crate::ClockOrdering::After => true,
-                                                        crate::ClockOrdering::Concurrent => {
-                                                            // For concurrent updates, use node_id as tiebreaker
-                                                            location.node_id
-                                                                > existing_location.node_id
-                                                        }
-                                                        _ => false, // Keep existing for Before or Equal
-                                                    }
-                                                }
-                                                None => {
-                                                    debug!(
-                                                        actor_name = %name,
-                                                        "applying new actor"
-                                                    );
-                                                    true // New actor
-                                                }
-                                            };
-
-                                        if should_apply {
-                                            pending_updates.push((name.clone(), location.clone()));
-                                        }
-                                    }
-                                    crate::registry::RegistryChange::ActorRemoved {
-                                        name,
-                                        vector_clock,
-                                        removing_node_id,
-                                        priority: _,
-                                    } => {
-                                        // Check vector clock ordering before queueing removal
-                                        if let Some(existing_location) =
-                                            actor_state.known_actors.get(name.as_str())
-                                        {
-                                            match vector_clock
-                                                .compare(&existing_location.vector_clock)
-                                            {
-                                                crate::ClockOrdering::After => {
-                                                    // Queue removal if it's after
-                                                    pending_removals.push((
-                                                        name.clone(),
-                                                        vector_clock.clone(),
-                                                        *removing_node_id,
-                                                    ));
-                                                }
-                                                crate::ClockOrdering::Concurrent => {
-                                                    // For concurrent removals, use node_id as tiebreaker
-                                                    if removing_node_id > &existing_location.node_id
-                                                    {
-                                                        pending_removals.push((
-                                                            name.clone(),
-                                                            vector_clock.clone(),
-                                                            *removing_node_id,
-                                                        ));
-                                                    }
-                                                }
-                                                _ => {} // Ignore outdated removals (Before or Equal)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Drop read lock before acquiring write lock
-                            drop(actor_state);
-
-                            // Second pass: apply all updates under write lock with re-validation
-                            let mut actor_state = registry.actor_state.write().await;
-                            let mut applied = 0;
-
-                            // Re-validate and apply actor additions
-                            for (name, location) in &pending_updates {
-                                // Re-check if this is still valid (state may have changed)
-                                let still_valid = match actor_state.known_actors.get(name.as_str())
-                                {
+                                // Check if we already know about this actor
+                                let should_apply = match actor_state.known_actors.get(name_str) {
                                     Some(existing_location) => {
-                                        match location
-                                            .vector_clock
-                                            .compare(&existing_location.vector_clock)
-                                        {
+                                        // Use vector clock for causal ordering
+                                        match compare_archived_vector_clock(
+                                            &location.vector_clock,
+                                            &existing_location.vector_clock,
+                                        ) {
                                             crate::ClockOrdering::After => true,
                                             crate::ClockOrdering::Concurrent => {
-                                                location.node_id > existing_location.node_id
+                                                // For concurrent updates, use node_id as tiebreaker
+                                                let incoming_node_id =
+                                                    archived_node_id(&location.node_id)?;
+                                                incoming_node_id > existing_location.node_id
                                             }
-                                            _ => false,
+                                            _ => false, // Keep existing for Before or Equal
                                         }
                                     }
-                                    None => !actor_state.local_actors.contains_key(name.as_str()),
+                                    None => {
+                                        debug!(
+                                            actor_name = %name_str,
+                                            "applying new actor"
+                                        );
+                                        true // New actor
+                                    }
                                 };
 
-                                if still_valid {
+                                if should_apply {
+                                    let owned_location =
+                                        crate::rkyv_utils::deserialize_archived::<
+                                            crate::RemoteActorLocation,
+                                        >(location)?;
+                                    let owned_name = name_str.to_string();
                                     actor_state
                                         .known_actors
-                                        .insert(name.clone(), location.clone());
+                                        .insert(owned_name.clone(), owned_location.clone());
                                     applied += 1;
 
                                     // Log the timing information for immediate priority changes
-                                    if location.priority.should_trigger_immediate_gossip() {
+                                    if owned_location.priority.should_trigger_immediate_gossip() {
                                         // Calculate time from when delta was sent (network + processing)
                                         let network_processing_time_nanos =
-                                            received_timestamp - delta.precise_timing_nanos as u128;
+                                            received_timestamp - precise_timing_nanos as u128;
                                         let network_processing_time_ms =
                                             network_processing_time_nanos as f64 / 1_000_000.0;
                                         let propagation_time_ms = network_processing_time_ms; // Same as network time for now
@@ -5974,12 +6944,12 @@ pub(crate) fn handle_incoming_message(
 
                                         // Debug: Break down where the time is spent
                                         eprintln!("🔍 TIMING_BREAKDOWN: sent={}, received={}, delta={}ns ({}ms)",
-                                     delta.precise_timing_nanos, received_timestamp,
+                                     precise_timing_nanos, received_timestamp,
                                      network_processing_time_nanos, network_processing_time_ms);
 
                                         info!(
-                                            actor_name = %name,
-                                            priority = ?location.priority,
+                                            actor_name = %owned_name,
+                                            priority = ?owned_location.priority,
                                             propagation_time_ms = propagation_time_ms,
                                             network_processing_time_ms = network_processing_time_ms,
                                             processing_only_time_ms = processing_only_time_ms,
@@ -5988,65 +6958,74 @@ pub(crate) fn handle_incoming_message(
                                     }
                                 }
                             }
-
-                            // Re-validate and apply actor removals
-                            for (name, removal_clock, removing_node_id) in &pending_removals {
-                                // Re-check if removal is still valid (state may have changed)
-                                if let Some(existing_location) =
-                                    actor_state.known_actors.get(name.as_str())
-                                {
-                                    let still_valid = match removal_clock
-                                        .compare(&existing_location.vector_clock)
-                                    {
-                                        crate::ClockOrdering::After => true,
-                                        crate::ClockOrdering::Concurrent => {
-                                            // Use same deterministic tiebreaker for re-validation
-                                            removing_node_id > &existing_location.node_id
+                            ArchivedRegistryChange::ActorRemoved {
+                                name,
+                                vector_clock,
+                                removing_node_id,
+                                priority: _,
+                            } => {
+                                let name_str = name.as_str();
+                                // Check vector clock ordering before applying removal
+                                let should_remove = match actor_state.known_actors.get(name_str) {
+                                    Some(existing_location) => {
+                                        match compare_archived_vector_clock(
+                                            vector_clock,
+                                            &existing_location.vector_clock,
+                                        ) {
+                                            crate::ClockOrdering::After => true,
+                                            crate::ClockOrdering::Concurrent => {
+                                                // For concurrent removals, use node_id as deterministic tiebreaker
+                                                // This ensures all nodes make the same decision
+                                                let removing_node_id =
+                                                    archived_node_id(removing_node_id)?;
+                                                removing_node_id > existing_location.node_id
+                                            }
+                                            _ => false, // Ignore outdated removals (Before or Equal)
                                         }
-                                        _ => false,
-                                    };
-
-                                    if still_valid
-                                        && actor_state.known_actors.remove(name.as_str()).is_some()
-                                    {
-                                        applied += 1;
                                     }
+                                    None => false, // Actor doesn't exist
+                                };
+
+                                if should_remove
+                                    && actor_state.known_actors.remove(name_str).is_some()
+                                {
+                                    applied += 1;
                                 }
                             }
-
-                            (applied, pending_updates)
                         }
-                    };
-
-                    if applied_count > 0 {
-                        debug!(
-                            applied_count = applied_count,
-                            sender = %sender_addr,
-                            "applied delta changes in batched update"
-                        );
                     }
 
-                    // NEW: Send ACK back for immediate registrations
-                    if !immediate_actors.is_empty() {
-                        // Send ACKs for immediate priority actor additions
-                        // Use lock-free send since we're responding on the same connection
-                        for actor_name in immediate_actors {
-                            // Send lightweight ACK immediately
-                            let ack = crate::registry::RegistryMessage::ImmediateAck {
-                                actor_name: actor_name.clone(),
-                                success: true,
-                            };
+                    applied
+                };
 
-                            // Serialize and send
-                            if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&ack) {
-                                let mut pool = registry.connection_pool.lock().await;
-                                let buffer = pool.create_message_buffer(&serialized);
-                                // Use send_lock_free to send directly without needing a connection handle
-                                if let Err(e) = pool.send_lock_free(sender_socket_addr, &buffer) {
-                                    warn!("Failed to send ImmediateAck: {}", e);
-                                } else {
-                                    info!("Sent ImmediateAck for actor '{}'", actor_name);
-                                }
+                if applied_count > 0 {
+                    debug!(
+                        applied_count = applied_count,
+                        sender = %sender_socket_addr,
+                        "applied delta changes in batched update"
+                    );
+                }
+
+                // NEW: Send ACK back for immediate registrations
+                if !immediate_actors.is_empty() {
+                    // Send ACKs for immediate priority actor additions
+                    // Use lock-free send since we're responding on the same connection
+                    for actor_name in immediate_actors {
+                        // Send lightweight ACK immediately
+                        let ack = crate::registry::RegistryMessage::ImmediateAck {
+                            actor_name: actor_name.clone(),
+                            success: true,
+                        };
+
+                        // Serialize and send
+                        if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&ack) {
+                            let mut pool = registry.connection_pool.lock().await;
+                            let buffer = pool.create_message_buffer(&serialized);
+                            // Use send_lock_free to send directly without needing a connection handle
+                            if let Err(e) = pool.send_lock_free(sender_socket_addr, &buffer) {
+                                warn!("Failed to send ImmediateAck: {}", e);
+                            } else {
+                                info!("Sent ImmediateAck for actor '{}'", actor_name);
                             }
                         }
                     }
@@ -6055,19 +7034,60 @@ pub(crate) fn handle_incoming_message(
                 // Note: Response will be sent during regular gossip rounds
                 Ok(())
             }
-            RegistryMessage::FullSync {
-                local_actors,
-                known_actors,
-                sender_peer_id,
-                sender_bind_addr,
-                sequence,
-                wall_clock_time,
-            } => {
+            RegistryMessageKind::FullSync => {
+                let (
+                    sender_peer_id,
+                    sender_socket_addr,
+                    local_len,
+                    known_len,
+                    sequence,
+                    wall_clock_time,
+                ) = {
+                    let archived = frame.archived()?;
+                    let (
+                        local_actors,
+                        known_actors,
+                        sender_peer_id,
+                        sender_bind_addr,
+                        sequence,
+                        wall_clock_time,
+                    ) = match archived {
+                        ArchivedRegistryMessage::FullSync {
+                            local_actors,
+                            known_actors,
+                            sender_peer_id,
+                            sender_bind_addr,
+                            sequence,
+                            wall_clock_time,
+                        } => (
+                            local_actors,
+                            known_actors,
+                            sender_peer_id,
+                            sender_bind_addr,
+                            sequence,
+                            wall_clock_time,
+                        ),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    let sender_peer_id = archived_peer_id(sender_peer_id)?;
+                    let sender_socket_addr =
+                        resolve_peer_addr(archived_option_str(sender_bind_addr), _peer_addr);
+                    let local_len = local_actors.len();
+                    let known_len = known_actors.len();
+                    let sequence = u64::from(sequence);
+                    let wall_clock_time = u64::from(wall_clock_time);
+                    (
+                        sender_peer_id,
+                        sender_socket_addr,
+                        local_len,
+                        known_len,
+                        sequence,
+                        wall_clock_time,
+                    )
+                };
+
                 // Use resolve_peer_addr for safe address resolution with validation
                 // This handles: None, invalid addresses, 0.0.0.0, and falls back to TCP source
-                let sender_socket_addr = resolve_peer_addr(sender_bind_addr.as_deref(), _peer_addr);
-
-                // Note: sender_peer_id is now a PeerId (e.g., "node_a"), not an address
                 debug!(
                     "Received FullSync from node '{}' at bind_addr {} (tcp_source={})",
                     sender_peer_id, sender_socket_addr, _peer_addr
@@ -6156,8 +7176,8 @@ pub(crate) fn handle_incoming_message(
                 debug!(
                     sender = %sender_peer_id,
                     sequence = sequence,
-                    local_actors = local_actors.len(),
-                    known_actors = known_actors.len(),
+                    local_actors = local_len,
+                    known_actors = known_len,
                     "📨 INCOMING: Received full sync message on bidirectional connection"
                 );
 
@@ -6192,10 +7212,26 @@ pub(crate) fn handle_incoming_message(
                 }
 
                 // Only remaining async operation
+                let (local_map, known_map) = {
+                    let archived = frame.archived()?;
+                    let (local_actors, known_actors) = match archived {
+                        ArchivedRegistryMessage::FullSync {
+                            local_actors,
+                            known_actors,
+                            ..
+                        } => (local_actors, known_actors),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    (
+                        collect_actor_map_from_archived(local_actors)?,
+                        collect_actor_map_from_archived(known_actors)?,
+                    )
+                };
+
                 registry
                     .merge_full_sync(
-                        local_actors.into_iter().collect(),
-                        known_actors.into_iter().collect(),
+                        local_map,
+                        known_map,
                         sender_socket_addr,
                         sequence,
                         wall_clock_time,
@@ -6349,12 +7385,18 @@ pub(crate) fn handle_incoming_message(
 
                 Ok(())
             }
-            RegistryMessage::FullSyncRequest {
-                sender_peer_id,
-                sender_bind_addr: _, // Not used for requests, but must be present
-                sequence: _,
-                wall_clock_time: _,
-            } => {
+            RegistryMessageKind::FullSyncRequest => {
+                let sender_peer_id = {
+                    let archived = frame.archived()?;
+                    let sender_peer_id = match archived {
+                        ArchivedRegistryMessage::FullSyncRequest { sender_peer_id, .. } => {
+                            sender_peer_id
+                        }
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    archived_peer_id(sender_peer_id)?
+                };
+
                 debug!(
                     sender = %sender_peer_id,
                     "received full sync request on bidirectional connection"
@@ -6368,46 +7410,403 @@ pub(crate) fn handle_incoming_message(
                 // Note: Response will be sent during regular gossip rounds
                 Ok(())
             }
-            // Handle response messages (these can arrive on incoming connections too)
-            RegistryMessage::DeltaGossipResponse { delta } => {
+            RegistryMessageKind::DeltaGossipResponse => {
+                let sender_peer_id = {
+                    let archived = frame.archived()?;
+                    let delta = match archived {
+                        ArchivedRegistryMessage::DeltaGossipResponse { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    archived_peer_id(&delta.sender_peer_id)?
+                };
+
+                let total_changes = {
+                    let archived = frame.archived()?;
+                    let delta = match archived {
+                        ArchivedRegistryMessage::DeltaGossipResponse { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    delta.changes.len()
+                };
+
                 debug!(
-                    sender = %delta.sender_peer_id,
-                    changes = delta.changes.len(),
+                    sender = %sender_peer_id,
+                    changes = total_changes,
                     "received delta gossip response on bidirectional connection"
                 );
 
-                if let Err(err) = registry.apply_delta(delta).await {
-                    warn!(error = %err, "failed to apply delta from response");
-                } else {
-                    let mut gossip_state = registry.gossip_state.lock().await;
-                    gossip_state.delta_exchanges += 1;
+                let has_immediate = {
+                    let archived = frame.archived()?;
+                    let delta = match archived {
+                        ArchivedRegistryMessage::DeltaGossipResponse { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    delta.changes.iter().any(|change| match change {
+                        ArchivedRegistryChange::ActorAdded { priority, .. } => {
+                            archived_priority_is_immediate(priority)
+                        }
+                        ArchivedRegistryChange::ActorRemoved { priority, .. } => {
+                            archived_priority_is_immediate(priority)
+                        }
+                    })
+                };
+
+                if has_immediate {
+                    error!(
+                        "🎯 RECEIVING IMMEDIATE CHANGES: {} total changes from {}",
+                        total_changes, sender_peer_id
+                    );
                 }
+
+                let mut peer_actors_added = std::collections::HashSet::new();
+                let mut peer_actors_removed = std::collections::HashSet::new();
+
+                let received_timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+
+                let applied_count = {
+                    let mut actor_state = registry.actor_state.write().await;
+                    let delta = match frame.archived()? {
+                        ArchivedRegistryMessage::DeltaGossipResponse { delta } => delta,
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    let precise_timing_nanos = u64::from(delta.precise_timing_nanos);
+                    let mut applied = 0;
+
+                    for change in delta.changes.iter() {
+                        match change {
+                            ArchivedRegistryChange::ActorAdded {
+                                name,
+                                location,
+                                priority: _,
+                            } => {
+                                let name_str = name.as_str();
+                                // Don't override local actors - early exit
+                                if actor_state.local_actors.contains_key(name_str) {
+                                    debug!(
+                                        actor_name = %name_str,
+                                        "skipping remote actor update - actor is local"
+                                    );
+                                    continue;
+                                }
+
+                                // Check if we already know about this actor
+                                let should_apply = match actor_state.known_actors.get(name_str) {
+                                    Some(existing_location) => {
+                                        // Use vector clock for causal ordering
+                                        match compare_archived_vector_clock(
+                                            &location.vector_clock,
+                                            &existing_location.vector_clock,
+                                        ) {
+                                            crate::ClockOrdering::After => true,
+                                            crate::ClockOrdering::Concurrent => {
+                                                // Concurrent updates - use deterministic hash-based tiebreaker
+                                                use std::hash::{Hash, Hasher};
+                                                let mut hasher1 =
+                                                    std::collections::hash_map::DefaultHasher::new(
+                                                    );
+                                                name_str.hash(&mut hasher1);
+                                                location.address.as_str().hash(&mut hasher1);
+                                                let incoming_wall =
+                                                    u64::from(location.wall_clock_time);
+                                                incoming_wall.hash(&mut hasher1);
+                                                let hash1 = hasher1.finish();
+
+                                                let mut hasher2 =
+                                                    std::collections::hash_map::DefaultHasher::new(
+                                                    );
+                                                name_str.hash(&mut hasher2);
+                                                existing_location.address.hash(&mut hasher2);
+                                                existing_location
+                                                    .wall_clock_time
+                                                    .hash(&mut hasher2);
+                                                let hash2 = hasher2.finish();
+
+                                                if hash1 != hash2 {
+                                                    hash1 > hash2
+                                                } else {
+                                                    incoming_wall
+                                                        > existing_location.wall_clock_time
+                                                }
+                                            }
+                                            _ => false, // Keep existing for Before or Equal
+                                        }
+                                    }
+                                    None => {
+                                        debug!(
+                                            actor_name = %name_str,
+                                            "applying new actor"
+                                        );
+                                        true // New actor
+                                    }
+                                };
+
+                                if should_apply {
+                                    // Only clone when actually inserting
+                                    let owned_location =
+                                        crate::rkyv_utils::deserialize_archived::<
+                                            crate::RemoteActorLocation,
+                                        >(location)?;
+                                    let actor_name = name_str.to_string();
+                                    actor_state
+                                        .known_actors
+                                        .insert(actor_name.clone(), owned_location.clone());
+                                    applied += 1;
+
+                                    // Track this actor as belonging to the sender
+                                    peer_actors_added.insert(actor_name.clone());
+
+                                    // Move timing calculations outside critical section for logging
+                                    if tracing::enabled!(tracing::Level::INFO) {
+                                        let propagation_time_nanos = received_timestamp
+                                            - owned_location.local_registration_time;
+                                        let propagation_time_ms =
+                                            propagation_time_nanos as f64 / 1_000_000.0;
+
+                                        // Calculate time from when delta was sent (network + processing)
+                                        let network_processing_time_nanos =
+                                            received_timestamp - precise_timing_nanos as u128;
+                                        let network_processing_time_ms =
+                                            network_processing_time_nanos as f64 / 1_000_000.0;
+
+                                        // Calculate pure serialization + processing time (excluding network)
+                                        let processing_only_time_ms =
+                                            propagation_time_ms - network_processing_time_ms;
+
+                                        info!(
+                                            actor_name = %name_str,
+                                            priority = ?owned_location.priority,
+                                            propagation_time_ms = propagation_time_ms,
+                                            network_processing_time_ms = network_processing_time_ms,
+                                            processing_only_time_ms = processing_only_time_ms,
+                                            "RECEIVED_ACTOR"
+                                        );
+                                    }
+                                }
+                            }
+                            ArchivedRegistryChange::ActorRemoved {
+                                name,
+                                vector_clock,
+                                removing_node_id,
+                                priority: _,
+                            } => {
+                                let name_str = name.as_str();
+                                // Don't remove local actors - early exit
+                                if actor_state.local_actors.contains_key(name_str) {
+                                    debug!(
+                                        actor_name = %name_str,
+                                        "skipping actor removal - actor is local"
+                                    );
+                                    continue;
+                                }
+
+                                // Check vector clock ordering before applying removal
+                                let should_remove = match actor_state.known_actors.get(name_str) {
+                                    Some(existing_location) => {
+                                        // Use vector clock for causal ordering
+                                        match compare_archived_vector_clock(
+                                            vector_clock,
+                                            &existing_location.vector_clock,
+                                        ) {
+                                            crate::ClockOrdering::After => {
+                                                // Removal is causally after current state
+                                                debug!(
+                                                    actor_name = %name_str,
+                                                    "removal is causally after current state - applying"
+                                                );
+                                                true
+                                            }
+                                            crate::ClockOrdering::Concurrent => {
+                                                // For concurrent removals, use deterministic tiebreaker
+                                                // Removal should win if it's "newer" based on hash
+                                                use std::hash::{Hash, Hasher};
+                                                let mut hasher1 =
+                                                    std::collections::hash_map::DefaultHasher::new(
+                                                    );
+                                                name_str.hash(&mut hasher1);
+                                                let removing_node_id =
+                                                    archived_node_id(removing_node_id)?;
+                                                removing_node_id.hash(&mut hasher1);
+                                                hash_archived_vector_clock(
+                                                    vector_clock,
+                                                    &mut hasher1,
+                                                );
+                                                let hash1 = hasher1.finish();
+
+                                                let mut hasher2 =
+                                                    std::collections::hash_map::DefaultHasher::new(
+                                                    );
+                                                name_str.hash(&mut hasher2);
+                                                existing_location.node_id.hash(&mut hasher2);
+                                                existing_location.vector_clock.hash(&mut hasher2);
+                                                let hash2 = hasher2.finish();
+
+                                                // Removal wins if its hash is greater (deterministic across all nodes)
+                                                let should_apply = hash1 > hash2;
+                                                debug!(
+                                                    actor_name = %name_str,
+                                                    removing_node = %removing_node_id.fmt_short(),
+                                                    existing_node = %existing_location.node_id.fmt_short(),
+                                                    should_apply = should_apply,
+                                                    "removal is concurrent with current state - using node_id tiebreaker"
+                                                );
+                                                should_apply
+                                            }
+                                            _ => {
+                                                // Removal is outdated (Before or Equal) - ignore it
+                                                debug!(
+                                                    actor_name = %name_str,
+                                                    "removal is outdated - ignoring"
+                                                );
+                                                false
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        // Actor doesn't exist, nothing to remove
+                                        debug!(actor_name = %name_str, "actor not found - ignoring removal");
+                                        false
+                                    }
+                                };
+
+                                if should_remove
+                                    && actor_state.known_actors.remove(name_str).is_some()
+                                {
+                                    applied += 1;
+                                    peer_actors_removed.insert(name_str.to_string());
+                                    debug!(actor_name = %name_str, "applied actor removal");
+                                }
+                            }
+                        }
+                    }
+
+                    applied
+                };
+
+                let peer_actor_changes = peer_actors_added.len() + peer_actors_removed.len();
+
+                if let Some(sender_addr) = {
+                    let pool = registry.connection_pool.lock().await;
+                    pool.peer_id_to_addr
+                        .get(&sender_peer_id)
+                        .map(|entry| *entry)
+                } {
+                    let mut gossip_state = registry.gossip_state.lock().await;
+                    let entry = gossip_state
+                        .peer_to_actors
+                        .entry(sender_addr)
+                        .or_insert_with(std::collections::HashSet::new);
+
+                    for name in peer_actors_removed {
+                        entry.remove(&name);
+                    }
+                    for name in peer_actors_added {
+                        entry.insert(name);
+                    }
+                } else {
+                    debug!(
+                        sender = %sender_peer_id,
+                        "no address mapping for sender; skipping peer_to_actors update"
+                    );
+                }
+
+                debug!(
+                    sender = %sender_peer_id,
+                    total_changes,
+                    applied_changes = applied_count,
+                    peer_actor_changes = peer_actor_changes,
+                    "completed delta application with vector clock conflict resolution"
+                );
+
+                let mut gossip_state = registry.gossip_state.lock().await;
+                gossip_state.delta_exchanges += 1;
+
                 Ok(())
             }
-            RegistryMessage::FullSyncResponse {
-                local_actors,
-                known_actors,
-                sender_peer_id,
-                sender_bind_addr,
-                sequence,
-                wall_clock_time,
-            } => {
-                // Use resolve_peer_addr for safe address resolution with validation
-                let sender_socket_addr = resolve_peer_addr(sender_bind_addr.as_deref(), _peer_addr);
+            RegistryMessageKind::FullSyncResponse => {
+                let (
+                    sender_peer_id,
+                    sender_socket_addr,
+                    local_len,
+                    known_len,
+                    sequence,
+                    wall_clock_time,
+                ) = {
+                    let archived = frame.archived()?;
+                    let (
+                        local_actors,
+                        known_actors,
+                        sender_peer_id,
+                        sender_bind_addr,
+                        sequence,
+                        wall_clock_time,
+                    ) = match archived {
+                        ArchivedRegistryMessage::FullSyncResponse {
+                            local_actors,
+                            known_actors,
+                            sender_peer_id,
+                            sender_bind_addr,
+                            sequence,
+                            wall_clock_time,
+                        } => (
+                            local_actors,
+                            known_actors,
+                            sender_peer_id,
+                            sender_bind_addr,
+                            sequence,
+                            wall_clock_time,
+                        ),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    let sender_peer_id = archived_peer_id(sender_peer_id)?;
+                    let sender_socket_addr =
+                        resolve_peer_addr(archived_option_str(sender_bind_addr), _peer_addr);
+                    let local_len = local_actors.len();
+                    let known_len = known_actors.len();
+                    let sequence = u64::from(sequence);
+                    let wall_clock_time = u64::from(wall_clock_time);
+                    (
+                        sender_peer_id,
+                        sender_socket_addr,
+                        local_len,
+                        known_len,
+                        sequence,
+                        wall_clock_time,
+                    )
+                };
 
+                // Use resolve_peer_addr for safe address resolution with validation
                 debug!(
                     sender = %sender_peer_id,
                     bind_addr = %sender_socket_addr,
                     tcp_source = %_peer_addr,
-                    local_actors = local_actors.len(),
-                    known_actors = known_actors.len(),
+                    local_actors = local_len,
+                    known_actors = known_len,
                     "RECEIVED: FullSyncResponse from peer (using bind_addr)"
                 );
 
+                let (local_map, known_map) = {
+                    let archived = frame.archived()?;
+                    let (local_actors, known_actors) = match archived {
+                        ArchivedRegistryMessage::FullSyncResponse {
+                            local_actors,
+                            known_actors,
+                            ..
+                        } => (local_actors, known_actors),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    (
+                        collect_actor_map_from_archived(local_actors)?,
+                        collect_actor_map_from_archived(known_actors)?,
+                    )
+                };
+
                 registry
                     .merge_full_sync(
-                        local_actors.into_iter().collect(),
-                        known_actors.into_iter().collect(),
+                        local_map,
+                        known_map,
                         sender_socket_addr,
                         sequence,
                         wall_clock_time,
@@ -6493,15 +7892,24 @@ pub(crate) fn handle_incoming_message(
                 gossip_state.full_sync_exchanges += 1;
                 Ok(())
             }
-            RegistryMessage::PeerHealthQuery {
-                sender,
-                target_peer,
-                timestamp: _,
-            } => {
+            RegistryMessageKind::PeerHealthQuery => {
+                let (sender_peer_id, target_peer) = {
+                    let archived = frame.archived()?;
+                    let (sender, target_peer) = match archived {
+                        ArchivedRegistryMessage::PeerHealthQuery {
+                            sender,
+                            target_peer,
+                            ..
+                        } => (sender, target_peer),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    (archived_peer_id(sender)?, target_peer.as_str().to_string())
+                };
+
                 let sender_socket_addr =
-                    resolve_peer_state_addr(&registry, Some(&sender), _peer_addr).await;
+                    resolve_peer_state_addr(&registry, Some(&sender_peer_id), _peer_addr).await;
                 debug!(
-                    sender = %sender,
+                    sender = %sender_peer_id,
                     target = %target_peer,
                     "received peer health query"
                 );
@@ -6580,30 +7988,48 @@ pub(crate) fn handle_incoming_message(
 
                 Ok(())
             }
-            RegistryMessage::PeerHealthReport {
-                reporter,
-                peer_statuses,
-                timestamp: _,
-            } => {
+            RegistryMessageKind::PeerHealthReport => {
+                let (reporter, peer_count) = {
+                    let archived = frame.archived()?;
+                    let (reporter, peer_statuses) = match archived {
+                        ArchivedRegistryMessage::PeerHealthReport {
+                            reporter,
+                            peer_statuses,
+                            ..
+                        } => (reporter, peer_statuses),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    (archived_peer_id(reporter)?, peer_statuses.len())
+                };
+
                 let reporter_addr =
                     resolve_peer_state_addr(&registry, Some(&reporter), _peer_addr).await;
                 debug!(
                     reporter = %reporter,
-                    peers = peer_statuses.len(),
+                    peers = peer_count,
                     "received peer health report"
                 );
 
                 // Store the health reports
                 {
                     let mut gossip_state = registry.gossip_state.lock().await;
-                    for (peer, status) in peer_statuses {
-                        if let Ok(peer_addr) = peer.parse::<SocketAddr>() {
+                    let archived = frame.archived()?;
+                    let peer_statuses = match archived {
+                        ArchivedRegistryMessage::PeerHealthReport { peer_statuses, .. } => {
+                            peer_statuses
+                        }
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    for entry in peer_statuses.iter() {
+                        let peer = &entry.0;
+                        let status = &entry.1;
+                        if let Ok(peer_addr) = peer.as_str().parse::<SocketAddr>() {
                             // For now, use the reporter's peer address from the connection
                             gossip_state
                                 .peer_health_reports
                                 .entry(peer_addr)
                                 .or_insert_with(HashMap::new)
-                                .insert(reporter_addr, status);
+                                .insert(reporter_addr, peer_health_status_from_archived(status));
                         }
                     }
                 }
@@ -6613,13 +8039,33 @@ pub(crate) fn handle_incoming_message(
 
                 Ok(())
             }
-            RegistryMessage::ActorMessage {
-                actor_id,
-                type_hash,
-                payload,
-                correlation_id,
-            } => {
+            RegistryMessageKind::ActorMessage => {
                 let peer_state_addr = resolve_peer_state_addr(&registry, None, _peer_addr).await;
+                let (actor_id, type_hash, payload, correlation_id) = {
+                    let archived = frame.archived()?;
+                    match archived {
+                        ArchivedRegistryMessage::ActorMessage {
+                            actor_id,
+                            type_hash,
+                            payload,
+                            correlation_id,
+                        } => {
+                            let type_hash = u32::from(*type_hash);
+                            let correlation_id = match correlation_id {
+                                rkyv::option::ArchivedOption::Some(v) => Some((*v).into()),
+                                rkyv::option::ArchivedOption::None => None,
+                            };
+                            (
+                                actor_id.as_str(),
+                                type_hash,
+                                payload.as_slice(),
+                                correlation_id,
+                            )
+                        }
+                        _ => unreachable!("registry message kind mismatch"),
+                    }
+                };
+                let correlation_id = correlation_id.or(ask_correlation_id);
                 debug!(
                     actor_id = %actor_id,
                     type_hash = %format!("{:08x}", type_hash),
@@ -6628,73 +8074,86 @@ pub(crate) fn handle_incoming_message(
                     "received actor message"
                 );
 
-                // Forward to the registry's actor message handler
-                match registry
-                    .handle_actor_message(&actor_id, type_hash, &payload, correlation_id)
-                    .await
-                {
-                    Ok(Some(reply_payload)) => {
-                        // If there's a correlation_id, this is an ask message and we need to send the reply back
-                        if let Some(corr_id) = correlation_id {
-                            debug!(
-                                actor_id = %actor_id,
-                                type_hash = %format!("{:08x}", type_hash),
-                                correlation_id = corr_id,
-                                reply_len = reply_payload.len(),
-                                "sending ask reply back to sender"
-                            );
+                let registry_for_reply = registry.clone();
+                let send_reply = move |reply_payload: bytes::Bytes, corr_id: u16| {
+                    let registry = registry_for_reply.clone();
+                    async move {
+                        debug!(
+                            actor_id = %actor_id,
+                            type_hash = %format!("{:08x}", type_hash),
+                            correlation_id = corr_id,
+                            reply_len = reply_payload.len(),
+                            "sending ask reply back to sender"
+                        );
 
-                            let header = framing::write_ask_response_header(
-                                crate::MessageType::Response,
-                                corr_id,
-                                reply_payload.len(),
-                            );
-                            let payload = bytes::Bytes::from(reply_payload);
+                        let reply_len = reply_payload.len();
+                        let header = framing::write_ask_response_header(
+                            crate::MessageType::Response,
+                            corr_id,
+                            reply_len,
+                        );
 
-                            // CRITICAL FIX: Try the ephemeral TCP source address first, then fall back
-                            // to the bind address if the connection was reindexed after FullSync.
-                            let pool = registry.connection_pool.lock().await;
-                            let header_bytes = bytes::Bytes::copy_from_slice(&header);
-
-                            // First try: use original TCP source address (ephemeral port)
-                            if let Err(_e1) = pool.send_lock_free_parts(
-                                _peer_addr,
-                                header_bytes.clone(),
-                                payload.clone(),
-                            ) {
-                                // Second try: use bind address (connection may have been reindexed)
-                                if _peer_addr != peer_state_addr {
-                                    if let Err(e2) = pool.send_lock_free_parts(
-                                        peer_state_addr,
-                                        header_bytes,
-                                        payload,
-                                    ) {
-                                        warn!(
-                                            peer = %_peer_addr,
-                                            peer_state_addr = %peer_state_addr,
-                                            error = %e2,
-                                            "Failed to send ask reply (tried both ephemeral and bind addresses)"
-                                        );
-                                    } else {
+                        let pool = registry.connection_pool.lock().await;
+                        if let Err(first_err) = pool.send_lock_free_parts_inline(
+                            _peer_addr,
+                            header,
+                            16,
+                            reply_payload.clone(),
+                        ) {
+                            if _peer_addr != peer_state_addr {
+                                match pool.send_lock_free_parts_inline(
+                                    peer_state_addr,
+                                    header,
+                                    16,
+                                    reply_payload,
+                                ) {
+                                    Ok(()) => {
                                         debug!(
                                             peer = %_peer_addr,
                                             peer_state_addr = %peer_state_addr,
                                             "Ask reply sent via bind address (ephemeral port was reindexed)"
                                         );
+                                        Ok(())
                                     }
-                                } else {
-                                    warn!(peer = %_peer_addr, error = %_e1, "Failed to send ask reply");
+                                    Err(second_err) => {
+                                        warn!(
+                                            peer = %_peer_addr,
+                                            peer_state_addr = %peer_state_addr,
+                                            error = %second_err,
+                                            "Failed to send ask reply (tried both ephemeral and bind addresses)"
+                                        );
+                                        Err(second_err)
+                                    }
                                 }
+                            } else {
+                                warn!(peer = %_peer_addr, error = %first_err, "Failed to send ask reply");
+                                Err(first_err)
                             }
+                        } else {
+                            Ok(())
                         }
+                    }
+                };
 
+                match dispatch_actor_message_zero_copy(
+                    &registry,
+                    actor_id,
+                    type_hash,
+                    payload,
+                    correlation_id,
+                    send_reply,
+                )
+                .await
+                {
+                    Ok(true) => {
                         debug!(
                             actor_id = %actor_id,
                             type_hash = %format!("{:08x}", type_hash),
+                            correlation_id = ?correlation_id,
                             "actor message processed successfully with reply"
                         );
                     }
-                    Ok(None) => {
+                    Ok(false) => {
                         debug!(
                             actor_id = %actor_id,
                             type_hash = %format!("{:08x}", type_hash),
@@ -6713,11 +8172,19 @@ pub(crate) fn handle_incoming_message(
 
                 Ok(())
             }
+            RegistryMessageKind::ImmediateAck => {
+                let mut pending_acks = registry.pending_acks.lock().await;
+                let (actor_name, success) = {
+                    let archived = frame.archived()?;
+                    match archived {
+                        ArchivedRegistryMessage::ImmediateAck {
+                            actor_name,
+                            success,
+                        } => (actor_name.as_str(), *success),
+                        _ => unreachable!("registry message kind mismatch"),
+                    }
+                };
 
-            RegistryMessage::ImmediateAck {
-                actor_name,
-                success,
-            } => {
                 debug!(
                     actor_name = %actor_name,
                     success = success,
@@ -6725,8 +8192,7 @@ pub(crate) fn handle_incoming_message(
                 );
 
                 // Look up the pending ACK sender for this actor
-                let mut pending_acks = registry.pending_acks.lock().await;
-                if let Some(sender) = pending_acks.remove(&actor_name) {
+                if let Some(sender) = pending_acks.remove(actor_name) {
                     // Send the success status through the oneshot channel
                     if sender.send(success).is_err() {
                         warn!(
@@ -6749,15 +8215,23 @@ pub(crate) fn handle_incoming_message(
 
                 Ok(())
             }
-
-            RegistryMessage::PeerListGossip {
-                peers,
-                timestamp,
-                sender_addr,
-            } => {
+            RegistryMessageKind::PeerListGossip => {
                 let peer_state_addr = resolve_peer_state_addr(&registry, None, _peer_addr).await;
+                let (peer_count, timestamp, sender_addr) = {
+                    let archived = frame.archived()?;
+                    let (peers, timestamp, sender_addr) = match archived {
+                        ArchivedRegistryMessage::PeerListGossip {
+                            peers,
+                            timestamp,
+                            sender_addr,
+                        } => (peers, timestamp, sender_addr),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    (peers.len(), u64::from(timestamp), sender_addr.as_str())
+                };
+
                 debug!(
-                    peer_count = peers.len(),
+                    peer_count = peer_count,
                     timestamp = timestamp,
                     sender = %sender_addr,
                     "received peer list gossip message"
@@ -6780,9 +8254,24 @@ pub(crate) fn handle_incoming_message(
                     return Ok(());
                 }
 
-                let candidates = registry
-                    .on_peer_list_gossip(peers, &sender_addr, timestamp)
-                    .await;
+                let candidates = {
+                    let archived = frame.archived()?;
+                    let (peers, timestamp, sender_addr) = match archived {
+                        ArchivedRegistryMessage::PeerListGossip {
+                            peers,
+                            timestamp,
+                            sender_addr,
+                        } => (peers, timestamp, sender_addr),
+                        _ => unreachable!("registry message kind mismatch"),
+                    };
+                    registry
+                        .on_peer_list_gossip_archived(
+                            peers,
+                            sender_addr.as_str(),
+                            u64::from(timestamp),
+                        )
+                        .await
+                };
 
                 if candidates.is_empty() {
                     return Ok(());
@@ -7058,6 +8547,7 @@ mod tests {
             addr: "127.0.0.1:8080".parse().unwrap(),
             stream_handle,
             correlation: CorrelationTracker::new(),
+            peer_capabilities: None,
         };
 
         let data = vec![1, 2, 3, 4];
@@ -7088,6 +8578,7 @@ mod tests {
             addr: "127.0.0.1:8080".parse().unwrap(),
             stream_handle,
             correlation: CorrelationTracker::new(),
+            peer_capabilities: None,
         };
 
         // The lock-free design uses fire-and-forget semantics, so send_data
@@ -7119,7 +8610,10 @@ mod tests {
 
         // Give task time to start
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        assert!(task_started.load(Ordering::SeqCst), "Task should have started");
+        assert!(
+            task_started.load(Ordering::SeqCst),
+            "Task should have started"
+        );
 
         // Create tracker and set the handle
         let mut tracker = TaskTracker::new();

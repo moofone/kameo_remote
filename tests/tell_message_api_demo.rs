@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy_tell_bytes")]
+
+use bytes::Bytes;
 use kameo_remote::*;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -311,11 +314,14 @@ async fn test_tell_message_api_comprehensive() {
 
     for (i, request) in api_requests.iter().enumerate() {
         let req_start = Instant::now();
-        let response = conn.ask(request.as_bytes()).await.unwrap();
+        let response = conn
+            .ask(Bytes::copy_from_slice(request.as_bytes()))
+            .await
+            .unwrap();
         let req_time = req_start.elapsed();
         ask_latencies.push(req_time);
 
-        let response_str = String::from_utf8_lossy(&response);
+        let response_str = String::from_utf8_lossy(response.as_ref());
         println!(
             "     Request {}: {:?} -> {:?} in {:?} ({:.3} μs)",
             i + 1,
@@ -344,7 +350,9 @@ async fn test_tell_message_api_comprehensive() {
 
     // Test 4B: High-volume ask() requests
     println!("\n🔸 Test 4B: High-Volume ask() Requests");
-    let volume_request = "GET /api/status".as_bytes();
+    let volume_request_str = "GET /api/status";
+    let volume_request = volume_request_str.as_bytes();
+    let volume_request_bytes = Bytes::from_static(volume_request_str.as_bytes());
     let volume_count = 100;
 
     println!("   High-volume test configuration:");
@@ -360,7 +368,7 @@ async fn test_tell_message_api_comprehensive() {
 
     for i in 0..volume_count {
         let req_start = Instant::now();
-        let _response = conn.ask(volume_request).await.unwrap();
+        let _response = conn.ask(volume_request_bytes.clone()).await.unwrap();
         let req_time = req_start.elapsed();
         volume_latencies.push(req_time);
 
@@ -409,7 +417,9 @@ async fn test_tell_message_api_comprehensive() {
 
     // Test 4C: ask() vs tell() comparison
     println!("\n🔸 Test 4C: ask() vs tell() Performance Comparison");
-    let comparison_request = "PING test message".as_bytes();
+    let comparison_request_str = "PING test message";
+    let comparison_request = comparison_request_str.as_bytes();
+    let comparison_request_bytes = Bytes::from_static(comparison_request_str.as_bytes());
     let comparison_count = 50;
 
     println!("   Comparison test configuration:");
@@ -437,7 +447,7 @@ async fn test_tell_message_api_comprehensive() {
     println!("\n   Testing ask() (request-response):");
     let ask_comp_start = Instant::now();
     for i in 0..comparison_count {
-        let _response = conn.ask(comparison_request).await.unwrap();
+        let _response = conn.ask(comparison_request_bytes.clone()).await.unwrap();
         if i % 10 == 0 {
             println!("     - ask() {}/{} completed", i, comparison_count);
         }

@@ -1,0 +1,508 @@
+═══════════════════════════════════════════════════════════════
+Step 1: All Unit & Integration Tests
+═══════════════════════════════════════════════════════════════
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)
+warning: field `deallocations` is never read
+  --> tests/bytemuck_allocation_tests.rs:99:5
+   |
+97 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+98 |     allocations: usize,
+99 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "bytemuck_allocation_tests") generated 1 warning
+warning: unused import: `kameo_remote::*`
+ --> tests/body_allocation_baseline.rs:8:5
+  |
+8 | use kameo_remote::*;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `deallocations` is never read
+  --> tests/body_allocation_baseline.rs:47:5
+   |
+45 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+46 |     allocations: usize,
+47 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "body_allocation_baseline") generated 2 warnings (run `cargo fix --test "body_allocation_baseline"` to apply 1 suggestion)
+warning: unused variable: `type_hash`
+  --> examples/console_tell_ask_server.rs:65:9
+   |
+65 |         type_hash: u32,
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_type_hash`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (example "console_tell_ask_server") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.39s
+     Running unittests src/lib.rs (target/debug/deps/kameo_remote-90626d82ae5fca82)
+
+running 152 tests
+test config::tests::test_custom_config ... ok
+test config::tests::test_config_clone ... ok
+test config::tests::test_default_config ... ok
+test config::tests::test_peer_retry_constant ... ok
+test connection_pool::tests::test_buffer_config_default ... ok
+test connection_pool::tests::test_connection_handle_debug ... ok
+test connection_pool::tests::test_buffer_config_minimum_size ... ok
+test connection_pool::tests::test_buffer_config_validation ... ok
+test config::tests::test_config_debug ... ok
+test connection_pool::tests::test_control_reserved_slots_bounds ... ok
+test connection_pool::tests::test_should_flush_rules ... ok
+test connection_pool::tests::test_streaming_threshold_calculation ... ok
+test connection_pool::tests::test_streaming_threshold_saturation ... ok
+test framing::tests::ask_response_payload_offset_aligned ... ok
+test framing::tests::actor_payload_offset_aligned ... ok
+test framing::tests::gossip_payload_is_16_byte_aligned ... ok
+test framing::tests::codec_trap_length_prefix_stripped_requires_more_padding ... ok
+test framing::tests::write_gossip_frame_prefix_sets_padding ... ok
+test framing::tests::write_ask_response_header_sets_length_and_pad ... ok
+test framing::tests::header_lengths_hold_for_varied_payload_sizes ... ok
+test handle::framing_tests::alignment_check_works_correctly ... ok
+test handle_builder::tests::test_builder_pattern ... ignored, gossip propagation timing variance in CI
+test handshake::tests::test_hello_new ... ok
+test handshake::tests::test_feature_serialization ... ok
+test handshake::tests::test_hello_serialization ... ok
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test handle::framing_tests::response_parses_with_padded_header ... ok
+test handle::framing_tests::actor_tell_parses_with_reordered_header ... ok
+test handle::framing_tests::decode_registry_message_handles_both_aligned_and_unaligned ... ok
+test handle::framing_tests::ask_raw_parses_with_padded_header ... ok
+test handle::framing_tests::gossip_registry_payload_deserializes_from_aligned_buffer ... ok
+test handshake::tests::test_peer_capabilities_from_hello_exchange_both_v2 ... ok
+test handshake::tests::test_hello_handshake_negotiation ... ok
+test handshake::tests::test_peer_capabilities_supports_feature ... ok
+test handshake::tests::test_peer_capabilities_from_hello_exchange_partial_features ... ok
+test peer_discovery::tests::test_bogon_filtering_link_local ... ok
+test peer_discovery::tests::test_bogon_filtering_loopback ... ok
+test peer_discovery::tests::test_clear_pending ... ok
+test peer_discovery::tests::test_connection_clears_failure_state ... ok
+test peer_discovery::tests::test_cleanup_expired_uses_unified_state ... ok
+test peer_discovery::tests::test_cleanup_expired_entries ... ok
+test peer_discovery::tests::test_exponential_backoff ... ok
+test peer_discovery::tests::test_filter_connected_peers ... ok
+test peer_discovery::tests::test_ipv6_link_local_blocked_by_default ... ok
+test peer_discovery::tests::test_ipv6_loopback_blocked_by_default ... ok
+test peer_discovery::tests::test_filter_self ... ok
+test peer_discovery::tests::test_ipv6_unique_local_respects_private_flag ... ok
+test connection_pool::tests::test_connection_pool_new ... ok
+test peer_discovery::tests::test_max_failures_removal ... ok
+test peer_discovery::tests::test_on_peer_list_gossip_respects_pending_peers ... ok
+test peer_discovery::tests::test_on_peer_list_gossip_skips_already_pending ... ok
+test peer_discovery::tests::test_peer_connection_lifecycle ... ok
+test peer_discovery::tests::test_peer_failure_transitions_atomic ... ok
+test peer_discovery::tests::test_peer_state_transitions_atomic ... ok
+test peer_discovery::tests::test_private_allowed_default ... ok
+test peer_discovery::tests::test_should_retry_backoff ... ok
+test peer_discovery::tests::test_soft_cap_limiting ... ok
+test peer_discovery::tests::test_unspecified_and_broadcast_blocked ... ok
+test peer_discovery::tests::test_unified_and_legacy_counts_match ... ok
+test priority::tests::test_consistency_level_clone ... ok
+test priority::tests::test_consistency_level_debug ... ok
+test priority::tests::test_consistency_level_default ... ok
+test priority::tests::test_consistency_level_equality ... ok
+test connection_pool::tests::test_set_registry ... ok
+test priority::tests::test_consistency_level_serialization ... ok
+test priority::tests::test_registration_priority_clone ... ok
+test priority::tests::test_registration_priority_debug ... ok
+test priority::tests::test_registration_priority_default ... ok
+test priority::tests::test_registration_priority_fanout_multiplier ... ok
+test priority::tests::test_registration_priority_immediate_retry_count ... ok
+test priority::tests::test_registration_priority_is_critical ... ok
+test priority::tests::test_registration_priority_ordering ... ok
+test priority::tests::test_registration_priority_serialization ... ok
+test priority::tests::test_registration_priority_should_trigger_immediate_gossip ... ok
+test registry::tests::test_gossip_result ... ok
+test registry::tests::test_add_peer ... ok
+test registry::tests::test_gossip_task ... ok
+test registry::tests::test_get_change_actor_name ... ok
+test registry::tests::test_historical_delta ... ok
+test registry::tests::test_apply_delta ... ok
+test registry::tests::test_deduplicate_changes ... ok
+test registry::tests::test_check_peer_consensus ... ok
+test registry::tests::test_cleanup_dead_peers ... ok
+test registry::tests::test_handle_peer_connection_failure ... ok
+test registry::tests::test_apply_delta_skip_local ... ok
+test registry::tests::test_peer_health_status ... ok
+test registry::tests::test_peer_info ... ok
+test registry::tests::test_peer_info_gossip_conversion ... ok
+test registry::tests::test_mesh_formation_metric_records_when_threshold_met ... ok
+test registry::tests::test_cleanup_stale_actors ... ok
+test registry::tests::test_peer_info_gossip_serialization ... ok
+test registry::tests::test_peer_info_local_factory ... ok
+test registry::tests::test_peer_list_gossip_serialization ... ok
+test registry::tests::test_lookup_actor_ttl ... ok
+test registry::tests::test_pending_failure ... ok
+test registry::tests::test_get_stats ... ok
+test registry::tests::test_lookup_actor ... ok
+test registry::tests::test_on_peer_list_gossip_ingests_known_peers_and_candidates ... ok
+test registry::tests::test_prepare_gossip_round_no_peers ... ok
+test registry::tests::test_peer_list_gossip_tasks_created ... ok
+test registry::tests::test_merge_full_sync ... ok
+test registry::tests::test_registry_stats ... ok
+test registry::tests::test_registry_change_serialization ... ok
+test registry::tests::test_resolve_peer_addr_ipv6_loopback_from_remote ... ok
+test registry::tests::test_resolve_peer_addr_backwards_compat_none ... ok
+test registry::tests::test_resolve_peer_addr_loopback_from_loopback ... ok
+test registry::tests::test_resolve_peer_addr_loopback_from_remote ... ok
+test registry::tests::test_resolve_peer_addr_with_invalid_string ... ok
+test registry::tests::test_resolve_peer_addr_with_ipv6_unspecified ... ok
+test registry::tests::test_register_actor ... ok
+test registry::tests::test_resolve_peer_addr_with_none ... ok
+test registry::tests::test_register_actor_duplicate ... ok
+test registry::tests::test_registry_delta_serialization ... ok
+test registry::tests::test_registry_message_variants ... ok
+test registry::tests::test_registry_creation ... ok
+test registry::tests::test_resolve_peer_addr_with_valid_bind_addr ... ok
+test registry::tests::test_resolve_peer_addr_with_unspecified_ip ... ok
+test registry::tests::test_prepare_gossip_round_with_peers ... ok
+test registry::tests::test_register_actor_with_priority ... ok
+test registry::tests::test_should_use_delta_state ... ok
+test remote_actor_location::tests::test_actor_location_clone ... ok
+test remote_actor_location::tests::test_actor_location_new ... ok
+test remote_actor_location::tests::test_actor_location_debug ... ok
+test remote_actor_location::tests::test_actor_location_new_with_priority ... ok
+test remote_actor_location::tests::test_actor_location_equality ... ok
+test remote_actor_location::tests::test_actor_location_new_with_wall_time ... ok
+test tests::test_current_timestamp ... ok
+test tests::test_error_conversions ... ok
+test tests::test_gossip_error_display ... ok
+test registry::tests::test_shutdown ... ok
+test tests::test_result_type ... ok
+test registry::tests::test_trigger_immediate_gossip ... ok
+test remote_actor_location::tests::test_actor_location_new_with_wall_time_and_priority ... ok
+test registry::tests::test_unregister_actor ... ok
+test remote_actor_location::tests::test_actor_location_serialization ... ok
+test remote_actor_location::tests::test_actor_location_with_metadata ... ok
+test tls::name::tests::test_decode_invalid ... ok
+test tls::name::tests::test_decode_without_suffix ... ok
+test tls::name::tests::test_dns_name_valid ... ok
+test tls::name::tests::test_encode_decode_roundtrip ... ok
+test typed::tests::pooled_payload_buf_semantics ... ok
+test typed::tests::typed_payload_parts_includes_hash_in_debug ... ok
+test tls::verifier::tests::test_extract_node_id_placeholder ... ok
+test tls::resolver::tests::test_resolver_creation ... ok
+test typed::tests::pool_reuse_and_cap_behavior ... ok
+test tls::tests::test_tls_config_creation ... ok
+test tls::tests::test_alpn_selection_v2_only ... ok
+test connection_pool::tests::test_connection_handle_send_data_closed ... ok
+test connection_pool::tests::test_connection_handle_send_data ... ok
+test connection_pool::tests::test_permit_lanes_allow_control_when_ask_exhausted ... ok
+test connection_pool::tests::test_task_tracker_replaces_old_handle ... ok
+test connection_pool::tests::test_task_tracker_aborts_on_drop ... ok
+test registry::tests::test_enforce_bounds ... ok
+
+test result: ok. 151 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/ask_reply_end_to_end.rs (target/debug/deps/ask_reply_end_to_end-e8a76ebb023c8aaa)
+
+running 2 tests
+[2m2026-01-23T11:01:34.029824Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '84d8d10f6a00afbb36589fbd7702a2c2c91fc7d0bd0f988123150102c9341f14'
+[2m2026-01-23T11:01:34.029918Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T11:01:34.030125Z[0m [31mERROR[0m [2mkameo_remote[0m[2m:[0m Network error connecting to peer [3mpeer_id[0m[2m=[0m84d8d10f6a00afbb36589fbd7702a2c2c91fc7d0bd0f988123150102c9341f14 [3maddr[0m[2m=[0m127.0.0.1:8004 [3merror[0m[2m=[0mConnection refused (os error 61)
+[2m2026-01-23T11:01:34.030233Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer 'e700c4617c1ab0264637819d83327b684041ff18e84be811b5cec598b2e49772'
+[2m2026-01-23T11:01:34.030250Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+test test_ask_timeout ... ok
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_end_to_end_ask_reply ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/ask_reply_simple.rs (target/debug/deps/ask_reply_simple-99982d509528d15c)
+
+running 2 tests
+[2m2026-01-23T11:01:34.064172Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '057fa94bc43267a60a3860834d2e2aad1a57426409370ce478394af2a3f9425f'
+[2m2026-01-23T11:01:34.064174Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '84d8d10f6a00afbb36589fbd7702a2c2c91fc7d0bd0f988123150102c9341f14'
+[2m2026-01-23T11:01:34.064264Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T11:01:34.064264Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_basic_ask_correlation ... ok
+🎫 [PERMIT] #45 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #77 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #109 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #141 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #173 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #205 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #237 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #269 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #301 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #333 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #365 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #397 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #429 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #461 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #493 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #525 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #557 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #589 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #621 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #653 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #685 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #717 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #749 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #781 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #813 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #845 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #877 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #909 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #941 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #973 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1000 acquiring control permit (available: 5/256)
+🎫 [PERMIT] #1005 acquiring control permit (available: 0/256)
+test test_ask_high_throughput ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running tests/ask_with_lookup_demo.rs (target/debug/deps/ask_with_lookup_demo-dcb2b1f4c65a401e)
+
+running 2 tests
+🚀 High-Throughput ask() Test
+=============================
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T11:01:34.712100Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor api_service at 127.0.0.1:41002 (priority: Immediate)
+[2m2026-01-23T11:01:34.712355Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.198ms, chunks: 1)
+🔍 FAST_PATH: Processing immediate priority actor: api_service propagation_time_ms=0.646ms
+
+📊 Test Configuration:
+   - Total requests: 1000
+   - Concurrent requests: 10
+
+🔥 Warming up...
+
+🔸 Running high-throughput test...
+   - Completed 10 requests
+   - Completed 110 requests
+   - Completed 210 requests
+   - Completed 310 requests
+   - Completed 410 requests
+   - Completed 510 requests
+   - Completed 610 requests
+   - Completed 710 requests
+   - Completed 810 requests
+   - Completed 910 requests
+🎫 [PERMIT] #1000 acquiring control permit (available: 24/256)
+
+📈 High-Throughput Results:
+   - Total time: 27.679709ms
+   - Total requests: 1000
+   - Throughput: 36128 req/sec
+   - Average latency: 232.954µs (232.954 μs)
+   - P50 latency: 220.667µs (220.667 μs)
+   - P95 latency: 324.25µs (324.250 μs)
+   - P99 latency: 360.083µs (360.083 μs)
+
+✅ High-throughput test completed!
+🚀 Ask() with Lookup() Performance Test
+=======================================
+📡 Setting up 3-node cluster...
+test test_ask_high_throughput ... ok
+
+🔗 Establishing peer connections...
+✅ All nodes connected
+
+📋 Registering service actors...
+[2m2026-01-23T11:01:34.826226Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor database_service at 127.0.0.1:40001 (priority: Immediate)
+[2m2026-01-23T11:01:34.826351Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.104ms, chunks: 1)
+   ✅ Node2: registered 'database_service'
+[2m2026-01-23T11:01:34.830002Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor compute_service at 127.0.0.1:40002 (priority: Immediate)
+[2m2026-01-23T11:01:34.830093Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.086ms, chunks: 1)
+   ✅ Node2: registered 'compute_service'
+[2m2026-01-23T11:01:34.830724Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor cache_service at 127.0.0.1:40003 (priority: Immediate)
+[2m2026-01-23T11:01:34.830812Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.083ms, chunks: 1)
+🔍 FAST_PATH: Processing immediate priority actor: compute_service propagation_time_ms=1.439ms
+   ✅ Node3: registered 'cache_service'
+[2m2026-01-23T11:01:34.933458Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚨 CONSENSUS WARNING: Starting consensus query for a peer we still have an ACTIVE SOCKET CONNECTION to! This indicates a logic error. [3mtarget_peer[0m[2m=[0m127.0.0.1:30001
+   🔍 Stats after registration:
+      node1=RegistryStats { local_actors: 0, known_actors: 3, active_peers: 4, failed_peers: 0, total_gossip_rounds: 0, current_sequence: 0, uptime_seconds: 0, last_gossip_timestamp: 1769166094, delta_exchanges: 3, full_sync_exchanges: 4, delta_history_size: 0, avg_delta_size: 0.0, discovered_peers: 2, failed_discovery_attempts: 0, avg_mesh_connectivity: 2.0, mesh_formation_time_ms: None }
+      node2=RegistryStats { local_actors: 2, known_actors: 0, active_peers: 0, failed_peers: 1, total_gossip_rounds: 0, current_sequence: 0, uptime_seconds: 0, last_gossip_timestamp: 1769166094, delta_exchanges: 0, full_sync_exchanges: 2, delta_history_size: 0, avg_delta_size: 0.0, discovered_peers: 0, failed_discovery_attempts: 0, avg_mesh_connectivity: 0.0, mesh_formation_time_ms: None }
+      node3=RegistryStats { local_actors: 1, known_actors: 2, active_peers: 2, failed_peers: 1, total_gossip_rounds: 0, current_sequence: 0, uptime_seconds: 0, last_gossip_timestamp: 1769166094, delta_exchanges: 0, full_sync_exchanges: 2, delta_history_size: 0, avg_delta_size: 0.0, discovered_peers: 0, failed_discovery_attempts: 0, avg_mesh_connectivity: 0.0, mesh_formation_time_ms: None }
+
+📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION
+==============================================
+   ✅ Created actor references:
+     - database_service at 127.0.0.1:40001 (peer: 05e3503c998ff4afc2d390dbd3e667a715171751d8838cb964f7d3a9631c1327)
+     - compute_service at 127.0.0.1:40002 (peer: 05e3503c998ff4afc2d390dbd3e667a715171751d8838cb964f7d3a9631c1327)
+     - cache_service at 127.0.0.1:40003 (peer: d02da1828c9cf14a0f7c7627315e9704e288f4eb52ec8eb03c7b01c9bebcae19)
+   📈 Total lookup time: 130.208µs (130.208 μs)
+
+📊 PART 2: ASK() REQUEST-RESPONSE PERFORMANCE
+============================================
+
+🔸 Test 2A: Individual ask() calls
+   Queries to execute:
+     1. database_service <- "SELECT * FROM users WHERE id = 123"
+     2. compute_service <- "CALCULATE fibonacci(40)"
+     3. cache_service <- "GET user:123:profile"
+     4. database_service <- "INSERT INTO logs VALUES (...)"
+     5. compute_service <- "PROCESS image_resize(1024x768)"
+     6. cache_service <- "SET session:abc123 = data"
+[2m2026-01-23T11:01:34.936078Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚨 CONSENSUS WARNING: Starting consensus query for a peer we still have an ACTIVE SOCKET CONNECTION to! This indicates a logic error. [3mtarget_peer[0m[2m=[0m127.0.0.1:30001
+     Query 1 response: "RECEIVED:34 bytes, content: 'SELECT * FROM users WHERE id = 123'" in 552.5µs (552.500 μs)
+     Query 2 response: "RECEIVED:23 bytes, content: 'CALCULATE fibonacci(40)'" in 192.917µs (192.917 μs)
+     Query 3 response: "RECEIVED:20 bytes, content: 'GET user:123:profile'" in 178.5µs (178.500 μs)
+     Query 4 response: "RECEIVED:29 bytes, content: 'INSERT INTO logs VALUES (...)'" in 177µs (177.000 μs)
+     Query 5 response: "RECEIVED:30 bytes, content: 'PROCESS image_resize(1024x768)'" in 179.125µs (179.125 μs)
+     Query 6 response: "RECEIVED:25 bytes, content: 'SET session:abc123 = data'" in 178.125µs (178.125 μs)
+   📈 Individual ask() Results:
+     - Total time: 1.500916ms (1500.916 μs)
+     - Average per query: 250.152µs (250.152 μs)
+
+🔸 Test 2B: Parallel ask() calls
+     Query 1 response: "RECEIVED:34 bytes, content: 'SELECT * FROM users WHERE id = 123'"
+     Query 2 response: "RECEIVED:23 bytes, content: 'CALCULATE fibonacci(40)'"
+     Query 3 response: "RECEIVED:20 bytes, content: 'GET user:123:profile'"
+     Query 4 response: "RECEIVED:29 bytes, content: 'INSERT INTO logs VALUES (...)'"
+     Query 5 response: "RECEIVED:30 bytes, content: 'PROCESS image_resize(1024x768)'"
+     Query 6 response: "RECEIVED:25 bytes, content: 'SET session:abc123 = data'"
+   📈 Parallel ask() Results:
+     - Total time: 295.375µs (295.375 μs)
+     - Average per query: 49.229µs (49.229 μs)
+     - Speedup vs sequential: 5.08x
+
+📊 PART 3: ASK() VS TELL() COMPARISON
+=====================================
+
+🔸 Test 3A: tell() performance (100 iterations)
+🎫 [PERMIT] #1063 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1095 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1127 acquiring control permit (available: 0/256)
+   📈 tell() Results:
+     - Total: 450.333µs (450.333 μs)
+     - Average: 4.503µs (4.503 μs)
+     - Throughput: 222058 ops/sec
+
+🔸 Test 3B: ask() performance (100 iterations)
+   📈 ask() Results:
+     - Total: 13.498ms (13498.000 μs)
+     - Average: 134.98µs (134.980 μs)
+     - Throughput: 7409 ops/sec
+
+   🎯 ask() overhead: 29.97x slower than tell()
+
+📊 PART 4: DELEGATED REPLY SENDER
+=================================
+
+🔸 Test 4A: ask_with_reply_sender()
+   - Request sent, got DelegatedReplySender
+   - Reply sender: DelegatedReplySender { request_len: 26, timeout: None, elapsed: 2.041µs, is_timed_out: false }
+   - Mock response: "RESPONSE:26"
+
+🔸 Test 4B: ask_with_timeout_and_reply()
+   - Request sent with 100ms timeout
+   - Reply sender: DelegatedReplySender { request_len: 26, timeout: Some(100ms), elapsed: 1.708µs, is_timed_out: false }
+
+📊 PART 5: ERROR HANDLING
+========================
+
+🔸 Test 5A: Lookup non-existent actor
+   ✅ Correctly returned None for non-existent actor
+
+📋 RECOMMENDATIONS
+==================
+
+✅ Best Practices:
+   1. Use ask() for operations that require a response (queries, calculations)
+   2. Use tell() for fire-and-forget operations (logging, notifications)
+   3. Cache actor refs to avoid repeated lookups
+   4. Use parallel ask() calls when querying multiple services
+   5. Consider timeouts for ask() operations in production
+
+🔧 Code Examples:
+   // Create actor ref once:
+   let location = registry.lookup("database_service").await?;
+   let conn = registry.get_connection(peer_addr).await?;
+
+   // Sequential queries:
+   let result1 = conn.ask(query1).await?;
+   let result2 = conn.ask(query2).await?;
+
+   // Parallel queries:
+   let (r1, r2) = tokio::join!(
+       conn1.ask(query1),
+       conn2.ask(query2)
+   );
+
+⚠️  NOTE: Current ask() implementation returns mock responses.
+   In production, implement proper request-response correlation.
+
+✅ Test completed successfully!
+test test_ask_with_lookup_and_performance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/batch_ask_performance.rs (target/debug/deps/batch_ask_performance-c92f09ae9901fdef)
+
+running 2 tests
+[2m2026-01-23T11:01:34.963097Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:51443 [3mpeer_id[0m[2m=[0mdfad350003f3bc6854dbec9c6a3c038968a020aa23d200ef7d14a46b7ea2c705
+[2m2026-01-23T11:01:34.963099Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:51444 [3mpeer_id[0m[2m=[0m09407c68d4bb8d0811add05b2375345f3bb5932089aad68cbfd89ea766906202
+[2m2026-01-23T11:01:34.964855Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T11:01:34.964856Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T11:01:34.965002Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:51444
+[2m2026-01-23T11:01:34.965003Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:51443
+[2m2026-01-23T11:01:34.965408Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:51445 [3mpeer_id[0m[2m=[0mbfafe5dd40f58490c305784fcc2c03d49fe7ea2100723082a2ac0db7de563c3a
+[2m2026-01-23T11:01:34.965424Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:51446 [3mpeer_id[0m[2m=[0m989bf96967df1b179f03cc441831f20c0dae3679b345ef953b21dafd86b644f1
+[2m2026-01-23T11:01:34.966052Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T11:01:34.966061Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:51445
+[2m2026-01-23T11:01:34.966085Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T11:01:34.966096Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:51446
+[2m2026-01-23T11:01:34.966296Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:51443
+[2m2026-01-23T11:01:34.966299Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:51444
+[2m2026-01-23T11:01:34.966621Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:51445
+[2m2026-01-23T11:01:34.966626Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:51446
+[2m2026-01-23T11:01:35.068641Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:51444 using placeholder SNI peer-51444.kameo.invalid (NodeId unknown)
+[2m2026-01-23T11:01:35.068727Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:51443 using placeholder SNI peer-51443.kameo.invalid (NodeId unknown)
+[2m2026-01-23T11:01:35.070065Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:51447
+[2m2026-01-23T11:01:35.070068Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:51448
+[2m2026-01-23T11:01:35.070137Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:51447 [3mpeer[0m[2m=[0m127.0.0.1:51447[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:51447
+[2m2026-01-23T11:01:35.070139Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:51448 [3mpeer[0m[2m=[0m127.0.0.1:51448[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:51448
+[2m2026-01-23T11:01:35.073353Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:51443 (NodeId: dfad350003)
+[2m2026-01-23T11:01:35.073352Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:51444 (NodeId: 09407c68d4)
+[2m2026-01-23T11:01:35.073930Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:51447 [3mpeer[0m[2m=[0m127.0.0.1:51447[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:51447
+[2m2026-01-23T11:01:35.073937Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:51448 [3mpeer[0m[2m=[0m127.0.0.1:51448[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:51448
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T11:01:35.074875Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:51444
+[2m2026-01-23T11:01:35.074875Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:51443
+[2m2026-01-23T11:01:35.074895Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:51444
+[2m2026-01-23T11:01:35.074896Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:51443
+[2m2026-01-23T11:01:35.074985Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 0 connections
+[2m2026-01-23T11:01:35.075005Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 0 connections
+[2m2026-01-23T11:01:35.075124Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:51443 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T11:01:35.075189Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:51443
+test test_batch_ask_with_timeout ... ok
+[2m2026-01-23T11:01:35.075607Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:51448 [3mnew_addr[0m[2m=[0m127.0.0.1:51446 [3mnode_id[0m[2m=[0mSome(PublicKey(989bf96967…))
+[2m2026-01-23T11:01:35.075775Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:51448 [3mchannel_id[0m[2m=[0mGlobal
+🎫 [PERMIT] #1000 acquiring control permit (available: 32/256)
+🎫 [PERMIT] #1034 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1066 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1098 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1130 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1162 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1194 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1234 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1266 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1298 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1334 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1366 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1398 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1434 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1466 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1498 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1530 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1562 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1594 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1634 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1666 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1698 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1734 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1766 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1798 acquiring control permit (available: 0/256)
+test test_batch_ask_performance has been running for over 60 seconds

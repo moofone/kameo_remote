@@ -1,5 +1,6 @@
 mod common;
 
+use bytes::Bytes;
 use common::{create_tls_node, wait_for_condition};
 use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler, RegistryMessage};
 use kameo_remote::GossipConfig;
@@ -22,10 +23,11 @@ impl ActorMessageHandler for TestActorHandler {
         payload: &[u8],
         correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_> {
-        let payload = payload.to_vec();
+        let payload_len = payload.len();
+        let should_reply = correlation_id.is_some();
         Box::pin(async move {
-            if correlation_id.is_some() {
-                let response = format!("RESPONSE:{}", payload.len()).into_bytes();
+            if should_reply {
+                let response = Bytes::from(format!("RESPONSE:{}", payload_len).into_bytes());
                 Ok(Some(response))
             } else {
                 Ok(None)
@@ -83,17 +85,17 @@ async fn test_end_to_end_ask_reply() {
     {
         let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
 
-        let request = encode_actor_ask(b"Hello from test");
+        let request = Bytes::from(encode_actor_ask(b"Hello from test"));
         let start = std::time::Instant::now();
-        let response = conn.ask(&request).await.unwrap();
+        let response = conn.ask(request).await.unwrap();
         let elapsed = start.elapsed();
 
         info!(
             "Got response in {:?}: {:?}",
             elapsed,
-            String::from_utf8_lossy(&response)
+            String::from_utf8_lossy(response.as_ref())
         );
-        assert_eq!(response, b"RESPONSE:15"); // Mock response with request length
+        assert_eq!(response.as_ref(), b"RESPONSE:15"); // Mock response with request length
     }
 
     info!("=== Test 2: Multiple concurrent asks with correlation tracking ===");
@@ -108,8 +110,8 @@ async fn test_end_to_end_ask_reply() {
             let handle = tokio::spawn(async move {
                 let request = format!("Concurrent request {}", i).into_bytes();
                 let payload_len = request.len();
-                let request_bytes = encode_actor_ask(request);
-                let response = conn_clone.ask(&request_bytes).await.unwrap();
+                let request_bytes = Bytes::from(encode_actor_ask(request));
+                let response = conn_clone.ask(request_bytes).await.unwrap();
                 (i, response, payload_len)
             });
             handles.push(handle);
@@ -119,7 +121,7 @@ async fn test_end_to_end_ask_reply() {
         for handle in handles {
             let (i, response, payload_len) = handle.await.unwrap();
             let expected = format!("RESPONSE:{}", payload_len).into_bytes();
-            assert_eq!(response, expected);
+            assert_eq!(response.as_ref(), expected);
             info!("Request {} correctly correlated", i);
         }
 
@@ -145,16 +147,19 @@ async fn test_end_to_end_ask_reply() {
         // On Node A: Send the ask and wait for response
         let response_future = {
             let conn_clone = conn.clone();
-            let request_bytes = encode_actor_ask(request_payload.clone());
-            tokio::spawn(async move { conn_clone.ask(&request_bytes).await })
+            let request_bytes = Bytes::from(encode_actor_ask(request_payload.clone()));
+            tokio::spawn(async move { conn_clone.ask(request_bytes).await })
         };
 
         // Give the message time to arrive at Node B
         sleep(Duration::from_millis(10)).await;
 
         let response = response_future.await.unwrap().unwrap();
-        info!("Got response: {:?}", String::from_utf8_lossy(&response));
-        assert_eq!(response, b"RESPONSE:20");
+        info!(
+            "Got response: {:?}",
+            String::from_utf8_lossy(response.as_ref())
+        );
+        assert_eq!(response.as_ref(), b"RESPONSE:20");
     }
 
     info!("=== Test 4: Performance test ===");
@@ -165,9 +170,9 @@ async fn test_end_to_end_ask_reply() {
         let start = std::time::Instant::now();
 
         for i in 0..num_requests {
-            let request = encode_actor_ask(format!("Perf test {}", i).into_bytes());
-            let response = conn.ask(&request).await.unwrap();
-            assert!(response.starts_with(b"RESPONSE:"));
+            let request = Bytes::from(encode_actor_ask(format!("Perf test {}", i).into_bytes()));
+            let response = conn.ask(request).await.unwrap();
+            assert!(response.as_ref().starts_with(b"RESPONSE:"));
         }
 
         let elapsed = start.elapsed();
@@ -207,4 +212,86 @@ async fn test_ask_timeout() {
     }
 
     handle_a.shutdown().await;
+}
+
+/// Benchmark ring-buffer ask vs streaming ask for the same payload size.
+#[tokio::test]
+#[ignore]
+async fn benchmark_streaming_ask_vs_ring_buffer() {
+    let _ = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(
+            EnvFilter::from_default_env().add_directive("kameo_remote=warn".parse().unwrap()),
+        ))
+        .try_init();
+
+    let config = GossipConfig::default();
+    let handle_a = create_tls_node(config.clone()).await.unwrap();
+    let handle_b = create_tls_node(config).await.unwrap();
+    handle_b
+        .registry
+        .set_actor_message_handler(Arc::new(TestActorHandler))
+        .await;
+
+    let addr_b = handle_b.registry.bind_addr;
+    let peer_b_id = handle_b.registry.peer_id.clone();
+    let peer_b = handle_a.add_peer(&peer_b_id).await;
+    peer_b.connect(&addr_b).await.unwrap();
+
+    assert!(
+        wait_for_condition(Duration::from_secs(3), || async {
+            handle_a.stats().await.active_peers > 0
+        })
+        .await,
+        "TLS peer should connect"
+    );
+
+    let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+
+    let payload_size = 256 * 1024; // 256KB (below default streaming threshold)
+    let payload = vec![0u8; payload_size];
+    let actor_id = 42u64;
+    let actor_id_str = actor_id.to_string();
+
+    let message = RegistryMessage::ActorMessage {
+        actor_id: actor_id_str,
+        type_hash: TEST_TYPE_HASH,
+        payload: payload.clone(),
+        correlation_id: None,
+    };
+    let request_bytes = Bytes::from(
+        rkyv::to_bytes::<rkyv::rancor::Error>(&message)
+            .unwrap()
+            .to_vec(),
+    );
+
+    let iterations = 50;
+
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        let response = conn.ask(request_bytes.clone()).await.unwrap();
+        assert!(response.as_ref().starts_with(b"RESPONSE:"));
+    }
+    let ring_elapsed = start.elapsed();
+
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        let response = conn
+            .ask_streaming(&payload, TEST_TYPE_HASH, actor_id, Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert!(response.as_ref().starts_with(b"RESPONSE:"));
+    }
+    let streaming_elapsed = start.elapsed();
+
+    println!(
+        "Ring buffer ask ({} bytes): {:?} for {} iters",
+        payload_size, ring_elapsed, iterations
+    );
+    println!(
+        "Streaming ask ({} bytes): {:?} for {} iters",
+        payload_size, streaming_elapsed, iterations
+    );
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
 }

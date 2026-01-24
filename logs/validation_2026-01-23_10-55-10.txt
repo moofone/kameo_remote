@@ -1,0 +1,1920 @@
+═══════════════════════════════════════════════════════════════
+Step 1: All Unit & Integration Tests
+═══════════════════════════════════════════════════════════════
+warning: unused import: `kameo_remote::*`
+ --> tests/body_allocation_baseline.rs:8:5
+  |
+8 | use kameo_remote::*;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `deallocations` is never read
+  --> tests/body_allocation_baseline.rs:47:5
+   |
+45 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+46 |     allocations: usize,
+47 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `deallocations` is never read
+  --> tests/bytemuck_allocation_tests.rs:99:5
+   |
+97 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+98 |     allocations: usize,
+99 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "body_allocation_baseline") generated 2 warnings (run `cargo fix --test "body_allocation_baseline"` to apply 1 suggestion)
+warning: `kameo_remote` (test "bytemuck_allocation_tests") generated 1 warning
+warning: unused variable: `type_hash`
+  --> examples/console_tell_ask_server.rs:65:9
+   |
+65 |         type_hash: u32,
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_type_hash`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (example "console_tell_ask_server") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/kameo_remote-90626d82ae5fca82)
+
+running 152 tests
+test config::tests::test_peer_retry_constant ... ok
+test config::tests::test_default_config ... ok
+test connection_pool::tests::test_buffer_config_default ... ok
+test config::tests::test_custom_config ... ok
+test config::tests::test_config_clone ... ok
+test connection_pool::tests::test_buffer_config_minimum_size ... ok
+test connection_pool::tests::test_buffer_config_validation ... ok
+test connection_pool::tests::test_connection_handle_debug ... ok
+test config::tests::test_config_debug ... ok
+test connection_pool::tests::test_control_reserved_slots_bounds ... ok
+test connection_pool::tests::test_should_flush_rules ... ok
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test connection_pool::tests::test_streaming_threshold_calculation ... ok
+test connection_pool::tests::test_streaming_threshold_saturation ... ok
+test framing::tests::actor_payload_offset_aligned ... ok
+test framing::tests::ask_response_payload_offset_aligned ... ok
+test framing::tests::codec_trap_length_prefix_stripped_requires_more_padding ... ok
+test framing::tests::gossip_payload_is_16_byte_aligned ... ok
+test framing::tests::header_lengths_hold_for_varied_payload_sizes ... ok
+test framing::tests::write_ask_response_header_sets_length_and_pad ... ok
+test framing::tests::write_gossip_frame_prefix_sets_padding ... ok
+test handle::framing_tests::alignment_check_works_correctly ... ok
+test handle::framing_tests::actor_tell_parses_with_reordered_header ... ok
+test handle_builder::tests::test_builder_pattern ... ignored, gossip propagation timing variance in CI
+test handle::framing_tests::ask_raw_parses_with_padded_header ... ok
+test handle::framing_tests::decode_registry_message_handles_both_aligned_and_unaligned ... ok
+test handle::framing_tests::gossip_registry_payload_deserializes_from_aligned_buffer ... ok
+test handshake::tests::test_feature_serialization ... ok
+test handle::framing_tests::response_parses_with_padded_header ... ok
+test handshake::tests::test_hello_new ... ok
+test handshake::tests::test_hello_serialization ... ok
+test handshake::tests::test_peer_capabilities_from_hello_exchange_both_v2 ... ok
+test handshake::tests::test_hello_handshake_negotiation ... ok
+test handshake::tests::test_peer_capabilities_from_hello_exchange_partial_features ... ok
+test handshake::tests::test_peer_capabilities_supports_feature ... ok
+test peer_discovery::tests::test_bogon_filtering_link_local ... ok
+test peer_discovery::tests::test_bogon_filtering_loopback ... ok
+test peer_discovery::tests::test_cleanup_expired_entries ... ok
+test peer_discovery::tests::test_cleanup_expired_uses_unified_state ... ok
+test peer_discovery::tests::test_clear_pending ... ok
+test peer_discovery::tests::test_connection_clears_failure_state ... ok
+test peer_discovery::tests::test_exponential_backoff ... ok
+test peer_discovery::tests::test_filter_connected_peers ... ok
+test peer_discovery::tests::test_filter_self ... ok
+test peer_discovery::tests::test_ipv6_link_local_blocked_by_default ... ok
+test peer_discovery::tests::test_ipv6_loopback_blocked_by_default ... ok
+test peer_discovery::tests::test_ipv6_unique_local_respects_private_flag ... ok
+test peer_discovery::tests::test_max_failures_removal ... ok
+test peer_discovery::tests::test_on_peer_list_gossip_respects_pending_peers ... ok
+test connection_pool::tests::test_connection_pool_new ... ok
+test peer_discovery::tests::test_on_peer_list_gossip_skips_already_pending ... ok
+test peer_discovery::tests::test_peer_connection_lifecycle ... ok
+test peer_discovery::tests::test_peer_failure_transitions_atomic ... ok
+test peer_discovery::tests::test_peer_state_transitions_atomic ... ok
+test peer_discovery::tests::test_private_allowed_default ... ok
+test peer_discovery::tests::test_should_retry_backoff ... ok
+test peer_discovery::tests::test_soft_cap_limiting ... ok
+test peer_discovery::tests::test_unified_and_legacy_counts_match ... ok
+test peer_discovery::tests::test_unspecified_and_broadcast_blocked ... ok
+test connection_pool::tests::test_set_registry ... ok
+test priority::tests::test_consistency_level_clone ... ok
+test priority::tests::test_consistency_level_debug ... ok
+test priority::tests::test_consistency_level_default ... ok
+test priority::tests::test_consistency_level_equality ... ok
+test priority::tests::test_consistency_level_serialization ... ok
+test priority::tests::test_registration_priority_clone ... ok
+test priority::tests::test_registration_priority_debug ... ok
+test priority::tests::test_registration_priority_default ... ok
+test priority::tests::test_registration_priority_fanout_multiplier ... ok
+test priority::tests::test_registration_priority_immediate_retry_count ... ok
+test priority::tests::test_registration_priority_is_critical ... ok
+test priority::tests::test_registration_priority_ordering ... ok
+test priority::tests::test_registration_priority_serialization ... ok
+test priority::tests::test_registration_priority_should_trigger_immediate_gossip ... ok
+test registry::tests::test_add_peer ... ok
+test registry::tests::test_gossip_result ... ok
+test registry::tests::test_gossip_task ... ok
+test registry::tests::test_apply_delta ... ok
+test registry::tests::test_get_change_actor_name ... ok
+test registry::tests::test_deduplicate_changes ... ok
+test registry::tests::test_historical_delta ... ok
+test registry::tests::test_apply_delta_skip_local ... ok
+test registry::tests::test_cleanup_dead_peers ... ok
+test registry::tests::test_peer_health_status ... ok
+test registry::tests::test_peer_info ... ok
+test registry::tests::test_peer_info_gossip_conversion ... ok
+test registry::tests::test_handle_peer_connection_failure ... ok
+test registry::tests::test_check_peer_consensus ... ok
+test registry::tests::test_mesh_formation_metric_records_when_threshold_met ... ok
+test registry::tests::test_peer_info_local_factory ... ok
+test registry::tests::test_peer_info_gossip_serialization ... ok
+test registry::tests::test_peer_list_gossip_serialization ... ok
+test registry::tests::test_lookup_actor_ttl ... ok
+test registry::tests::test_cleanup_stale_actors ... ok
+test registry::tests::test_get_stats ... ok
+test registry::tests::test_lookup_actor ... ok
+test registry::tests::test_pending_failure ... ok
+test registry::tests::test_on_peer_list_gossip_ingests_known_peers_and_candidates ... ok
+test registry::tests::test_prepare_gossip_round_no_peers ... ok
+test registry::tests::test_peer_list_gossip_tasks_created ... ok
+test registry::tests::test_registry_change_serialization ... ok
+test registry::tests::test_registry_stats ... ok
+test registry::tests::test_merge_full_sync ... ok
+test registry::tests::test_registry_creation ... ok
+test registry::tests::test_resolve_peer_addr_backwards_compat_none ... ok
+test registry::tests::test_registry_delta_serialization ... ok
+test registry::tests::test_resolve_peer_addr_ipv6_loopback_from_remote ... ok
+test registry::tests::test_register_actor ... ok
+test registry::tests::test_register_actor_duplicate ... ok
+test registry::tests::test_resolve_peer_addr_loopback_from_loopback ... ok
+test registry::tests::test_resolve_peer_addr_loopback_from_remote ... ok
+test registry::tests::test_resolve_peer_addr_with_invalid_string ... ok
+test registry::tests::test_prepare_gossip_round_with_peers ... ok
+test registry::tests::test_resolve_peer_addr_with_ipv6_unspecified ... ok
+test registry::tests::test_resolve_peer_addr_with_none ... ok
+test registry::tests::test_registry_message_variants ... ok
+test registry::tests::test_resolve_peer_addr_with_unspecified_ip ... ok
+test registry::tests::test_resolve_peer_addr_with_valid_bind_addr ... ok
+test registry::tests::test_register_actor_with_priority ... ok
+test remote_actor_location::tests::test_actor_location_clone ... ok
+test registry::tests::test_should_use_delta_state ... ok
+test remote_actor_location::tests::test_actor_location_debug ... ok
+test remote_actor_location::tests::test_actor_location_equality ... ok
+test remote_actor_location::tests::test_actor_location_new_with_priority ... ok
+test remote_actor_location::tests::test_actor_location_new_with_wall_time ... ok
+test tests::test_current_timestamp ... ok
+test remote_actor_location::tests::test_actor_location_new ... ok
+test registry::tests::test_trigger_immediate_gossip ... ok
+test tests::test_gossip_error_display ... ok
+test tests::test_error_conversions ... ok
+test tests::test_result_type ... ok
+test registry::tests::test_shutdown ... ok
+test remote_actor_location::tests::test_actor_location_new_with_wall_time_and_priority ... ok
+test registry::tests::test_unregister_actor ... ok
+test tls::name::tests::test_decode_invalid ... ok
+test remote_actor_location::tests::test_actor_location_serialization ... ok
+test remote_actor_location::tests::test_actor_location_with_metadata ... ok
+test tls::name::tests::test_decode_without_suffix ... ok
+test tls::name::tests::test_dns_name_valid ... ok
+test typed::tests::pooled_payload_buf_semantics ... ok
+test tls::name::tests::test_encode_decode_roundtrip ... ok
+test typed::tests::typed_payload_parts_includes_hash_in_debug ... ok
+test tls::verifier::tests::test_extract_node_id_placeholder ... ok
+test tls::resolver::tests::test_resolver_creation ... ok
+test typed::tests::pool_reuse_and_cap_behavior ... ok
+test tls::tests::test_tls_config_creation ... ok
+test tls::tests::test_alpn_selection_v2_only ... ok
+test connection_pool::tests::test_permit_lanes_allow_control_when_ask_exhausted ... ok
+test connection_pool::tests::test_connection_handle_send_data_closed ... ok
+test connection_pool::tests::test_connection_handle_send_data ... ok
+test connection_pool::tests::test_task_tracker_replaces_old_handle ... ok
+test connection_pool::tests::test_task_tracker_aborts_on_drop ... ok
+test registry::tests::test_enforce_bounds ... ok
+
+test result: ok. 151 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/ask_reply_end_to_end.rs (target/debug/deps/ask_reply_end_to_end-e8a76ebb023c8aaa)
+
+running 2 tests
+[2m2026-01-23T14:55:11.095069Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59516 [3mpeer_id[0m[2m=[0m6eef4de848deac77da7f2bfe345856687dfd6abb15b3cc21ab89f2b70b3b92be
+[2m2026-01-23T14:55:11.095074Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59517 [3mpeer_id[0m[2m=[0m510fa087605ecd4fcb2964adf506409c55a4562031141ad3148912ead0205a01
+[2m2026-01-23T14:55:11.095720Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:11.095721Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:11.095760Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59516
+[2m2026-01-23T14:55:11.095761Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59517
+[2m2026-01-23T14:55:11.095935Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '84d8d10f6a00afbb36589fbd7702a2c2c91fc7d0bd0f988123150102c9341f14'
+[2m2026-01-23T14:55:11.095955Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:11.096055Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59516
+[2m2026-01-23T14:55:11.096078Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59519 [3mpeer_id[0m[2m=[0m0bc93dbedb0ce2b9f28a7ba3d2af9ff26fc17f408de841392265e7711a07076e
+[2m2026-01-23T14:55:11.096111Z[0m [31mERROR[0m [2mkameo_remote[0m[2m:[0m Network error connecting to peer [3mpeer_id[0m[2m=[0m84d8d10f6a00afbb36589fbd7702a2c2c91fc7d0bd0f988123150102c9341f14 [3maddr[0m[2m=[0m127.0.0.1:8004 [3merror[0m[2m=[0mConnection refused (os error 61)
+[2m2026-01-23T14:55:11.096144Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 0 connections
+test test_ask_timeout ... ok
+[2m2026-01-23T14:55:11.096453Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:11.096460Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59519
+[2m2026-01-23T14:55:11.096469Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m actor message handler registered
+[2m2026-01-23T14:55:11.096516Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '0bc93dbedb0ce2b9f28a7ba3d2af9ff26fc17f408de841392265e7711a07076e'
+[2m2026-01-23T14:55:11.096531Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:11.096578Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59517
+[2m2026-01-23T14:55:11.096605Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59519
+[2m2026-01-23T14:55:11.096662Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:59519 using NodeId 0bc93dbedb
+[2m2026-01-23T14:55:11.096990Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59520
+[2m2026-01-23T14:55:11.097016Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59520 [3mpeer[0m[2m=[0m127.0.0.1:59520[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59520
+[2m2026-01-23T14:55:11.098569Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:59519 (NodeId: 0bc93dbedb)
+[2m2026-01-23T14:55:11.098977Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59520 [3mpeer[0m[2m=[0m127.0.0.1:59520[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59520
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T14:55:11.099358Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:59519
+[2m2026-01-23T14:55:11.099371Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:59519
+[2m2026-01-23T14:55:11.099383Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0m0bc93dbedb0ce2b9f28a7ba3d2af9ff26fc17f408de841392265e7711a07076e
+[2m2026-01-23T14:55:11.099390Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0m0bc93dbedb0ce2b9f28a7ba3d2af9ff26fc17f408de841392265e7711a07076e [3maddr[0m[2m=[0m127.0.0.1:59519
+[2m2026-01-23T14:55:11.099408Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59519 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:11.099441Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:59519
+[2m2026-01-23T14:55:11.099663Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59520 [3mnew_addr[0m[2m=[0m127.0.0.1:59517 [3mnode_id[0m[2m=[0mSome(PublicKey(510fa08760…))
+[2m2026-01-23T14:55:11.099735Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59520 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:11.121591Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:11.121647Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+test test_end_to_end_ask_reply ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/ask_reply_simple.rs (target/debug/deps/ask_reply_simple-99982d509528d15c)
+
+running 2 tests
+[2m2026-01-23T14:55:11.128812Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '84d8d10f6a00afbb36589fbd7702a2c2c91fc7d0bd0f988123150102c9341f14'
+[2m2026-01-23T14:55:11.128821Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '057fa94bc43267a60a3860834d2e2aad1a57426409370ce478394af2a3f9425f'
+[2m2026-01-23T14:55:11.128851Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:11.128857Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_basic_ask_correlation ... ok
+🎫 [PERMIT] #45 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #77 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #109 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #141 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #173 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #205 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #237 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #269 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #301 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #333 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #365 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #397 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #429 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #461 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #493 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #525 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #557 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #589 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #621 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #653 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #685 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #717 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #749 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #781 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #813 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #845 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #877 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #909 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #941 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #973 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1000 acquiring control permit (available: 5/256)
+🎫 [PERMIT] #1005 acquiring control permit (available: 0/256)
+test test_ask_high_throughput ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running tests/ask_with_lookup_demo.rs (target/debug/deps/ask_with_lookup_demo-dcb2b1f4c65a401e)
+
+running 2 tests
+🚀 High-Throughput ask() Test
+=============================
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T14:55:11.765549Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor api_service at 127.0.0.1:41002 (priority: Immediate)
+[2m2026-01-23T14:55:11.765771Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.180ms, chunks: 1)
+🔍 FAST_PATH: Processing immediate priority actor: api_service propagation_time_ms=0.539ms
+
+📊 Test Configuration:
+   - Total requests: 1000
+   - Concurrent requests: 10
+
+🔥 Warming up...
+
+🔸 Running high-throughput test...
+   - Completed 10 requests
+   - Completed 110 requests
+   - Completed 210 requests
+   - Completed 310 requests
+   - Completed 410 requests
+   - Completed 510 requests
+   - Completed 610 requests
+   - Completed 710 requests
+   - Completed 810 requests
+   - Completed 910 requests
+🎫 [PERMIT] #1000 acquiring control permit (available: 24/256)
+
+📈 High-Throughput Results:
+   - Total time: 26.191958ms
+   - Total requests: 1000
+   - Throughput: 38180 req/sec
+   - Average latency: 223.14µs (223.140 μs)
+   - P50 latency: 216.042µs (216.042 μs)
+   - P95 latency: 294.5µs (294.500 μs)
+   - P99 latency: 342.625µs (342.625 μs)
+
+✅ High-throughput test completed!
+🚀 Ask() with Lookup() Performance Test
+=======================================
+📡 Setting up 3-node cluster...
+test test_ask_high_throughput ... ok
+
+🔗 Establishing peer connections...
+✅ All nodes connected
+
+📋 Registering service actors...
+[2m2026-01-23T14:55:11.878070Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor database_service at 127.0.0.1:40001 (priority: Immediate)
+[2m2026-01-23T14:55:11.878184Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.095ms, chunks: 1)
+   ✅ Node2: registered 'database_service'
+[2m2026-01-23T14:55:11.882076Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor compute_service at 127.0.0.1:40002 (priority: Immediate)
+[2m2026-01-23T14:55:11.882171Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.085ms, chunks: 1)
+   ✅ Node2: registered 'compute_service'
+[2m2026-01-23T14:55:11.882855Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m   ➕ IMMEDIATE: Adding actor cache_service at 127.0.0.1:40003 (priority: Immediate)
+[2m2026-01-23T14:55:11.882946Z[0m [31mERROR[0m [2mkameo_remote::registry[0m[2m:[0m 🚀 IMMEDIATE GOSSIP: Broadcasting 1 urgent changes to 1 peers (serialization: 0.086ms, chunks: 1)
+🔍 FAST_PATH: Processing immediate priority actor: compute_service propagation_time_ms=1.461ms
+   ✅ Node3: registered 'cache_service'
+   🔍 Stats after registration:
+      node1=RegistryStats { local_actors: 0, known_actors: 3, active_peers: 4, failed_peers: 0, total_gossip_rounds: 0, current_sequence: 0, uptime_seconds: 0, last_gossip_timestamp: 1769180111, delta_exchanges: 3, full_sync_exchanges: 4, delta_history_size: 0, avg_delta_size: 0.0, discovered_peers: 0, failed_discovery_attempts: 0, avg_mesh_connectivity: 0.0, mesh_formation_time_ms: None }
+      node2=RegistryStats { local_actors: 2, known_actors: 0, active_peers: 1, failed_peers: 0, total_gossip_rounds: 0, current_sequence: 0, uptime_seconds: 0, last_gossip_timestamp: 1769180111, delta_exchanges: 0, full_sync_exchanges: 2, delta_history_size: 0, avg_delta_size: 0.0, discovered_peers: 0, failed_discovery_attempts: 0, avg_mesh_connectivity: 0.0, mesh_formation_time_ms: None }
+      node3=RegistryStats { local_actors: 1, known_actors: 2, active_peers: 2, failed_peers: 1, total_gossip_rounds: 0, current_sequence: 0, uptime_seconds: 0, last_gossip_timestamp: 1769180111, delta_exchanges: 0, full_sync_exchanges: 2, delta_history_size: 0, avg_delta_size: 0.0, discovered_peers: 0, failed_discovery_attempts: 0, avg_mesh_connectivity: 0.0, mesh_formation_time_ms: None }
+
+📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION
+==============================================
+   ✅ Created actor references:
+     - database_service at 127.0.0.1:40001 (peer: 05e3503c998ff4afc2d390dbd3e667a715171751d8838cb964f7d3a9631c1327)
+     - compute_service at 127.0.0.1:40002 (peer: 05e3503c998ff4afc2d390dbd3e667a715171751d8838cb964f7d3a9631c1327)
+     - cache_service at 127.0.0.1:40003 (peer: d02da1828c9cf14a0f7c7627315e9704e288f4eb52ec8eb03c7b01c9bebcae19)
+   📈 Total lookup time: 125.5µs (125.500 μs)
+
+📊 PART 2: ASK() REQUEST-RESPONSE PERFORMANCE
+============================================
+
+🔸 Test 2A: Individual ask() calls
+   Queries to execute:
+     1. database_service <- "SELECT * FROM users WHERE id = 123"
+     2. compute_service <- "CALCULATE fibonacci(40)"
+     3. cache_service <- "GET user:123:profile"
+     4. database_service <- "INSERT INTO logs VALUES (...)"
+     5. compute_service <- "PROCESS image_resize(1024x768)"
+     6. cache_service <- "SET session:abc123 = data"
+     Query 1 response: "RECEIVED:34 bytes, content: 'SELECT * FROM users WHERE id = 123'" in 472.416µs (472.416 μs)
+     Query 2 response: "RECEIVED:23 bytes, content: 'CALCULATE fibonacci(40)'" in 186.083µs (186.083 μs)
+     Query 3 response: "RECEIVED:20 bytes, content: 'GET user:123:profile'" in 181.667µs (181.667 μs)
+     Query 4 response: "RECEIVED:29 bytes, content: 'INSERT INTO logs VALUES (...)'" in 176.541µs (176.541 μs)
+     Query 5 response: "RECEIVED:30 bytes, content: 'PROCESS image_resize(1024x768)'" in 178.375µs (178.375 μs)
+     Query 6 response: "RECEIVED:25 bytes, content: 'SET session:abc123 = data'" in 170.25µs (170.250 μs)
+   📈 Individual ask() Results:
+     - Total time: 1.397ms (1397.000 μs)
+     - Average per query: 232.833µs (232.833 μs)
+
+🔸 Test 2B: Parallel ask() calls
+     Query 1 response: "RECEIVED:34 bytes, content: 'SELECT * FROM users WHERE id = 123'"
+     Query 2 response: "RECEIVED:23 bytes, content: 'CALCULATE fibonacci(40)'"
+     Query 3 response: "RECEIVED:20 bytes, content: 'GET user:123:profile'"
+     Query 4 response: "RECEIVED:29 bytes, content: 'INSERT INTO logs VALUES (...)'"
+     Query 5 response: "RECEIVED:30 bytes, content: 'PROCESS image_resize(1024x768)'"
+     Query 6 response: "RECEIVED:25 bytes, content: 'SET session:abc123 = data'"
+   📈 Parallel ask() Results:
+     - Total time: 271.542µs (271.542 μs)
+     - Average per query: 45.257µs (45.257 μs)
+     - Speedup vs sequential: 5.14x
+
+📊 PART 3: ASK() VS TELL() COMPARISON
+=====================================
+
+🔸 Test 3A: tell() performance (100 iterations)
+🎫 [PERMIT] #1063 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1095 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1127 acquiring control permit (available: 0/256)
+   📈 tell() Results:
+     - Total: 287µs (287.000 μs)
+     - Average: 2.87µs (2.870 μs)
+     - Throughput: 348432 ops/sec
+
+🔸 Test 3B: ask() performance (100 iterations)
+   📈 ask() Results:
+     - Total: 12.890541ms (12890.541 μs)
+     - Average: 128.905µs (128.905 μs)
+     - Throughput: 7758 ops/sec
+
+   🎯 ask() overhead: 44.91x slower than tell()
+
+📊 PART 4: DELEGATED REPLY SENDER
+=================================
+
+🔸 Test 4A: ask_with_reply_sender()
+   - Request sent, got DelegatedReplySender
+   - Reply sender: DelegatedReplySender { request_len: 26, timeout: None, elapsed: 4.084µs, is_timed_out: false }
+   - Mock response: "RESPONSE:26"
+
+🔸 Test 4B: ask_with_timeout_and_reply()
+   - Request sent with 100ms timeout
+   - Reply sender: DelegatedReplySender { request_len: 26, timeout: Some(100ms), elapsed: 8.208µs, is_timed_out: false }
+
+📊 PART 5: ERROR HANDLING
+========================
+
+🔸 Test 5A: Lookup non-existent actor
+   ✅ Correctly returned None for non-existent actor
+
+📋 RECOMMENDATIONS
+==================
+
+✅ Best Practices:
+   1. Use ask() for operations that require a response (queries, calculations)
+   2. Use tell() for fire-and-forget operations (logging, notifications)
+   3. Cache actor refs to avoid repeated lookups
+   4. Use parallel ask() calls when querying multiple services
+   5. Consider timeouts for ask() operations in production
+
+🔧 Code Examples:
+   // Create actor ref once:
+   let location = registry.lookup("database_service").await?;
+   let conn = registry.get_connection(peer_addr).await?;
+
+   // Sequential queries:
+   let result1 = conn.ask(query1).await?;
+   let result2 = conn.ask(query2).await?;
+
+   // Parallel queries:
+   let (r1, r2) = tokio::join!(
+       conn1.ask(query1),
+       conn2.ask(query2)
+   );
+
+⚠️  NOTE: Current ask() implementation returns mock responses.
+   In production, implement proper request-response correlation.
+
+✅ Test completed successfully!
+test test_ask_with_lookup_and_performance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/batch_ask_performance.rs (target/debug/deps/batch_ask_performance-c92f09ae9901fdef)
+
+running 2 tests
+test test_batch_ask_performance ... ignored, performance test; run manually when an ask responder is available
+[2m2026-01-23T14:55:12.013675Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59529 [3mpeer_id[0m[2m=[0m09407c68d4bb8d0811add05b2375345f3bb5932089aad68cbfd89ea766906202
+[2m2026-01-23T14:55:12.014293Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.014337Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59529
+[2m2026-01-23T14:55:12.014721Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59530 [3mpeer_id[0m[2m=[0mbfafe5dd40f58490c305784fcc2c03d49fe7ea2100723082a2ac0db7de563c3a
+[2m2026-01-23T14:55:12.015222Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.015234Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59530
+[2m2026-01-23T14:55:12.015314Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59529
+[2m2026-01-23T14:55:12.015404Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59530
+[2m2026-01-23T14:55:12.118261Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:59529 using placeholder SNI peer-59529.kameo.invalid (NodeId unknown)
+[2m2026-01-23T14:55:12.118895Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59531
+[2m2026-01-23T14:55:12.118978Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59531 [3mpeer[0m[2m=[0m127.0.0.1:59531[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59531
+[2m2026-01-23T14:55:12.121366Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:59529 (NodeId: 09407c68d4)
+[2m2026-01-23T14:55:12.121955Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59531 [3mpeer[0m[2m=[0m127.0.0.1:59531[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59531
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T14:55:12.122540Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:59529
+[2m2026-01-23T14:55:12.122559Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:59529
+[2m2026-01-23T14:55:12.122629Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59529 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.122681Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:59529
+[2m2026-01-23T14:55:12.122977Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59531 [3mnew_addr[0m[2m=[0m127.0.0.1:59530 [3mnode_id[0m[2m=[0mSome(PublicKey(bfafe5dd40…))
+[2m2026-01-23T14:55:12.123101Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59531 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.123350Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:12.123368Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 0 connections
+test test_batch_ask_with_timeout ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/batch_ask_simple.rs (target/debug/deps/batch_ask_simple-d2d6b322f975906a)
+
+running 2 tests
+[2m2026-01-23T14:55:12.131717Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59533 [3mpeer_id[0m[2m=[0m446a89fefb2c1a0353031995f42132c8b362c06e4a0523970197f8dcb142cb18
+[2m2026-01-23T14:55:12.131718Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59532 [3mpeer_id[0m[2m=[0mb90d8ffa409d39704c877bba2339acf3edc9c6eb3ade74996488fdc47fcdd271
+[2m2026-01-23T14:55:12.132621Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.132621Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.132675Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59533
+[2m2026-01-23T14:55:12.132679Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59532
+[2m2026-01-23T14:55:12.132771Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59532
+[2m2026-01-23T14:55:12.133042Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59534 [3mpeer_id[0m[2m=[0mfa4ddfbee79ee51d2749afa66115923b0ca486af2d70deff348aa00b5cf3acb2
+[2m2026-01-23T14:55:12.133111Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59535 [3mpeer_id[0m[2m=[0m0b691914bd6e0c2097af1d4a21b9f9672d262ae7ab8373fba10d89ff0ee95fbb
+[2m2026-01-23T14:55:12.133789Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.133801Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59534
+[2m2026-01-23T14:55:12.133852Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59533
+[2m2026-01-23T14:55:12.133916Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.133938Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59534
+[2m2026-01-23T14:55:12.133948Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59535
+[2m2026-01-23T14:55:12.133968Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59535
+[2m2026-01-23T14:55:12.235180Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer 'fa4ddfbee79ee51d2749afa66115923b0ca486af2d70deff348aa00b5cf3acb2'
+[2m2026-01-23T14:55:12.235212Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:12.235378Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '0b691914bd6e0c2097af1d4a21b9f9672d262ae7ab8373fba10d89ff0ee95fbb'
+[2m2026-01-23T14:55:12.235398Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:12.235409Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:59534 using NodeId fa4ddfbee7
+[2m2026-01-23T14:55:12.235511Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:59535 using NodeId 0b691914bd
+[2m2026-01-23T14:55:12.235517Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59537
+[2m2026-01-23T14:55:12.235573Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59537 [3mpeer[0m[2m=[0m127.0.0.1:59537[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59537
+[2m2026-01-23T14:55:12.235812Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59536
+[2m2026-01-23T14:55:12.235844Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59536 [3mpeer[0m[2m=[0m127.0.0.1:59536[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59536
+[2m2026-01-23T14:55:12.237738Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:59535 (NodeId: 0b691914bd)
+[2m2026-01-23T14:55:12.237738Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:59534 (NodeId: fa4ddfbee7)
+[2m2026-01-23T14:55:12.238146Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59537 [3mpeer[0m[2m=[0m127.0.0.1:59537[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59537
+[2m2026-01-23T14:55:12.238204Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59536 [3mpeer[0m[2m=[0m127.0.0.1:59536[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59536
+[2m2026-01-23T14:55:12.238342Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59535 [3mchannel_id[0m[2m=[0mGlobal
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T14:55:12.238560Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:59534
+[2m2026-01-23T14:55:12.238561Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:59535
+[2m2026-01-23T14:55:12.238575Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:59534
+[2m2026-01-23T14:55:12.238583Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:59535
+[2m2026-01-23T14:55:12.238586Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0mfa4ddfbee79ee51d2749afa66115923b0ca486af2d70deff348aa00b5cf3acb2
+[2m2026-01-23T14:55:12.238593Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0mfa4ddfbee79ee51d2749afa66115923b0ca486af2d70deff348aa00b5cf3acb2 [3maddr[0m[2m=[0m127.0.0.1:59534
+[2m2026-01-23T14:55:12.238595Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:59535
+[2m2026-01-23T14:55:12.238593Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0m0b691914bd6e0c2097af1d4a21b9f9672d262ae7ab8373fba10d89ff0ee95fbb
+[2m2026-01-23T14:55:12.238615Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0m0b691914bd6e0c2097af1d4a21b9f9672d262ae7ab8373fba10d89ff0ee95fbb [3maddr[0m[2m=[0m127.0.0.1:59535
+[2m2026-01-23T14:55:12.238650Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59534 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.238675Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:59534
+[2m2026-01-23T14:55:12.238888Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59536 [3mnew_addr[0m[2m=[0m127.0.0.1:59533 [3mnode_id[0m[2m=[0mSome(PublicKey(446a89fefb…))
+[2m2026-01-23T14:55:12.238886Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59537 [3mnew_addr[0m[2m=[0m127.0.0.1:59532 [3mnode_id[0m[2m=[0mSome(PublicKey(b90d8ffa40…))
+[2m2026-01-23T14:55:12.238972Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59537 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.238981Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59536 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.239158Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:12.239207Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+test test_batch_ask_with_timeout ... ok
+🎫 [PERMIT] #50 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #113 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #150 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #213 acquiring control permit (available: 0/256)
+[2m2026-01-23T14:55:12.240655Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:12.240698Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m ⚠️ TLS connection closed or error reading message - incoming handler exiting [3mpeer_addr[0m[2m=[0m127.0.0.1:59537 [3merror[0m[2m=[0mnetwork error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[2m2026-01-23T14:55:12.240707Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:12.240708Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 Incoming TLS connection handler loop exited - peer may need reconnection [3mpeer_addr[0m[2m=[0m127.0.0.1:59537 [3msender_node_id[0m[2m=[0mb90d8ffa409d39704c877bba2339acf3edc9c6eb3ade74996488fdc47fcdd271
+[2m2026-01-23T14:55:12.240750Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m node disconnection detected by ID, marking connection as failed (actors remain available) [3mfailed_peer_id[0m[2m=[0mb90d8ffa409d39704c877bba2339acf3edc9c6eb3ade74996488fdc47fcdd271
+[2m2026-01-23T14:55:12.240761Z[0m [33m WARN[0m [2mkameo_remote::registry[0m[2m:[0m cannot find address for failed peer ID - may have already been removed [3mpeer_id[0m[2m=[0mb90d8ffa409d39704c877bba2339acf3edc9c6eb3ade74996488fdc47fcdd271
+[2m2026-01-23T14:55:12.240768Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 HANDLE.RS: Incoming TLS connection handler task EXITED [3mpeer[0m[2m=[0m127.0.0.1:59537
+test test_batch_ask_simple ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/body_allocation_baseline.rs (target/debug/deps/body_allocation_baseline-5351baead5d5099c)
+
+running 3 tests
+
+=== BASELINE: Distributed Actor Messages (remote_tell) ===
+Same pattern as above, sent over distributed system
+
+=== BASELINE: RegistryMessage Body Deserialization ===
+Current code: rkyv::from_bytes::<RegistryMessage>()
+
+╔═════════════════════════════════════════════════╗
+║           BASELINE BODY ALLOCATION SUMMARY                  ║
+╚═══════════════════════════════════════════════════╝
+
+KEY FINDING:
+  rkyv::from_bytes::<RegistryMessage>() ALLOCATES entire message
+  → Allocates: RegistryMessage enum + all Vec<u8> fields
+  → Per-message cost: ~1KB (varies by message type)
+
+EXPECTED OPTIMIZED:
+  rkyv::access::<RegistryMessage>() returns &Archived<RegistryMessage>
+  → Zero-copy reference into network buffer
+  → NO allocations for message body
+
+EXPECTED REDUCTION:
+  ~90%+ reduction in body allocations (much larger than header win)
+  Dramatic impact on high-throughput distributed systems
+test baseline_summary ... ok
+Allocations: 585 (552 bytes) | Time: 2.019333ms
+BEFORE (Current rkyv::from_bytes):
+  → 585 allocations per 100 deserializations
+  → Total bytes: 552
+  → Avg bytes per deserialization: 5
+
+This shows:
+  → RegistryMessage struct is allocated
+  → All Vec<u8> fields are allocated
+  → ActorMessage struct is allocated
+  → Total: ~1KB per message
+test baseline_registry_message_body_allocations ... ok
+Allocations: 605 (18446744073709543249 bytes) | Time: 2.137834ms
+BEFORE (Current rkyv::from_bytes):
+  → 605 allocations per 100 deserializations
+  → Total bytes: 18446744073709543249
+test baseline_distributed_actor_messages ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bytemuck_allocation_tests.rs (target/debug/deps/bytemuck_allocation_tests-a7b60943283e9d5f)
+
+running 10 tests
+test baseline_full_streamheader_roundtrip_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_hash_extraction_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_hash_extraction_performance ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_header_assembly_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_key_conversion_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_node_id_conversion_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_streamheader_from_bytes_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_streamheader_to_bytes_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_streamheader_various_sizes_allocations ... ignored, Run with: cargo test baseline -- --ignored
+test baseline_summary_all_tests ... ignored, Run with: cargo test baseline -- --ignored
+
+test result: ok. 0 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bytemuck_optimized_tests.rs (target/debug/deps/bytemuck_optimized_tests-f95e3e7fa83e3d3d)
+
+running 7 tests
+test optimized_alignment_preserved ... ignored, Run with: cargo test optimized -- --ignored
+test optimized_streamheader_as_bytes_zero_copy ... ignored, Run with: cargo test optimized -- --ignored
+test optimized_streamheader_backward_compat ... ignored, Run with: cargo test optimized -- --ignored
+test optimized_streamheader_from_bytes_zero_copy ... ignored, Run with: cargo test optimized -- --ignored
+test optimized_streamheader_protocol_alignment ... ignored, Run with: cargo test optimized -- --ignored
+test optimized_streamheader_to_bytes_be_big_endian ... ignored, Run with: cargo test optimized -- --ignored
+test optimized_summary ... ignored, Run with: cargo test optimized -- --ignored
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/connection_lifecycle_test.rs (target/debug/deps/connection_lifecycle_test-dbf459fbbb1b6ef4)
+
+running 3 tests
+[2m2026-01-23T14:55:12.255000Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7925 [3mpeer_id[0m[2m=[0ma5289108997ba4226d7098863911dcf2f2b493c9308867df460cd3bb2ae8b20d
+[2m2026-01-23T14:55:12.254994Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7921 [3mpeer_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be
+[2m2026-01-23T14:55:12.254997Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7923 [3mpeer_id[0m[2m=[0m93d8e0a62dfbfa6afaf2888370757d5c3e4419acf71ba82e200ced1a616b423f
+[2m2026-01-23T14:55:12.255733Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.255733Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.255733Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.255762Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7923
+[2m2026-01-23T14:55:12.255762Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:12.255762Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7925
+[2m2026-01-23T14:55:12.255983Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7924 [3mpeer_id[0m[2m=[0mee6eeeeb19cdc294ad092b5b2afa08d9f1a95fc4f28f82c95c0fdad1b19d7bd9
+[2m2026-01-23T14:55:12.255993Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7926 [3mpeer_id[0m[2m=[0mea2b45199218a59b31f4c630b257b2f8ed91eb8fec620a7a8b21cabe70577029
+[2m2026-01-23T14:55:12.255997Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7922 [3mpeer_id[0m[2m=[0ma23350906ebf69ed3eec43caf14b719ad7ed0474ff4c92a883c4fb186c55d320
+[2m2026-01-23T14:55:12.256610Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.256612Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.256618Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.256620Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7922
+[2m2026-01-23T14:55:12.256672Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.256686Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7924
+[2m2026-01-23T14:55:12.256697Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer 'a23350906ebf69ed3eec43caf14b719ad7ed0474ff4c92a883c4fb186c55d320'
+[2m2026-01-23T14:55:12.256698Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer 'ea2b45199218a59b31f4c630b257b2f8ed91eb8fec620a7a8b21cabe70577029'
+[2m2026-01-23T14:55:12.256719Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:12.256723Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:12.256735Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer 'ee6eeeeb19cdc294ad092b5b2afa08d9f1a95fc4f28f82c95c0fdad1b19d7bd9'
+[2m2026-01-23T14:55:12.256752Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:12.256814Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:12.256815Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7925
+[2m2026-01-23T14:55:12.256816Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7923
+[2m2026-01-23T14:55:12.256884Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7922
+[2m2026-01-23T14:55:12.256886Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.256884Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7924
+[2m2026-01-23T14:55:12.256944Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:7922 using NodeId a23350906e
+[2m2026-01-23T14:55:12.256945Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:7926 using NodeId ea2b451992
+[2m2026-01-23T14:55:12.256945Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:7924 using NodeId ee6eeeeb19
+[2m2026-01-23T14:55:12.257265Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59538
+[2m2026-01-23T14:55:12.257265Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59540
+[2m2026-01-23T14:55:12.257266Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59539
+[2m2026-01-23T14:55:12.257288Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59538 [3mpeer[0m[2m=[0m127.0.0.1:59538[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59538
+[2m2026-01-23T14:55:12.257291Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59540 [3mpeer[0m[2m=[0m127.0.0.1:59540[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59540
+[2m2026-01-23T14:55:12.257298Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59539 [3mpeer[0m[2m=[0m127.0.0.1:59539[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59539
+[2m2026-01-23T14:55:12.258998Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:7922 (NodeId: a23350906e)
+[2m2026-01-23T14:55:12.258999Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:7926 (NodeId: ea2b451992)
+[2m2026-01-23T14:55:12.258998Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:7924 (NodeId: ee6eeeeb19)
+[2m2026-01-23T14:55:12.259400Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59538 [3mpeer[0m[2m=[0m127.0.0.1:59538[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59538
+[2m2026-01-23T14:55:12.259406Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59539 [3mpeer[0m[2m=[0m127.0.0.1:59539[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59539
+[2m2026-01-23T14:55:12.259411Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59540 [3mpeer[0m[2m=[0m127.0.0.1:59540[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59540
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T14:55:12.259835Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:7922
+[2m2026-01-23T14:55:12.259837Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.259836Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:7924
+[2m2026-01-23T14:55:12.259848Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:7922
+[2m2026-01-23T14:55:12.259848Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.259857Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:7924
+[2m2026-01-23T14:55:12.259862Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0ma23350906ebf69ed3eec43caf14b719ad7ed0474ff4c92a883c4fb186c55d320
+[2m2026-01-23T14:55:12.259870Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0mee6eeeeb19cdc294ad092b5b2afa08d9f1a95fc4f28f82c95c0fdad1b19d7bd9
+[2m2026-01-23T14:55:12.259873Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0mea2b45199218a59b31f4c630b257b2f8ed91eb8fec620a7a8b21cabe70577029
+[2m2026-01-23T14:55:12.259871Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0ma23350906ebf69ed3eec43caf14b719ad7ed0474ff4c92a883c4fb186c55d320 [3maddr[0m[2m=[0m127.0.0.1:7922
+[2m2026-01-23T14:55:12.259883Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0mee6eeeeb19cdc294ad092b5b2afa08d9f1a95fc4f28f82c95c0fdad1b19d7bd9 [3maddr[0m[2m=[0m127.0.0.1:7924
+[2m2026-01-23T14:55:12.259884Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0mea2b45199218a59b31f4c630b257b2f8ed91eb8fec620a7a8b21cabe70577029 [3maddr[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.259903Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:7924 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.259904Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:7922 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.259913Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:7926 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.259939Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:7922
+[2m2026-01-23T14:55:12.259940Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.259940Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:7924
+[2m2026-01-23T14:55:12.260179Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59538 [3mnew_addr[0m[2m=[0m127.0.0.1:7921 [3mnode_id[0m[2m=[0mSome(PublicKey(d5f64ea096…))
+[2m2026-01-23T14:55:12.260236Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59540 [3mnew_addr[0m[2m=[0m127.0.0.1:7923 [3mnode_id[0m[2m=[0mSome(PublicKey(93d8e0a62d…))
+[2m2026-01-23T14:55:12.260241Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59538 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.260241Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59539 [3mnew_addr[0m[2m=[0m127.0.0.1:7925 [3mnode_id[0m[2m=[0mSome(PublicKey(a528910899…))
+[2m2026-01-23T14:55:12.260288Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59540 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.260292Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59539 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.461862Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:12.964464Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:7926 [3mpeer_id[0m[2m=[0m950c4a047891389dd7e2bcbc708e23de1cdad4b331ed9b4c87fd8c11c6a78691
+[2m2026-01-23T14:55:12.966158Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:12.966351Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.966551Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m address already mapped to a different peer_id - disconnecting stale mapping [3maddr[0m[2m=[0m127.0.0.1:7926 [3mexpected[0m[2m=[0m950c4a047891389dd7e2bcbc708e23de1cdad4b331ed9b4c87fd8c11c6a78691 [3mfound[0m[2m=[0mea2b45199218a59b31f4c630b257b2f8ed91eb8fec620a7a8b21cabe70577029
+[2m2026-01-23T14:55:12.966767Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '950c4a047891389dd7e2bcbc708e23de1cdad4b331ed9b4c87fd8c11c6a78691'
+[2m2026-01-23T14:55:12.966816Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:12.967459Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.967789Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:7926 using NodeId 950c4a0478
+[2m2026-01-23T14:55:12.968723Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59541
+[2m2026-01-23T14:55:12.968800Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m ⚠️ TLS connection closed or error reading message - incoming handler exiting [3mpeer_addr[0m[2m=[0m127.0.0.1:59539 [3merror[0m[2m=[0mnetwork error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[2m2026-01-23T14:55:12.968824Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 Incoming TLS connection handler loop exited - peer may need reconnection [3mpeer_addr[0m[2m=[0m127.0.0.1:59539 [3msender_node_id[0m[2m=[0ma5289108997ba4226d7098863911dcf2f2b493c9308867df460cd3bb2ae8b20d
+[2m2026-01-23T14:55:12.968961Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m node disconnection detected by ID, marking connection as failed (actors remain available) [3mfailed_peer_id[0m[2m=[0ma5289108997ba4226d7098863911dcf2f2b493c9308867df460cd3bb2ae8b20d
+[2m2026-01-23T14:55:12.968991Z[0m [33m WARN[0m [2mkameo_remote::registry[0m[2m:[0m cannot find address for failed peer ID - may have already been removed [3mpeer_id[0m[2m=[0ma5289108997ba4226d7098863911dcf2f2b493c9308867df460cd3bb2ae8b20d
+[2m2026-01-23T14:55:12.969009Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 HANDLE.RS: Incoming TLS connection handler task EXITED [3mpeer[0m[2m=[0m127.0.0.1:59539
+[2m2026-01-23T14:55:12.969047Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59541 [3mpeer[0m[2m=[0m127.0.0.1:59541[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59541
+[2m2026-01-23T14:55:12.973031Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:7926 (NodeId: 950c4a0478)
+[2m2026-01-23T14:55:12.973780Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59541 [3mpeer[0m[2m=[0m127.0.0.1:59541[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59541
+[2m2026-01-23T14:55:12.974211Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.974235Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.974253Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0m950c4a047891389dd7e2bcbc708e23de1cdad4b331ed9b4c87fd8c11c6a78691
+[2m2026-01-23T14:55:12.974269Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0m950c4a047891389dd7e2bcbc708e23de1cdad4b331ed9b4c87fd8c11c6a78691 [3maddr[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.974289Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:7926 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:12.974328Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:7926
+[2m2026-01-23T14:55:12.974639Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔄 Migrating peer info from ephemeral TCP source to bind address from FullSync [3mold_addr[0m[2m=[0m127.0.0.1:59541 [3mnew_addr[0m[2m=[0m127.0.0.1:7925 [3mnode_id[0m[2m=[0mSome(PublicKey(a528910899…))
+[2m2026-01-23T14:55:12.974717Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59541 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:13.014302Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:7921 using NodeId d5f64ea096
+[2m2026-01-23T14:55:13.015100Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59542
+[2m2026-01-23T14:55:13.015223Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59542 [3mpeer[0m[2m=[0m127.0.0.1:59542[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59542
+[2m2026-01-23T14:55:13.019293Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:7921 (NodeId: d5f64ea096)
+[2m2026-01-23T14:55:13.019775Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59542 [3mpeer[0m[2m=[0m127.0.0.1:59542[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59542
+[2m2026-01-23T14:55:13.020336Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:13.020354Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:13.020386Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:7921 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:13.020427Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:13.021077Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59542 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:13.021292Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m ⚠️ TLS connection closed or error reading message - incoming handler exiting [3mpeer_addr[0m[2m=[0m127.0.0.1:59538 [3merror[0m[2m=[0mnetwork error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[2m2026-01-23T14:55:13.021309Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 Incoming TLS connection handler loop exited - peer may need reconnection [3mpeer_addr[0m[2m=[0m127.0.0.1:59538 [3msender_node_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be
+[2m2026-01-23T14:55:13.021389Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m node disconnection detected by ID, marking connection as failed (actors remain available) [3mfailed_peer_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be
+[2m2026-01-23T14:55:13.021411Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m connection already removed from pool [3maddr[0m[2m=[0m127.0.0.1:7921 [3mnode_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be
+[2m2026-01-23T14:55:13.021446Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m connection cleanup complete [3mnode_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be [3maddr[0m[2m=[0m127.0.0.1:7921 [3mconnections_remaining[0m[2m=[0m0
+[2m2026-01-23T14:55:13.021463Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m marked peer as disconnected in local state, will retry after interval [3mpeer[0m[2m=[0m127.0.0.1:7921 [3mnode_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be [3mretry_after_secs[0m[2m=[0m5
+[2m2026-01-23T14:55:13.021486Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m created pending failure record, waiting for consensus on actor invalidation [3mfailed_peer[0m[2m=[0m127.0.0.1:7921 [3mnode_id[0m[2m=[0md5f64ea09619b77d94614c11fa175a99a6e23417cc88a5423244a05e3f8446be [3mdeadline[0m[2m=[0m1769180118
+[2m2026-01-23T14:55:13.021509Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 HANDLE.RS: Incoming TLS connection handler task EXITED [3mpeer[0m[2m=[0m127.0.0.1:59538
+[2m2026-01-23T14:55:13.123349Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m delayed query: now checking peer consensus after 100ms [3mfailed_peer[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:13.123454Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m skipping consensus query - active socket connection present [3mtarget_peer[0m[2m=[0m127.0.0.1:7921
+[2m2026-01-23T14:55:13.476848Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:13.477057Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+test test_reconnect_cleanup ... ok
+[2m2026-01-23T14:55:17.464048Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:17.464157Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+test test_connection_survives_multiple_gossip_rounds ... ok
+[2m2026-01-23T14:55:17.807438Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:17.807587Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+test test_addr_mappings_preserved_after_fullsync ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.56s
+
+     Running tests/crypto_security_tests.rs (target/debug/deps/crypto_security_tests-552856f2d0fe122d)
+
+running 6 tests
+🚫 Testing connection rejection with mismatched keys...
+🧪 Testing deterministic keypair generation for tests...
+🔄 Testing PeerId conversions and formats...
+✍️  Testing signature creation and verification...
+⚠️  Testing invalid key edge cases...
+   Test case 1: ''
+      ✅ Correctly rejected invalid hex
+   Test case 2: 'invalid'
+      ✅ Correctly rejected invalid hex
+   Test case 3: 'abc'
+      ✅ Correctly rejected invalid hex
+   Test case 4: 'aaaaaaaaaaaaaaaaaaaa...'
+      ✅ Correctly rejected invalid hex
+   Test case 5: 'aaaaaaaaaaaaaaaaaaaa...'
+      ✅ Correctly rejected invalid hex
+   Test case 6: 'gggggggggggggggggggg...'
+      ✅ Correctly rejected invalid hex
+   Byte test case 1: 0 bytes
+      ✅ Correctly rejected invalid byte array
+   Byte test case 2: 31 bytes
+      ✅ Correctly rejected invalid byte array
+   Byte test case 3: 33 bytes
+      ✅ Correctly rejected invalid byte array
+   Byte test case 4: 16 bytes
+      ✅ Correctly rejected invalid byte array
+   Private key test case 1: 0 bytes
+      ✅ Correctly rejected invalid private key
+   Private key test case 2: 31 bytes
+      ✅ Correctly rejected invalid private key
+   Private key test case 3: 33 bytes
+      ✅ Correctly rejected invalid private key
+   ✅ Invalid key edge cases handled correctly
+🔑 Testing keypair generation and PeerId derivation...
+test test_invalid_key_edge_cases ... ok
+   ✅ PeerId conversions working correctly
+test test_peer_id_conversions ... ok
+   ✅ Keypair generation working correctly
+test test_keypair_generation_and_peer_id ... ok
+   ✅ Deterministic keypair generation working correctly
+test test_deterministic_keypair_for_testing ... ok
+   🖥️  Server started with PeerId: ebe80b7cadea277ac05fb85c7164fe15ebd6873c4a74b3296a462a1026fd9b0f
+   ✅ Signature verification working correctly
+test test_signature_creation_and_verification ... ok
+   💻 Client started with PeerId: 50c4a5871ad3379f2879d12cef750d1211633283a9c3730238e6ddf084db4c8a
+   🔗 Test 1: Client connecting with correct server PeerId...
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+      ✅ Connection with correct PeerId succeeded
+   🔗 Test 2: Client connecting with wrong PeerId...
+[2m2026-01-23T14:55:17.824863Z[0m [31mERROR[0m [2mkameo_remote::connection_pool[0m[2m:[0m ❌ TLS handshake failed [3maddr[0m[2m=[0m127.0.0.1:29101 [3merror[0m[2m=[0munexpected error: NodeId mismatch: expected 4c7da9c3f6, got ebe80b7cad
+[2m2026-01-23T14:55:17.824885Z[0m [31mERROR[0m [2mkameo_remote[0m[2m:[0m Unexpected error connecting to peer [3mpeer_id[0m[2m=[0m4c7da9c3f66c68ada36e2a92f20e1090a05b72b14b94b253010cc20213611990 [3maddr[0m[2m=[0m127.0.0.1:29101 [3merror[0m[2m=[0mTLS error: TLS handshake failed: unexpected error: NodeId mismatch: expected 4c7da9c3f6, got ebe80b7cad
+      ✅ Connection with wrong PeerId correctly failed: TLS error: TLS handshake failed: unexpected error: NodeId mismatch: expected 4c7da9c3f6, got ebe80b7cad
+   🔍 Test 3: PeerId comparison verification...
+      ✅ PeerId mismatches correctly detected
+   ✅ Key mismatch rejection test completed
+test test_key_mismatch_connection_rejection ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/flow_control.rs (target/debug/deps/flow_control-9802ade22c31872e)
+
+running 1 test
+test test_ask_backpressure_no_write_buffer_full ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gossip_backoff_e2e.rs (target/debug/deps/gossip_backoff_e2e-3ee9622db5d7f1fe)
+
+running 1 test
+test test_peer_retry_backoff_gate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gossip_conflict_e2e.rs (target/debug/deps/gossip_conflict_e2e-00be2dd6dd13dfd1)
+
+running 1 test
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_local_actor_wins_over_remote_update ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/gossip_e2e_tests.rs (target/debug/deps/gossip_e2e_tests-328cec502f97ec5e)
+
+running 3 tests
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_full_sync_for_small_cluster ... ok
+test test_immediate_propagation_for_urgent_registration ... ok
+test test_delta_gossip_after_initial_full_sync ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/gossip_matrix_e2e.rs (target/debug/deps/gossip_matrix_e2e-d09c94b6daf22713)
+
+running 1 test
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+🔍 FAST_PATH: Processing immediate priority actor: actor.a propagation_time_ms=1.098ms
+🔍 FAST_PATH: Processing immediate priority actor: actor.b propagation_time_ms=0.880ms
+🔍 FAST_PATH: Processing immediate priority actor: actor.b propagation_time_ms=0.947ms
+🔍 FAST_PATH: Processing immediate priority actor: actor.c propagation_time_ms=0.661ms
+🔍 FAST_PATH: Processing immediate priority actor: actor.c propagation_time_ms=0.729ms
+🔍 FAST_PATH: Processing immediate priority actor: actor.d propagation_time_ms=0.533ms
+test test_gossip_matrix_convergence_line_topology ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/gossip_partition_e2e.rs (target/debug/deps/gossip_partition_e2e-569443b4e7a90a25)
+
+running 1 test
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_partition_heal_flow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.17s
+
+     Running tests/gossip_removal_e2e.rs (target/debug/deps/gossip_removal_e2e-9949a0923b1867a4)
+
+running 1 test
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_actor_removal_propagates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/node_name_test.rs (target/debug/deps/node_name_test-e60fab8c78b45a8b)
+
+running 1 test
+[2m2026-01-23T14:55:19.922426Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59598 [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.922579Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16d078210
+[2m2026-01-23T14:55:19.922906Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:19.922939Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59598
+Node A started at 127.0.0.1:59598
+[2m2026-01-23T14:55:19.923244Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59599 [3mpeer_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5
+[2m2026-01-23T14:55:19.923378Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16d078210
+[2m2026-01-23T14:55:19.923637Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:19.923648Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59599
+Node B started at 127.0.0.1:59599
+[2m2026-01-23T14:55:19.923672Z[0m [34mDEBUG[0m [2mkameo_remote[0m[2m:[0m 🎯 Peer::connect - About to add peer 048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d to gossip state
+[2m2026-01-23T14:55:19.923694Z[0m [34mDEBUG[0m [2mkameo_remote[0m[2m:[0m 🔐 Converted PeerId 048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d to NodeId for TLS
+[2m2026-01-23T14:55:19.923706Z[0m [34mDEBUG[0m [2mkameo_remote[0m[2m:[0m 🎯 Added peer to gossip state for gossip rounds [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d [3maddr[0m[2m=[0m127.0.0.1:59598 [3mpeers_before[0m[2m=[0m0 [3mpeers_after[0m[2m=[0m1
+[2m2026-01-23T14:55:19.923719Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: get_connection_to_peer called for peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d'
+[2m2026-01-23T14:55:19.923728Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Creating new connection to peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d' at 127.0.0.1:59598
+[2m2026-01-23T14:55:19.923758Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d'
+[2m2026-01-23T14:55:19.923773Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:19.923780Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Attempting to connect to 127.0.0.1:59598
+[2m2026-01-23T14:55:19.923884Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.923907Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:19.923947Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:19.923966Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.923977Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:19.923983Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:19.924011Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Successfully connected to 127.0.0.1:59598
+[2m2026-01-23T14:55:19.924017Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: TLS enabled, checking for peer NodeId
+[2m2026-01-23T14:55:19.924020Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Found NodeId for peer 127.0.0.1:59598, performing TLS handshake
+[2m2026-01-23T14:55:19.924042Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:59598 using NodeId 048c6e91f0
+[2m2026-01-23T14:55:19.924375Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59600
+[2m2026-01-23T14:55:19.924397Z[0m [34mDEBUG[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59600 [3mpeer[0m[2m=[0m127.0.0.1:59600[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2026-01-23T14:55:19.924403Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59600 [3mpeer[0m[2m=[0m127.0.0.1:59600[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59600
+[2m2026-01-23T14:55:19.926305Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:59598 (NodeId: 048c6e91f0)
+[2m2026-01-23T14:55:19.926739Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59600 [3mpeer[0m[2m=[0m127.0.0.1:59600[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59600
+[2m2026-01-23T14:55:19.926802Z[0m [34mDEBUG[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59600 [3mpeer[0m[2m=[0m127.0.0.1:59600[1m}[0m[2m:[0m [2mkameo_remote::handshake[0m[2m:[0m Hello handshake negotiated capabilities [3mnegotiated_version[0m[2m=[0m2 [3mpeer_list[0m[2m=[0mfalse
+[2m2026-01-23T14:55:19.926845Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming TLS connection handler [3mpeer[0m[2m=[0m127.0.0.1:59600
+[2m2026-01-23T14:55:19.926901Z[0m [34mDEBUG[0m [2mkameo_remote::handshake[0m[2m:[0m Hello handshake negotiated capabilities [3mnegotiated_version[0m[2m=[0m2 [3mpeer_list[0m[2m=[0mfalse
+[2m2026-01-23T14:55:19.927064Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Creating new correlation tracker for peer 048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.927142Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Got correlation tracker for peer 048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d (total trackers: 1)
+[2m2026-01-23T14:55:19.927151Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Using shared correlation tracker for peer PeerId("048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d") at 127.0.0.1:59598
+[2m2026-01-23T14:55:19.927160Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Added connection via get_connection to 127.0.0.1:59598 - pool now has 1 connections
+[2m2026-01-23T14:55:19.927164Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Verified connection exists for 127.0.0.1:59598
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+[2m2026-01-23T14:55:19.927190Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.927201Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.927207Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: After get_connection, pool has 1 connections
+[2m2026-01-23T14:55:19.927210Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Pool contains connection to 127.0.0.1:59598? true
+[2m2026-01-23T14:55:19.927216Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Indexed new connection under peer ID '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d'
+[2m2026-01-23T14:55:19.927221Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.927227Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d [3maddr[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.927242Z[0m [34mDEBUG[0m [2mkameo_remote[0m[2m:[0m 🎯 Peer::connect - About to add peer 625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 to gossip state
+[2m2026-01-23T14:55:19.927261Z[0m [34mDEBUG[0m [2mkameo_remote[0m[2m:[0m 🔐 Converted PeerId 625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 to NodeId for TLS
+[2m2026-01-23T14:55:19.927267Z[0m [34mDEBUG[0m [2mkameo_remote[0m[2m:[0m 🎯 Added peer to gossip state for gossip rounds [3mpeer_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 [3maddr[0m[2m=[0m127.0.0.1:59599 [3mpeers_before[0m[2m=[0m0 [3mpeers_after[0m[2m=[0m1
+[2m2026-01-23T14:55:19.927275Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: get_connection_to_peer called for peer '625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5'
+[2m2026-01-23T14:55:19.927280Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Creating new connection to peer '625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5' at 127.0.0.1:59599
+[2m2026-01-23T14:55:19.927302Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: No connection found for peer '625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5'
+[2m2026-01-23T14:55:19.927315Z[0m [33m WARN[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Available node connections: []
+[2m2026-01-23T14:55:19.927318Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Attempting to connect to 127.0.0.1:59599
+[2m2026-01-23T14:55:19.927380Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59598 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:19.927409Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.927453Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Successfully connected to 127.0.0.1:59599
+[2m2026-01-23T14:55:19.927457Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: TLS enabled, checking for peer NodeId
+[2m2026-01-23T14:55:19.927460Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Found NodeId for peer 127.0.0.1:59599, performing TLS handshake
+[2m2026-01-23T14:55:19.927469Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🔐 TLS ENABLED: Initiating TLS connection to 127.0.0.1:59599 using NodeId 625339f77b
+[2m2026-01-23T14:55:19.927747Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming TLS connection from node [3mpeer_addr[0m[2m=[0m127.0.0.1:59600 [3mnode_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5
+[2m2026-01-23T14:55:19.927795Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 📥 ACCEPTED incoming connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59601
+[2m2026-01-23T14:55:19.927818Z[0m [34mDEBUG[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mpeer[0m[2m=[0m127.0.0.1:59601[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔌 HANDLE_CONNECTION: Starting to handle new incoming connection
+[2m2026-01-23T14:55:19.927823Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mpeer[0m[2m=[0m127.0.0.1:59601[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m 🔐 TLS ENABLED: Performing TLS handshake with peer 127.0.0.1:59601
+[2m2026-01-23T14:55:19.929391Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m ✅ TLS handshake successful with 127.0.0.1:59599 (NodeId: 625339f77b)
+[2m2026-01-23T14:55:19.929771Z[0m [32m INFO[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mpeer[0m[2m=[0m127.0.0.1:59601[1m}[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m ✅ TLS handshake successful with peer 127.0.0.1:59601
+[2m2026-01-23T14:55:19.929815Z[0m [34mDEBUG[0m [1mhandle_connection[0m[1m{[0m[3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mpeer[0m[2m=[0m127.0.0.1:59601[1m}[0m[2m:[0m [2mkameo_remote::handshake[0m[2m:[0m Hello handshake negotiated capabilities [3mnegotiated_version[0m[2m=[0m2 [3mpeer_list[0m[2m=[0mfalse
+[2m2026-01-23T14:55:19.929838Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m HANDLE.RS: Starting incoming TLS connection handler [3mpeer[0m[2m=[0m127.0.0.1:59601
+[2m2026-01-23T14:55:19.929882Z[0m [34mDEBUG[0m [2mkameo_remote::handshake[0m[2m:[0m Hello handshake negotiated capabilities [3mnegotiated_version[0m[2m=[0m2 [3mpeer_list[0m[2m=[0mfalse
+[2m2026-01-23T14:55:19.930001Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Creating new correlation tracker for peer 625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5
+[2m2026-01-23T14:55:19.930083Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Got correlation tracker for peer 625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 (total trackers: 1)
+[2m2026-01-23T14:55:19.930092Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Using shared correlation tracker for peer PeerId("625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5") at 127.0.0.1:59599
+[2m2026-01-23T14:55:19.930100Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Added connection via get_connection to 127.0.0.1:59599 - pool now has 1 connections
+[2m2026-01-23T14:55:19.930102Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Verified connection exists for 127.0.0.1:59599
+[2m2026-01-23T14:55:19.930118Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Sent initial FullSync message to identify ourselves [3mpeer[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930127Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m successfully created new persistent connection [3mpeer[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930131Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: After get_connection, pool has 1 connections
+[2m2026-01-23T14:55:19.930133Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Pool contains connection to 127.0.0.1:59599? true
+[2m2026-01-23T14:55:19.930139Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Indexed new connection under peer ID '625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5'
+[2m2026-01-23T14:55:19.930143Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m Connected to peer [3mpeer_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5
+[2m2026-01-23T14:55:19.930148Z[0m [32m INFO[0m [2mkameo_remote[0m[2m:[0m Successfully connected to peer [3mpeer_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 [3maddr[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930158Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59599 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:19.930180Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m Starting outgoing connection reader with message processing [3mpeer[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930195Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59599 [3mself_addr[0m[2m=[0m127.0.0.1:59598 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:19.930201Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m peer already tracked [3mpeer[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930215Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m Updated gossip state with NodeId for incoming TLS connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59600 [3mpeer_state_addr[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930342Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m tie-breaker: rejecting inbound duplicate connection [3mpeer_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5
+[2m2026-01-23T14:55:19.930363Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m ⚠️ HANDLE.RS: Dropped duplicate connection via tie-breaker [3mpeer[0m[2m=[0m127.0.0.1:59600
+[2m2026-01-23T14:55:19.930366Z[0m [33m WARN[0m [2mkameo_remote::handle[0m[2m:[0m 📤 HANDLE.RS: Incoming TLS connection handler task EXITED [3mpeer[0m[2m=[0m127.0.0.1:59600
+[2m2026-01-23T14:55:19.930412Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m Identified incoming TLS connection from node [3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mnode_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.930449Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59598 [3mself_addr[0m[2m=[0m127.0.0.1:59599 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:19.930453Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m peer already tracked [3mpeer[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.930465Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m Updated gossip state with NodeId for incoming TLS connection [3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mpeer_state_addr[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.930580Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m tie-breaker: favoring inbound connection, dropping existing outbound [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.930588Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m Cleaned up correlation tracker for disconnected peer [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.930607Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Registered existing correlation tracker for peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d'
+[2m2026-01-23T14:55:19.930611Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Added connection for peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d' (address: 127.0.0.1:59598)
+[2m2026-01-23T14:55:19.930617Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Indexing connection by additional address 127.0.0.1:59601
+[2m2026-01-23T14:55:19.930621Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Adding additional address 127.0.0.1:59601 -> peer_id 048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.930626Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m Also indexed incoming connection by ephemeral address for response delivery [3mnode_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d [3mpeer_addr[0m[2m=[0m127.0.0.1:59601 [3mpeer_state_addr[0m[2m=[0m127.0.0.1:59598
+[2m2026-01-23T14:55:19.930629Z[0m [34mDEBUG[0m [2mkameo_remote::handle[0m[2m:[0m Added incoming TLS connection to pool for bidirectional communication [3mnode_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d [3mpeer_addr[0m[2m=[0m127.0.0.1:59601
+[2m2026-01-23T14:55:19.930638Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m Received FullSync from node '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d' at bind_addr 127.0.0.1:59598 (tcp_source=127.0.0.1:59601)
+[2m2026-01-23T14:55:19.930647Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📨 INCOMING: Received full sync message on bidirectional connection [3msender[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d [3msequence[0m[2m=[0m0 [3mlocal_actors[0m[2m=[0m0 [3mknown_actors[0m[2m=[0m0
+[2m2026-01-23T14:55:19.930657Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m BIDIRECTIONAL: Registered incoming connection - peer_id=048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d addr=127.0.0.1:59598
+[2m2026-01-23T14:55:19.930668Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m merged gossip data using vector clock conflict resolution [3mnew_actors[0m[2m=[0m0 [3mupdated_actors[0m[2m=[0m0 [3mpeer[0m[2m=[0m127.0.0.1:59598 [3mpeer_actor_count[0m[2m=[0m0
+[2m2026-01-23T14:55:19.930680Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE: Node 127.0.0.1:59599 is about to acquire connection pool lock
+[2m2026-01-23T14:55:19.930691Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE: Node 127.0.0.1:59599 got pool lock, pool has 1 total entries
+[2m2026-01-23T14:55:19.930693Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE: Pool instance address: 0x104c9e108
+[2m2026-01-23T14:55:19.930699Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE: Connection to 127.0.0.1:59601 - state=Connected
+[2m2026-01-23T14:55:19.930704Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE: Connection to 127.0.0.1:59598 - state=Connected
+[2m2026-01-23T14:55:19.930719Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE DEBUG: Available connections by addr: [127.0.0.1:59601, 127.0.0.1:59598]
+[2m2026-01-23T14:55:19.930730Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE DEBUG: Available node mappings: [(PeerId("048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d"), 127.0.0.1:59598)]
+[2m2026-01-23T14:55:19.930734Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE DEBUG: Looking for connection to sender_peer_id: 048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:19.930738Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m FULLSYNC RESPONSE DEBUG: sender_socket_addr=127.0.0.1:59598
+[2m2026-01-23T14:55:19.930742Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: send_bytes_to_peer_id called for peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d', pool has 1 peer connections
+[2m2026-01-23T14:55:19.930746Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Found connection for peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d'
+[2m2026-01-23T14:55:19.930750Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Sending 112 bytes to peer '048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d'
+[2m2026-01-23T14:55:19.930912Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m 📤 RESPONSE: Successfully sent FullSync response with our state [3mpeer[0m[2m=[0m127.0.0.1:59598 [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d [3mlocal_actors[0m[2m=[0m0 [3mknown_actors[0m[2m=[0m0 [3mbind_addr[0m[2m=[0m127.0.0.1:59599
+[2m2026-01-23T14:55:19.930952Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m 🚀 Background writer task started [3maddr[0m[2m=[0m127.0.0.1:59601 [3mchannel_id[0m[2m=[0mGlobal
+[2m2026-01-23T14:55:19.931059Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m RECEIVED: FullSyncResponse from peer (using bind_addr) [3msender[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 [3mbind_addr[0m[2m=[0m127.0.0.1:59599 [3mtcp_source[0m[2m=[0m127.0.0.1:59599 [3mlocal_actors[0m[2m=[0m0 [3mknown_actors[0m[2m=[0m0
+[2m2026-01-23T14:55:19.931082Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m merged gossip data using vector clock conflict resolution [3mnew_actors[0m[2m=[0m0 [3mupdated_actors[0m[2m=[0m0 [3mpeer[0m[2m=[0m127.0.0.1:59599 [3mpeer_actor_count[0m[2m=[0m0
+[2m2026-01-23T14:55:19.931093Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m BIDIRECTIONAL: Updated connection mapping from FullSyncResponse - peer_id=625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5 addr=127.0.0.1:59599
+Node B pool state:
+  Total connections: 1
+  Node mappings: 1
+Node A pool state:
+  Total connections: 1
+  Node mappings: 1
+[2m2026-01-23T14:55:21.932922Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m shutting down gossip registry
+[2m2026-01-23T14:55:21.933030Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m Cleaned up correlation tracker for disconnected peer [3mpeer_id[0m[2m=[0m625339f77b3a57474d7a06474a151217342f540b0aec2087dfcee791ae2f8ec5
+[2m2026-01-23T14:55:21.933243Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:21.933275Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m gossip registry shutdown complete
+[2m2026-01-23T14:55:21.933290Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m shutting down gossip registry
+[2m2026-01-23T14:55:21.933341Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m Cleaned up correlation tracker for disconnected peer [3mpeer_id[0m[2m=[0m048c6e91f045747b90de8df3b8e5cd99e6c6f2f4ea729aab21c38f9ffabfd72d
+[2m2026-01-23T14:55:21.933509Z[0m [32m INFO[0m [2mkameo_remote::connection_pool[0m[2m:[0m closed all 1 connections
+[2m2026-01-23T14:55:21.933528Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m gossip registry shutdown complete
+test test_node_name_based_connections ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+
+     Running tests/peer_discovery_symmetry.rs (target/debug/deps/peer_discovery_symmetry-f53eca48373f4ab8)
+
+running 2 tests
+test test_mesh_formation_metric_symmetric ... ok
+test test_peer_list_cleanup_symmetric ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+     Running tests/peer_discovery_tests.rs (target/debug/deps/peer_discovery_tests-15180ac1060bb355)
+
+running 17 tests
+test test_ssrf_bogon_filtering ... ok
+test test_resource_exhaustion_protection ... ok
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_known_peers_lru_capacity ... ok
+test test_feature_flag_disabled_no_discovery ... ok
+test test_advertised_address_routing ... ok
+test test_local_connection_wins ... ok
+test test_identity_tls_verification ... ok
+test test_version_negotiation_v2_capabilities ... ok
+test test_known_peers_no_amnesia ... ok
+test test_peer_list_ttl_cleanup ... ok
+test test_peer_discovery_metrics ... ok
+test test_simultaneous_dial_tiebreaker ... ok
+test test_mesh_formation_3_nodes ... ok
+test test_connect_on_demand_soft_cap ... ok
+test test_stale_peer_eviction_ttl ... ok
+test test_failure_recovery_backoff ... ok
+test test_partition_heal_behavior ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s
+
+     Running tests/peer_discovery_toctou_test.rs (target/debug/deps/peer_discovery_toctou_test-3fe85afa0ba7bd1b)
+
+running 3 tests
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+Peer 127.0.0.1:59705 state: PeerInfo { address: 127.0.0.1:59705, peer_address: None, node_id: Some(PublicKey(eba0a4802c…)), failures: 0, last_attempt: 1769180127, last_success: 1769180127, last_sequence: 0, last_sent_sequence: 0, consecutive_deltas: 0, last_failure_time: None }
+Connection existed before: true, removed: true
+test test_peer_state_transitions ... ok
+test test_connection_teardown_aborts_tasks ... ok
+test test_max_peers_respected_under_concurrent_discovery ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+     Running tests/pooled_send_bench.rs (target/debug/deps/pooled_send_bench-90d91d9c5aac9ab4)
+
+running 1 test
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+🎫 [PERMIT] #32 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #64 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #96 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #128 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #160 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #192 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #224 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #256 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #288 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #320 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #352 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #384 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #416 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #448 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #480 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #512 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #544 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #576 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #608 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #640 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #672 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #704 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #736 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #768 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #800 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #832 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #864 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #896 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #928 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #960 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #992 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1000 acquiring control permit (available: 24/256)
+[tell] size=128B count=1000 throughput=645665 msg/s allocs=129 deallocs=126
+[ask] size=128B count=1000 throughput=1301448 msg/s allocs=51 deallocs=54
+🎫 [PERMIT] #1048 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1080 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1112 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1144 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1176 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1208 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1240 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1272 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1304 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1336 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1368 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1400 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1432 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1464 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1496 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1528 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1560 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1592 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1624 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1656 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1688 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1720 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1752 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1784 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1816 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1848 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1880 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1912 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1944 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1976 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2000 acquiring control permit (available: 8/256)
+🎫 [PERMIT] #2008 acquiring control permit (available: 0/256)
+[tell] size=4096B count=1000 throughput=604260 msg/s allocs=125 deallocs=129
+[ask] size=4096B count=1000 throughput=777882 msg/s allocs=50 deallocs=54
+🎫 [PERMIT] #2064 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2096 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2128 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2160 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2192 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2224 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2256 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2288 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2320 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2352 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2384 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2416 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2448 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2480 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2512 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2544 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2576 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2608 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2640 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2672 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2704 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2736 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2768 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2800 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2832 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2864 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2896 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2928 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2960 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2992 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #3000 acquiring control permit (available: 24/256)
+🎫 [PERMIT] #3024 acquiring control permit (available: 0/256)
+[tell] size=65536B count=1000 throughput=167972 msg/s allocs=128 deallocs=132
+[ask] size=65536B count=1000 throughput=284552 msg/s allocs=32 deallocs=34
+test test_pooled_send_benchmarks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/pooled_typed_send.rs (target/debug/deps/pooled_typed_send-fa85894b23b2fa43)
+
+running 2 tests
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test test_pooled_typed_send_matches_wire_bytes ... ok
+test test_write_ask_progresses_under_load ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/register_actor_sync_multiple_peers.rs (target/debug/deps/register_actor_sync_multiple_peers-1d40b1c9e5cb4bea)
+
+running 4 tests
+test test_register_actor_sync_multiple_peers_some_reject ... ok
+test test_register_actor_sync_multiple_peers_first_ack_wins ... ok
+test test_register_actor_sync_peer_health_changes_during_wait ... ok
+test test_register_actor_sync_race_condition_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/register_actor_sync_real_peers.rs (target/debug/deps/register_actor_sync_real_peers-d5ca4ddbe3ccd0ff)
+
+running 4 tests
+🚀 Starting peer timeout test...
+🚀 Starting real peer test...
+🚀 Starting no-peers vs with-peers comparison test...
+🚀 Starting multiple peers test...
+✅ Node1 started on 127.0.0.1:59744
+✅ Solo node started on 127.0.0.1:59743
+✅ Node0 started on 127.0.0.1:59742
+⏱️  Solo registration completed in 89.667µs
+✅ Node2 started on 127.0.0.1:59745
+✅ Node1 started on 127.0.0.1:59746
+✅ Node2 started on 127.0.0.1:59751
+✅ Node3 started on 127.0.0.1:59754
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+🔗 Nodes connected as peers
+🔗 All nodes connected in full mesh
+📝 Registering actor 'test_actor' with sync on node1...
+🔍 FAST_PATH: Processing immediate priority actor: test_actor propagation_time_ms=0.213ms
+🔗 Peer nodes connected
+🔗 Nodes connected, testing timeout scenario
+⏱️  Registration completed in 388.125µs
+✅ Registration succeeded - got ACK from peer!
+🔇 Node2 shut down to simulate unresponsive peer
+🔍 FAST_PATH: Processing immediate priority actor: peer_actor propagation_time_ms=0.171ms
+⏱️  Peer registration completed in 325.167µs
+✅ Timing validation passed:
+   Solo (no peers): 89.667µs
+   With peer: 325.167µs
+📝 Registering actor with 3 peers...
+🔍 FAST_PATH: Processing immediate priority actor: multi_peer_actor propagation_time_ms=0.253ms
+🔍 FAST_PATH: Processing immediate priority actor: multi_peer_actor propagation_time_ms=0.335ms
+🔍 FAST_PATH: Processing immediate priority actor: multi_peer_actor propagation_time_ms=0.430ms
+⏱️  Multi-peer registration completed in 544.083µs
+✅ Registration succeeded - got ACK from at least one peer!
+⏱️  Registration with timeout completed in 501.381917ms
+✅ Timeout behavior validated - graceful fallback works
+✅ Timeout test completed successfully
+test test_register_actor_sync_real_peer_timeout ... ok
+🔍 Node1 lookup result: true
+🔍 Node2 lookup result: true
+✅ Test completed successfully
+✅ Comparison test completed successfully
+test test_register_actor_sync_real_single_peer ... ok
+test test_register_actor_sync_real_no_peers_vs_with_peers ... ok
+🔍 Node0 can find actor: ✅
+🔍 Node1 can find actor: ✅
+🔍 Node2 can find actor: ✅
+🔍 Node3 can find actor: ✅
+🔄 Node0 shut down
+🔄 Node1 shut down
+🔄 Node2 shut down
+🔄 Node3 shut down
+✅ Multiple peers test completed successfully
+test test_register_actor_sync_real_multiple_peers ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.24s
+
+     Running tests/register_actor_sync_simple.rs (target/debug/deps/register_actor_sync_simple-3f9f48b29931d471)
+
+running 6 tests
+test test_register_actor_sync_only_failed_peers ... ok
+test test_register_actor_sync_no_peers ... ok
+test test_register_actor_sync_peer_rejects ... ok
+test test_register_actor_sync_channel_closed ... ok
+test test_register_actor_sync_with_healthy_peers ... ok
+test test_register_actor_sync_timeout ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/tell_message_api_demo.rs (target/debug/deps/tell_message_api_demo-f5acef0a9cdc0f5f)
+
+running 2 tests
+🚀 High-Volume Performance Test
+===============================
+🚀 TellMessage API Comprehensive Test
+=====================================
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+📊 Test Configuration:
+   - Messages: 1000
+   - Message size: 512 bytes
+   - Total data: 0.49 MB
+
+🔥 Warming up connection...
+✅ Connection established between nodes
+
+📊 PART 1: NON-GOSSIP APPLICATION DATA
+======================================
+
+🔸 Test 1A: Single Application Messages
+   Messages to send:
+     1. "Hello, how are you?" (19 bytes)
+     2. "I'm working on a distributed system" (35 bytes)
+     3. "The TellMessage API is really cool!" (35 bytes)
+     4. "It supports both single and batch messages" (42 bytes)
+     5. "Performance is excellent on localhost" (37 bytes)
+
+   Sending messages individually (5 separate tell() calls):
+
+🔸 Test 1: 1000 Individual Messages
+     Message 1: 3.75 μs
+   - Sent 0/1000 messages
+     Message 2: 3.666 μs
+     Message 3: 1.333 μs
+     Message 4: 0.875 μs
+     Message 5: 0.834 μs
+   📈 Single Message Results:
+     - Total time: 20.5µs (20.500 μs)
+     - Average per message: 4.1µs (4.100 μs)
+     - Method: 5 separate conn.tell() calls
+
+🔸 Test 1B: Same Messages as Single Batch
+   Batch configuration:
+     - 5 messages in one batch
+🎫 [PERMIT] #     - Total payload: 168 bytes
+38 acquiring control permit (available: 0/     - Method: Single conn.tell() call with batch
+256)
+   📈 Batch Message Results:
+     - Total time: 6.5µs (6.500 μs)
+     - Average per message: 1.3µs (1.300 μs)
+     - Method: 1 batched conn.tell() call
+   🎯 Performance Improvement: 3.15x faster with batching
+
+📊 PART 2: LARGER DATA PAYLOADS (File Transfer Simulation)
+=========================================================
+
+🔸 Test 2A: File Transfer - Individual Sends
+   Files to transfer:
+     - config.json: 1024 bytes
+     - data.csv: 2048 bytes
+     - image.jpg: 4096 bytes
+     - document.pdf: 8192 bytes
+     File 1: config.json transferred in 2.834µs (2.834 μs)
+     File 2: data.csv transferred in 1.042µs (1.042 μs)
+     File 3: image.jpg transferred in 3.417µs (3.417 μs)
+     File 4: document.pdf transferred in 4.542µs (4.542 μs)
+   📈 Individual File Transfer Results:
+     - Total time: 16.416µs (16.416 μs)
+     - Total data: 15360 bytes (15.00 KB)
+     - Throughput: 892.33 MB/s
+
+🔸 Test 2B: File Transfer - Batch Send
+   Batch transfer configuration:
+     - 4 files in one batch
+     - Total payload: 15360 bytes (15.00 KB)
+   📈 Batch File Transfer Results:
+     - Total time: 3.708µs (3.708 μs)
+     - Total data: 15360 bytes (15.00 KB)
+     - Throughput: 3950.50 MB/s
+   🎯 Performance Improvement: 4.43x faster, 4.43x better throughput
+
+📊 PART 3: MIXED GOSSIP AND APPLICATION DATA
+============================================
+
+🔸 Test 3A: Gossip Activity (Actor Registration)
+🎫 [PERMIT] #76 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #108 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #141 acquiring control permit (available: 0/256)
+🔍 FAST_PATH: Processing immediate priority actor: test_actor propagation_time_ms=0.957ms
+🎫 [PERMIT] #173 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #205 acquiring control permit (available: 0/256)
+   - Sent 200/1000 messages
+🎫 [PERMIT] #237 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #269 acquiring control permit (available: 0/256)
+   📈 Gossip Propagation:
+     - Actor registered and propagated in: 2.510542ms (2510.542 μs)
+     - This used the same connection pool as our application data
+
+🔸 Test 3B: Application Data After Gossip
+   📈 Application Data After Gossip:
+     - 3 messages sent in: 12.958µs (12.958 μs)
+     - Average per message: 4.319µs (4.319 μs)
+
+📊 PART 4: ASK() REQUEST-RESPONSE PATTERNS
+==========================================
+
+🔸 Test 4A: Simple ask() Requests
+   API requests to test:
+     1. "GET /api/users" (14 bytes)
+     2. "POST /api/messages" (18 bytes)
+     3. "PUT /api/settings" (17 bytes)
+     4. "DELETE /api/cache" (17 bytes)
+🎫 [PERMIT] #305 acquiring control permit (available: 0/256)
+     Request 1: "GET /api/users" -> "RECEIVED:14 bytes, content: 'GET /api/users'" in 166.375µs (166.375 μs)
+🎫 [PERMIT] #337 acquiring control permit (available: 0/256)
+     Request 2: "POST /api/messages" -> "RECEIVED:18 bytes, content: 'POST /api/messages'" in 137.125µs (137.125 μs)
+🎫 [PERMIT] #371 acquiring control permit (available: 0/256)
+     Request 3: "PUT /api/settings" -> "RECEIVED:17 bytes, content: 'PUT /api/settings'" in 110.875µs (110.875 μs)
+🎫 [PERMIT] #403 acquiring control permit (available: 0/256)
+     Request 4: "DELETE /api/cache" -> "RECEIVED:17 bytes, content: 'DELETE /api/cache'" in 135.958µs (135.958 μs)
+   📈 ask() Request-Response Results:
+     - Total time: 563.709µs (563.709 μs)
+     - Average per request: 140.927µs (140.927 μs)
+     - Note: Currently using mock responses (placeholder implementation)
+
+🔸 Test 4B: High-Volume ask() Requests
+   High-volume test configuration:
+     - Request: "GET /api/status" (15 bytes)
+     - Count: 100 requests
+     - Completed 0/100 requests
+   - Sent 400/1000 messages
+🎫 [PERMIT] #438 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #470 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #504 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #537 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #571 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #603 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #638 acquiring control permit (available: 0/256)
+   - Sent 600/1000 messages
+🎫 [PERMIT] #671 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #705 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #737 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #771 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #804 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #838 acquiring control permit (available: 0/256)
+   - Sent 800/1000 messages
+🎫 [PERMIT] #871 acquiring control permit (available: 0/256)
+     - Completed 20/100 requests
+🎫 [PERMIT] #906 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #938 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #973 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1000 acquiring control permit (available: 5/256)
+🎫 [PERMIT] #1006 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1040 acquiring control permit (available: 0/256)
+   📈 Individual Message Results:
+     - Total time: 7.896542ms
+     - Messages/sec: 126638
+     - Throughput: 61.83 MB/s
+     - Avg latency: 7.897 μs
+
+🔸 Test 2: Batched Messages (50 messages per batch)
+   - Batch size: 50 messages
+   - Number of batches: 20
+   - Sent batch 0/20 (0 messages)
+   - Sent batch 4/20 (200 messages)
+   - Sent batch 8/20 (400 messages)
+   - Sent batch 12/20 (600 messages)
+🎫 [PERMIT] #1074 acquiring control permit (available: 0/256)
+   - Sent batch 16/20 (800 messages)
+   📈 Batch Message Results:
+     - Total time: 665.459µs
+     - Messages/sec: 1502722
+     - Throughput: 733.75 MB/s
+     - Avg latency: 0.665 μs
+
+🎯 PERFORMANCE COMPARISON:
+   - Batch is 11.87x faster than individual messages
+   - Throughput improvement: 11.87x
+   - Time saved: 7.231083ms (91.6% reduction)
+
+💡 Key Insights:
+   - Batching reduces per-message overhead (TCP headers, system calls)
+   - Larger batches = better performance (up to a point)
+   - Network latency is amortized across multiple messages
+   - CPU usage is more efficient with batching
+
+✅ High-volume performance test completed successfully!
+     - Completed 40/100 requests
+test test_tell_message_high_volume_performance ... ok
+     - Completed 60/100 requests
+     - Completed 80/100 requests
+   📈 High-Volume ask() Results:
+     - Total time: 14.044167ms (14044.167 μs)
+     - Average latency: 140.441µs (140.441 μs)
+     - Requests/sec: 7120
+     - P50 latency: 143.125µs (143.125 μs)
+     - P95 latency: 195.334µs (195.334 μs)
+     - P99 latency: 207.916µs (207.916 μs)
+
+🔸 Test 4C: ask() vs tell() Performance Comparison
+   Comparison test configuration:
+     - Message: "PING test message" (17 bytes)
+     - Count: 50 operations each
+
+   Testing tell() (fire-and-forget):
+     - tell() 0/50 sent
+     - tell() 10/50 sent
+     - tell() 20/50 sent
+     - tell() 30/50 sent
+🎫 [PERMIT] #1183 acquiring control permit (available: 0/256)
+     - tell() 40/50 sent
+
+   Testing ask() (request-response):
+     - ask() 0/50 completed
+     - ask() 10/50 completed
+     - ask() 20/50 completed
+     - ask() 30/50 completed
+     - ask() 40/50 completed
+   📊 tell() vs ask() Comparison:
+     tell() (fire-and-forget):
+       - Total time: 98.833µs (98.833 μs)
+       - Average latency: 1.976µs (1.976 μs)
+       - Operations/sec: 505904
+     ask() (request-response):
+       - Total time: 6.141833ms (6141.833 μs)
+       - Average latency: 122.836µs (122.836 μs)
+       - Operations/sec: 8141
+     🎯 ask() overhead: 62.14x slower than tell() (expected due to response handling)
+
+🎯 SUMMARY AND RECOMMENDATIONS
+==============================
+
+✅ Connection Pool API Benefits:
+   1. **tell() - Fire-and-forget**: Automatic detection works with single messages, arrays, and batches
+   2. **ask() - Request-response**: Simple API for synchronous communication patterns
+   3. **Performance**: Batching provides 3.2x-4.4x speedup for multiple messages
+   4. **Shared Infrastructure**: Same connection pool handles gossip, application data, and request-response
+   5. **Type Safety**: Compile-time guarantees with ergonomic API
+
+📋 When to Use tell() (Fire-and-forget):
+   - ✅ Notifications and events
+   - ✅ Logging and metrics
+   - ✅ Multiple small messages (use batching)
+   - ✅ High-throughput data streaming
+
+📋 When to Use ask() (Request-response):
+   - ✅ API calls requiring responses
+   - ✅ Database queries
+   - ✅ Configuration requests
+   - ✅ Health checks and status queries
+
+📋 When to Use Batching:
+   - ✅ Multiple small messages (chat, notifications, logs)
+   - ✅ File transfers with multiple files
+   - ✅ Bulk data operations
+   - ✅ High-frequency updates
+
+🔧 API Usage Examples:
+   // Fire-and-forget (tell):
+   conn.tell(data).await?;                    // Single message
+   conn.tell(&[&data1, &data2]).await?;      // Batch (auto-detected)
+   conn.tell(TellMessage::batch(vec![&data1, &data2])).await?;
+   
+   // Request-response (ask):
+   let response = conn.ask(request).await?;   // Returns Vec<u8>
+   
+   // Mixed patterns:
+   conn.tell(notification).await?;           // Send notification
+   let status = conn.ask(health_check).await?; // Get status
+
+✅ Test completed successfully!
+test test_tell_message_api_comprehensive ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/tell_with_lookup_demo.rs (target/debug/deps/tell_with_lookup_demo-856de8e411c38fa3)
+
+running 2 tests
+🔍 Testing lookup error handling
+🚀 TellMessage with Lookup() Performance Test
+=============================================
+📡 Setting up 3-node cluster...
+✅ Lookup correctly returns None for non-existent actors
+test test_lookup_error_handling ... ok
+
+🔗 Establishing peer connections...
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+✅ All nodes connected in mesh topology
+
+📋 Registering actors on each node...
+   ✅ Node1: registered 'chat_service' at 127.0.0.1:39001
+🔍 FAST_PATH: Processing immediate priority actor: chat_service propagation_time_ms=1.112ms
+🔍 FAST_PATH: Processing immediate priority actor: chat_service propagation_time_ms=6.245ms
+   ✅ Node2: registered 'auth_service' at 127.0.0.1:39002
+🔍 FAST_PATH: Processing immediate priority actor: auth_service propagation_time_ms=11.605ms
+   ✅ Node3: registered 'storage_service' at 127.0.0.1:39003
+
+⏳ Waiting for gossip propagation...
+🔍 FAST_PATH: Processing immediate priority actor: storage_service propagation_time_ms=6.480ms
+✅ All actors propagated in: 138.792µs (0.000 ms)
+
+📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION
+==============================================
+
+🔸 Looking up actors and creating references...
+   ✅ Created actor references:
+     - chat_service at 127.0.0.1:39001 (peer: e639f3e14e3e420c3d45f7746f84dfe703326e78e1f30bb6977bdbdae2fb839c)
+     - auth_service at 127.0.0.1:39002 (peer: 05e3503c998ff4afc2d390dbd3e667a715171751d8838cb964f7d3a9631c1327)
+     - storage_service at 127.0.0.1:39003 (peer: d02da1828c9cf14a0f7c7627315e9704e288f4eb52ec8eb03c7b01c9bebcae19)
+   📈 Total lookup and connection time: 6.089791ms (6089.791 μs)
+
+📊 PART 2: MESSAGE SENDING PERFORMANCE
+=====================================
+
+🔸 Test 2A: Individual Message Sending (using saved actor refs)
+   Messages to send:
+     1. chat_service <- "New message from user123" (24 bytes)
+     2. auth_service <- "Validate token abc123xyz" (24 bytes)
+     3. storage_service <- "Store file document.pdf" (23 bytes)
+     4. chat_service <- "User456 joined the room" (23 bytes)
+     5. auth_service <- "Refresh token requested" (23 bytes)
+     6. storage_service <- "Retrieve file image.jpg" (23 bytes)
+     Message 1 to chat_service: 5.917µs (5.917 μs)
+     Message 2 to auth_service: 3.709µs (3.709 μs)
+     Message 3 to storage_service: 2µs (2.000 μs)
+     Message 4 to chat_service: 875ns (0.875 μs)
+     Message 5 to auth_service: 792ns (0.792 μs)
+     Message 6 to storage_service: 833ns (0.833 μs)
+   📈 Individual Sending Results:
+     - Total time: 26.209µs (26.209 μs)
+     - Average per message: 4.368µs (4.368 μs)
+
+🔸 Test 2B: Sequential Sending (using actor refs, no lookups)
+   📈 Sequential Sending Results:
+     - Total time: 5.625µs (5.625 μs)
+     - Average per message: 937ns (0.937 μs)
+
+🔸 Test 2C: True Batch Sending (group messages by destination)
+   Message groups:
+     - chat_service: 2 messages
+     - auth_service: 2 messages
+     - storage_service: 2 messages
+   📈 True Batch Results:
+     - Total time: 16µs (0.000 ms)
+     - Average per message: 2.666µs (2.666 μs)
+
+🎯 PERFORMANCE COMPARISON
+=========================
+
+📊 Results Summary:
+   Individual (one by one with actor refs):
+     - Total: 26.209µs (26.209 μs)
+     - Per message: 4.368µs (4.368 μs)
+   Sequential (same as individual, just timed differently):
+     - Total: 5.625µs (5.625 μs)
+     - Per message: 937ns (0.937 μs)
+   Batch (group by destination):
+     - Total: 16µs (16.000 μs)
+     - Per message: 2.666µs (2.666 μs)
+     - Speedup vs individual: 1.64x
+     - Speedup vs sequential: 0.35x
+
+💡 Key Insights:
+   1. Actor refs eliminate lookup overhead - store refs after first lookup
+   2. Batch sending provides 0.4x-1.6x speedup by reducing network overhead
+   3. Initial lookup + connection time: 2029.930 μs per actor
+   4. Once actor refs are created, sending is very fast (~4.4 μs per message)
+
+📊 PART 3: HIGH VOLUME PERFORMANCE TEST
+======================================
+
+🔸 Test 3A: High Volume Individual (300x3 = 900 total messages)
+🎫 [PERMIT] #106 acquiring control permit (available: 0/256)
+   - Sent 50/300 rounds
+🎫 [PERMIT] #202 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #298 acquiring control permit (available: 0/256)
+   - Sent 100/300 rounds
+🎫 [PERMIT] #394 acquiring control permit (available: 0/256)
+   - Sent 150/300 rounds
+🎫 [PERMIT] #490 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #586 acquiring control permit (available: 0/256)
+   - Sent 200/300 rounds
+🎫 [PERMIT] #682 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #778 acquiring control permit (available: 0/256)
+   - Sent 250/300 rounds
+🎫 [PERMIT] #874 acquiring control permit (available: 0/256)
+   📈 High Volume Individual Results:
+     - Total: 4.352875ms (4.000 ms)
+     - Per message: 4.836µs (4.836 μs)
+     - Messages/sec: 206760
+
+🔸 Test 3B: High Volume Batch (pre-lookup + batch by destination)
+   📈 High Volume Batch Results:
+     - Total: 140.333µs (0.000 ms)
+     - Per message: 155ns (0.155 μs)
+     - Messages/sec: 6413317
+   🎯 High volume improvement: 31.0x faster with batching
+
+📋 RECOMMENDATIONS
+==================
+
+✅ Best Practices:
+   1. Do lookup() once and save actor refs for repeated communication
+   2. Group messages by destination actor for batch sending
+   3. Use tell() for fire-and-forget, ask() for request-response
+   4. For high-throughput scenarios, batching provides 2x-31x improvement
+
+🔧 Code Examples:
+   // Create actor ref once:
+   let location = registry.lookup("chat_service").await?;
+   let conn = registry.get_connection(peer_addr).await?;
+   let chat_ref = ActorRef { location, conn };
+
+   // Use actor ref for all messages:
+   chat_ref.conn.tell(message1).await?;
+   chat_ref.conn.tell(message2).await?;
+
+   // Or batch messages:
+   let messages = vec![msg1, msg2, msg3];
+   chat_ref.conn.tell(TellMessage::batch(messages)).await?;
+
+✅ Test completed successfully!
+test test_tell_with_lookup_and_performance_comparison ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/test_peer_initialization.rs (target/debug/deps/test_peer_initialization-3ec480cd42b30d41)
+
+running 1 test
+🧪 Testing proposed peer initialization with names
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+
+🔍 Testing full mesh discovery:
+
+From node1:
+  lookup('service1') = true
+  lookup('service2') = true
+  lookup('service3') = true
+
+From node2:
+  lookup('service1') = true
+  lookup('service2') = true
+  lookup('service3') = true
+
+From node3:
+  lookup('service1') = true
+  lookup('service2') = true
+  lookup('service3') = true
+test test_peer_initialization_with_names ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/timing_debug.rs (target/debug/deps/timing_debug-37c89f9ef9c8bef3)
+
+running 1 test
+🔍 Debugging Timing Variations
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+📊 Testing 10 sequential registrations to capture timing variations:
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_0 propagation_time_ms=0.435ms
+  Registration 0: 1.98825ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_1 propagation_time_ms=0.406ms
+  Registration 1: 1.940542ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_2 propagation_time_ms=0.524ms
+  Registration 2: 2.012542ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_3 propagation_time_ms=0.369ms
+  Registration 3: 1.800042ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_4 propagation_time_ms=0.351ms
+  Registration 4: 1.840458ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_5 propagation_time_ms=0.422ms
+  Registration 5: 800.458µs
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_6 propagation_time_ms=0.976ms
+  Registration 6: 1.597875ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_7 propagation_time_ms=0.652ms
+  Registration 7: 2.519542ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_8 propagation_time_ms=0.675ms
+  Registration 8: 2.554792ms
+🔍 FAST_PATH: Processing immediate priority actor: test_actor_9 propagation_time_ms=0.974ms
+  Registration 9: 3.025333ms
+test debug_timing_variations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/tls_integration.rs (target/debug/deps/tls_integration-03cdfe1121323a87)
+
+running 7 tests
+test test_node_id_dns_encoding ... ok
+test test_certificate_generation ... ok
+[2m2026-01-23T14:55:31.575922Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59792 [3mpeer_id[0m[2m=[0mf84b8a724673e445ad37f21978afc39efbe825ee36e1d5dfeb5bcee948161589
+[2m2026-01-23T14:55:31.575933Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59794 [3mpeer_id[0m[2m=[0m4dc95eac5b834036e929fbb98510058a4ef9e8fadd17fd3ae3499f26a1fffded
+[2m2026-01-23T14:55:31.575925Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59793 [3mpeer_id[0m[2m=[0m693f2ec325bb420a67b1190d8aa0006a0354795ab13dbdd5c6f9e797e27f5367
+[2m2026-01-23T14:55:31.576115Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59795 [3mpeer_id[0m[2m=[0m8ed357977fbb6317d7e1efc8c3cdfcf70f2a69c0d7017947266a197c9595b8c5
+[2m2026-01-23T14:55:31.576130Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59796 [3mpeer_id[0m[2m=[0md46eff0bd0f9d16cac513c651063e3c070e7d0ee0ee037ea56753ffb04c72cfc
+[2m2026-01-23T14:55:31.576775Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16d53bcb0
+[2m2026-01-23T14:55:31.576869Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16dd6de70
+[2m2026-01-23T14:55:31.577102Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16db5a100
+[2m2026-01-23T14:55:31.577112Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16e183310
+[2m2026-01-23T14:55:31.577121Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.577139Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16d956090
+[2m2026-01-23T14:55:31.577166Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59792
+[2m2026-01-23T14:55:31.577261Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.577285Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59794
+[2m2026-01-23T14:55:31.577413Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59797 [3mpeer_id[0m[2m=[0m60dcb6e86c56654e1ae96f346df2654496e0d39c643c0b297d5d261f2ceb2cd0
+[2m2026-01-23T14:55:31.577538Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59798 [3mpeer_id[0m[2m=[0m41e7283b5ee751eb033a030e3382bc86a2190a50cef313ed265f1f43ff6bd671
+[2m2026-01-23T14:55:31.577661Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.577682Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59795
+[2m2026-01-23T14:55:31.577716Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.577743Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59793
+[2m2026-01-23T14:55:31.577751Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.577776Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59796
+[2m2026-01-23T14:55:31.577798Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16d53bcb0
+[2m2026-01-23T14:55:31.577919Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59799 [3mpeer_id[0m[2m=[0m1071878e93ae94737a0655e782dc697ab431a04bfee1e5b44081b944deb5835e
+[2m2026-01-23T14:55:31.577941Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16dd6de70
+[2m2026-01-23T14:55:31.577971Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59800 [3mpeer_id[0m[2m=[0mfc9a652df83680d4ad01d92c6b27adcecc007c37a10f1de9b30fd781167f085f
+[2m2026-01-23T14:55:31.577989Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59801 [3mpeer_id[0m[2m=[0m757be22e5934b3553c6066b2c019cf5f8cd5f7454af9ff92dd22bf685a4bbf82
+[2m2026-01-23T14:55:31.578369Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.578388Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59797
+[2m2026-01-23T14:55:31.578411Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59797 [3mself_addr[0m[2m=[0m127.0.0.1:59792 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.578452Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.578460Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59797 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.578470Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59798
+[2m2026-01-23T14:55:31.578479Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59798 [3mself_addr[0m[2m=[0m127.0.0.1:59794 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.578501Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59798 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.578509Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59794 [3mself_addr[0m[2m=[0m127.0.0.1:59798 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.578520Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59794 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.578547Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16db5a100
+[2m2026-01-23T14:55:31.578640Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mtest_actor [3mbind_addr[0m[2m=[0m127.0.0.1:59794 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.578641Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mactor_a [3mbind_addr[0m[2m=[0m127.0.0.1:59792 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.578657Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16e183310
+[2m2026-01-23T14:55:31.578739Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16d956090
+[2m2026-01-23T14:55:31.578736Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59794
+[2m2026-01-23T14:55:31.578745Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mactor_b [3mbind_addr[0m[2m=[0m127.0.0.1:59797 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.578775Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.578782Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59792
+[2m2026-01-23T14:55:31.578792Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.578810Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.578820Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.578824Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59798
+[2m2026-01-23T14:55:31.578854Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59797
+[2m2026-01-23T14:55:31.578869Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.578872Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.578885Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.578896Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.579055Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.579072Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59799
+[2m2026-01-23T14:55:31.579154Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.579169Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59800
+[2m2026-01-23T14:55:31.579175Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59800 [3mself_addr[0m[2m=[0m127.0.0.1:59793 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579192Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59800 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579200Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.579201Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59793 [3mself_addr[0m[2m=[0m127.0.0.1:59800 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579211Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59801
+[2m2026-01-23T14:55:31.579213Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59793 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579216Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59801 [3mself_addr[0m[2m=[0m127.0.0.1:59796 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579236Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59801 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579238Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m creating new gossip registry [3mbind_addr[0m[2m=[0m127.0.0.1:59802 [3mpeer_id[0m[2m=[0mc96d4b6ffd0e8975a4c68178376f652052cc2639a1295e3f78d3cd523c2639e1
+[2m2026-01-23T14:55:31.579240Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59796 [3mself_addr[0m[2m=[0m127.0.0.1:59801 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579254Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59796 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579347Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0msecret_actor [3mbind_addr[0m[2m=[0m127.0.0.1:59801 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.579356Z[0m [34mDEBUG[0m [2mkameo_remote::connection_pool[0m[2m:[0m CONNECTION POOL: Created new pool at 0x16db5a100
+[2m2026-01-23T14:55:31.579353Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mpersistent_actor [3mbind_addr[0m[2m=[0m127.0.0.1:59793 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.579375Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59796
+[2m2026-01-23T14:55:31.579392Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.579399Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.579403Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59793
+[2m2026-01-23T14:55:31.579417Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59801
+[2m2026-01-23T14:55:31.579428Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.579431Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.579435Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.579447Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.579480Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59800
+[2m2026-01-23T14:55:31.579498Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.579508Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.579677Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m TLS enabled for gossip registry
+[2m2026-01-23T14:55:31.579687Z[0m [32m INFO[0m [2mkameo_remote::handle[0m[2m:[0m TLS-enabled gossip registry started [3mbind_addr[0m[2m=[0m127.0.0.1:59802
+[2m2026-01-23T14:55:31.579691Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59799 [3mself_addr[0m[2m=[0m127.0.0.1:59795 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579700Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59799 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579710Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m add_peer_with_node_id called [3mpeer[0m[2m=[0m127.0.0.1:59802 [3mself_addr[0m[2m=[0m127.0.0.1:59799 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579719Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m 📌 Added new peer (listening address) [3mpeer[0m[2m=[0m127.0.0.1:59802 [3mpeers_count[0m[2m=[0m1 [3mhas_node_id[0m[2m=[0mtrue
+[2m2026-01-23T14:55:31.579814Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mactor_a [3mbind_addr[0m[2m=[0m127.0.0.1:59795 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.579912Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mactor_b [3mbind_addr[0m[2m=[0m127.0.0.1:59799 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.580009Z[0m [32m INFO[0m [2mkameo_remote::registry[0m[2m:[0m REGISTERED_ACTOR [3mactor_name[0m[2m=[0mactor_c [3mbind_addr[0m[2m=[0m127.0.0.1:59802 [3mpriority[0m[2m=[0mNormal
+[2m2026-01-23T14:55:31.580040Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59795
+[2m2026-01-23T14:55:31.580061Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.580071Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.580096Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59799
+[2m2026-01-23T14:55:31.580113Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.580121Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:31.580143Z[0m [32m INFO[0m [1mstart_gossip_server_with_listener[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip server started [3mbind_addr[0m[2m=[0m127.0.0.1:59802
+[2m2026-01-23T14:55:31.580158Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m start_gossip_timer function called
+[2m2026-01-23T14:55:31.580165Z[0m [34mDEBUG[0m [1mstart_gossip_timer[0m[2m:[0m [2mkameo_remote::handle[0m[2m:[0m gossip timer started with non-blocking I/O [3mgossip_interval_ms[0m[2m=[0m5000 [3mcleanup_interval_secs[0m[2m=[0m60 [3mvector_clock_gc_interval_secs[0m[2m=[0m300 [3mpeer_gossip_interval_secs[0m[2m=[0m30
+[2m2026-01-23T14:55:32.080196Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0mtest_actor
+[2m2026-01-23T14:55:32.080196Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0msecret_actor
+
+thread 'test_mutual_authentication' (154126710) panicked at tests/tls_integration.rs:60:5:
+Actor should be found on registry B
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_impersonation_prevention' (154126708) panicked at tests/tls_integration.rs:149:5:
+assertion `left == right` failed: Should have no connected peers due to NodeId mismatch
+  left: 1
+ right: 0
+[2m2026-01-23T14:55:32.080931Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0mpersistent_actor
+
+thread 'test_tls_reconnection' (154126712) panicked at tests/tls_integration.rs:366:5:
+B should know about A's actor
+test test_impersonation_prevention ... FAILED
+test test_tls_reconnection ... FAILED
+test test_mutual_authentication ... FAILED
+[2m2026-01-23T14:55:32.580574Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0mactor_b
+[2m2026-01-23T14:55:32.580622Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0mactor_a
+
+thread 'test_bidirectional_tls_communication' (154126706) panicked at tests/tls_integration.rs:212:5:
+A should know about B's actor
+test test_bidirectional_tls_communication ... FAILED
+[2m2026-01-23T14:55:33.582859Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0mactor_a
+[2m2026-01-23T14:55:33.582920Z[0m [34mDEBUG[0m [2mkameo_remote::registry[0m[2m:[0m actor not found [3mactor_name[0m[2m=[0mactor_c
+
+thread 'test_multi_node_tls_chain' (154126709) panicked at tests/tls_integration.rs:290:5:
+B should know about A's actor
+test test_multi_node_tls_chain ... FAILED
+
+failures:
+
+failures:
+    test_bidirectional_tls_communication
+    test_impersonation_prevention
+    test_multi_node_tls_chain
+    test_mutual_authentication
+    test_tls_reconnection
+
+test result: FAILED. 2 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+error: test failed, to rerun pass `--test tls_integration`
+❌ Some tests failed - validation failed

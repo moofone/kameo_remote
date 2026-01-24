@@ -6,15 +6,21 @@ edition = "2021"
 [features]
 test-helpers = []
 io_uring = ["tokio-uring", "io-uring"]
+allow-non-zero-copy = []
+legacy_tell_bytes = []
+legacy_tell_bytes_unlocked = []
 
 [dependencies]
 async-trait = "0.1"
 bytes = "1.0"
+bytemuck = { version = "1.18", features = ["derive"] }
 dashmap = "6.1.0"
+arc-swap = "1.7"
 lru = "0.12"  # LRU cache for known-peers
 ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
 futures = "0.3"
 hex = "0.4"
+itoa = "1.0"
 parking_lot = "0.12"
 rand = "0.9.1"
 rkyv = { version = "0.8", features = ["bytecheck"] }
@@ -44,3 +50,9 @@ bytes = "1.0"
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-test = "0.2.5"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

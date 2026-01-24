@@ -3,10 +3,8 @@ mod common;
 use common::{connect_bidirectional, create_tls_node, force_disconnect, wait_for_condition};
 use kameo_remote::GossipConfig;
 use std::time::Duration;
-use tokio::time::sleep;
 
-#[tokio::test]
-async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
     let config = GossipConfig {
         gossip_interval: Duration::from_millis(200),
         // Keep automatic peer retries suppressed long enough for the forced
@@ -36,7 +34,20 @@ async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     force_disconnect(&node_b, &node_c).await;
-    sleep(Duration::from_millis(100)).await;
+    assert!(
+        wait_for_condition(Duration::from_secs(2), || async {
+            node_c.stats().await.active_peers == 0
+        })
+        .await,
+        "node C should drop all peers before continuing"
+    );
+    assert!(
+        wait_for_condition(Duration::from_secs(2), || async {
+            node_b.stats().await.active_peers == 1
+        })
+        .await,
+        "node B should stay connected only to node A before continuing"
+    );
 
     node_c
         .register("actor.partitioned".to_string(), "127.0.0.1:9602".parse()?)
@@ -65,4 +76,9 @@ async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
     node_c.shutdown().await;
 
     Ok(())
+}
+
+#[tokio::test]
+async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
+    run_partition_heal_flow().await
 }

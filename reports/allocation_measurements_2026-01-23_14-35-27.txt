@@ -1,0 +1,181 @@
+# Allocation measurements run
+Fri 23 Jan 2026 14:35:27 AST
+
+## bytemuck_allocation_tests (baseline)
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)
+warning: field `deallocations` is never read
+  --> tests/bytemuck_allocation_tests.rs:99:5
+   |
+97 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+98 |     allocations: usize,
+99 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "bytemuck_allocation_tests") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.21s
+     Running tests/bytemuck_allocation_tests.rs (target/debug/deps/bytemuck_allocation_tests-a7b60943283e9d5f)
+
+running 10 tests
+
+=== BASELINE: StreamHeader Full Roundtrip ===
+Allocations: 1000 (0 bytes) | Time: 1.187584ms
+  Result: 1000 allocations per 1000 roundtrips
+  Total bytes allocated: 0
+
+=== BASELINE: Hash Extraction Performance ===
+test baseline_full_streamheader_roundtrip_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 9.565333ms
+  Result: 0 heap allocations per 100,000 calls
+
+=== BASELINE: Header Assembly (copy_from_slice) ===
+test baseline_hash_extraction_performance ... ok
+Allocations: 0 (0 bytes) | Time: 1.015375ms
+  Result: 0 heap allocations (expected 0 - stack only)
+
+=== BASELINE: Hash Extraction (copy_from_slice) ===
+test baseline_header_assembly_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 942.291µs
+  Result: 0 heap allocations (expected 0 - stack only)
+
+=== BASELINE: PublicKey::from_bytes ===
+test baseline_hash_extraction_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 26.927959ms
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: NodeId::from_bytes ===
+test baseline_key_conversion_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 20.046542ms
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: StreamHeader::to_bytes ===
+test baseline_node_id_conversion_allocations ... ok
+Allocations: 1000 (0 bytes) | Time: 188.5µs
+  Result: 1000 allocations per 1000 calls
+  Total bytes allocated: 0
+  Bytes per call: 0
+
+=== BASELINE: StreamHeader::from_bytes ===
+test baseline_streamheader_to_bytes_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 228.208µs
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: StreamHeader Various Sizes ===
+Allocations: 100 (0 bytes) | Time: 24µs
+  Size 64: 100 allocations per 100 calls (0 bytes)
+test baseline_streamheader_from_bytes_allocations ... ok
+Allocations: 100 (0 bytes) | Time: 12.667µs
+  Size 256: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 13.417µs
+  Size 1024: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.583µs
+  Size 4096: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.875µs
+  Size 16384: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 13.041µs
+  Size 65536: 100 allocations per 100 calls (0 bytes)
+test baseline_streamheader_various_sizes_allocations ... ok
+
+
+╔═══════════════════════════════════════════════════════════════╗
+║           BASELINE ALLOCATION SUMMARY REPORT                  ║
+╚═══════════════════════════════════════════════════════════════╝
+
+1. StreamHeader::to_bytes (1000 calls)
+Allocations: 1000 (0 bytes) | Time: 118.667µs
+   → 1000 allocations, 0 bytes (0 bytes/call)
+
+2. StreamHeader::from_bytes (1000 calls)
+Allocations: 0 (0 bytes) | Time: 178.25µs
+   → 0 allocations, 0 bytes
+
+3. Hash extraction (10000 calls)
+Allocations: 0 (0 bytes) | Time: 284.125µs
+   → 0 heap allocations (stack only)
+
+4. PublicKey::from_bytes (1000 calls)
+Allocations: 0 (0 bytes) | Time: 15.093583ms
+   → 0 allocations, 0 bytes
+
+5. Header assembly (10000 calls)
+Allocations: 0 (0 bytes) | Time: 246.375µs
+   → 0 heap allocations (stack only)
+
+6. StreamHeader roundtrip (1000 calls)
+Allocations: 1000 (0 bytes) | Time: 268.417µs
+   → 1000 allocations, 0 bytes
+
+═══════════════════════════════════════════════════════════════
+  BASELINE COMPLETE - DO NOT MODIFY UNTIL OPTIMIZATION PHASE
+═══════════════════════════════════════════════════════════════
+test baseline_summary_all_tests ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+
+## body_allocation_baseline
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)
+warning: field `deallocations` is never read
+  --> tests/body_allocation_baseline.rs:47:5
+   |
+45 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+46 |     allocations: usize,
+47 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "body_allocation_baseline") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/body_allocation_baseline.rs (target/debug/deps/body_allocation_baseline-5351baead5d5099c)
+
+running 3 tests
+
+╔═════════════════════════════════════════════════╗
+║           ZERO-COPY BODY ACCESS SUMMARY        ║
+╚═════════════════════════════════════════════════╝
+
+KEY FINDING:
+  Archived access is zero-copy for RegistryMessage payloads
+  → No allocations for message body access
+
+EXPECTED BEHAVIOR:
+  rkyv::access::<Archived<RegistryMessage>>() returns &Archived<RegistryMessage>
+  → Zero-copy reference into serialized buffer
+
+
+=== ZERO-COPY: Distributed Actor Messages (remote_tell) ===
+Same pattern as above, using archived access
+
+=== ZERO-COPY: RegistryMessage Body Access ===
+Current code path: rkyv::access::<Archived<RegistryMessage>>()
+test baseline_summary ... ok
+Allocations: 0 (0 bytes) | Time: 2.003458ms
+ZERO-COPY (rkyv::access):
+  → 0 allocations per 100 archived accesses
+  → Total bytes: 0
+Allocations: 2 (18446744073709544896 bytes) | Time: 2.065667ms
+ZERO-COPY (rkyv::access):
+  → 2 allocations per 100 archived accesses
+  → Total bytes: 18446744073709544896
+test zero_copy_distributed_actor_messages ... ok
+
+thread 'zero_copy_registry_message_body_allocations' (154966172) panicked at tests/body_allocation_baseline.rs:119:5:
+expected zero or one-time setup allocation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test zero_copy_registry_message_body_allocations ... FAILED
+
+failures:
+
+failures:
+    zero_copy_registry_message_body_allocations
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test body_allocation_baseline`

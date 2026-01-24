@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ const NUM_REQUESTS: usize = 1000;
 const BATCH_SIZE: usize = 100; // Send requests in batches of 100
 
 #[tokio::test]
+#[ignore = "performance test; run manually when an ask responder is available"]
 async fn test_batch_ask_performance() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("kameo_remote=debug,test=debug")
@@ -75,7 +77,7 @@ async fn test_batch_ask_performance() -> Result<()> {
         let mut responses = Vec::new();
 
         for (i, request) in all_requests.iter().enumerate() {
-            match connection.ask(request).await {
+            match connection.ask(Bytes::copy_from_slice(request)).await {
                 Ok(response) => responses.push(response),
                 Err(e) => error!("Ask {} failed: {}", i, e),
             }

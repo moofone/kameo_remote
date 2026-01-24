@@ -3,7 +3,7 @@
 //! This module implements the Hello handshake that establishes peer capabilities
 //! at connection time for TLS-only v2 peers.
 
-use crate::{tls, GossipError, Result};
+use crate::{rkyv_utils, tls, GossipError, Result};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::{collections::HashSet, io};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -24,6 +24,8 @@ pub const CURRENT_PROTOCOL_VERSION: u16 = PROTOCOL_VERSION_V2;
 pub enum Feature {
     /// Peer list gossip for automatic peer discovery
     PeerListGossip,
+    /// Negotiated Streaming wire contract
+    Streaming,
 }
 
 /// Hello message sent during connection establishment
@@ -35,12 +37,25 @@ pub struct Hello {
     pub features: Vec<Feature>,
 }
 
+const HELLO_ALIGNMENT: usize = std::mem::align_of::<rkyv::Archived<Hello>>();
+type HelloAlignedVec = rkyv::util::AlignedVec<{ HELLO_ALIGNMENT }>;
+
+struct HelloFrame {
+    bytes: HelloAlignedVec,
+}
+
+impl HelloFrame {
+    fn archived(&self) -> Result<&<Hello as Archive>::Archived> {
+        Ok(rkyv_utils::access_archived::<Hello>(self.bytes.as_ref())?)
+    }
+}
+
 impl Hello {
     /// Create a new Hello message with current capabilities
     pub fn new() -> Self {
         Self {
             protocol_version: CURRENT_PROTOCOL_VERSION,
-            features: vec![Feature::PeerListGossip],
+            features: vec![Feature::PeerListGossip, Feature::Streaming],
         }
     }
 
@@ -85,9 +100,39 @@ impl PeerCapabilities {
         Self { version, features }
     }
 
+    /// Create capabilities from a Hello exchange using archived (zero-copy) data.
+    pub fn from_hello_exchange_archived(
+        local: &Hello,
+        remote: &<Hello as Archive>::Archived,
+    ) -> Self {
+        let remote_version = remote.protocol_version.to_native();
+        let version = local.protocol_version.min(remote_version);
+
+        let local_features: HashSet<_> = local.features.iter().copied().collect();
+        let remote_features: HashSet<Feature> = remote
+            .features
+            .iter()
+            .map(|feature| match feature {
+                <Feature as Archive>::Archived::PeerListGossip => Feature::PeerListGossip,
+                <Feature as Archive>::Archived::Streaming => Feature::Streaming,
+            })
+            .collect();
+        let features: HashSet<_> = local_features
+            .intersection(&remote_features)
+            .copied()
+            .collect();
+
+        Self { version, features }
+    }
+
     /// Check if we can send peer list gossip to this peer
     pub fn can_send_peer_list(&self) -> bool {
         self.version >= PROTOCOL_VERSION_V2 && self.features.contains(&Feature::PeerListGossip)
+    }
+
+    /// Determine if streaming can be used with this peer.
+    pub fn supports_streaming(&self) -> bool {
+        self.version >= PROTOCOL_VERSION_V2 && self.features.contains(&Feature::Streaming)
     }
 
     /// Check if a specific feature is supported
@@ -132,7 +177,7 @@ where
     Ok(())
 }
 
-async fn read_hello_message<R>(reader: &mut R) -> Result<Hello>
+async fn read_hello_message<R>(reader: &mut R) -> Result<HelloFrame>
 where
     R: AsyncRead + Unpin + Send,
 {
@@ -147,10 +192,10 @@ where
         )));
     }
 
-    let mut buf = vec![0u8; len];
-    read_exact_with_timeout(reader, &mut buf).await?;
-    let hello: Hello = rkyv::from_bytes::<Hello, rkyv::rancor::Error>(&buf)?;
-    Ok(hello)
+    let mut buf = HelloAlignedVec::with_capacity(len);
+    buf.resize(len, 0);
+    read_exact_with_timeout(reader, &mut buf[..]).await?;
+    Ok(HelloFrame { bytes: buf })
 }
 
 /// Perform Hello handshake if both peers negotiated discovery via ALPN
@@ -179,14 +224,16 @@ where
         Hello::with_features(Vec::new())
     };
     send_hello_message(stream, &local_hello).await?;
-    let remote_hello = read_hello_message(stream).await?;
-    if remote_hello.protocol_version != CURRENT_PROTOCOL_VERSION {
+    let remote_frame = read_hello_message(stream).await?;
+    let remote_hello = remote_frame.archived()?;
+    let remote_version = remote_hello.protocol_version.to_native();
+    if remote_version != CURRENT_PROTOCOL_VERSION {
         return Err(GossipError::TlsHandshakeFailed(format!(
             "unsupported protocol version: {}",
-            remote_hello.protocol_version
+            remote_version
         )));
     }
-    let caps = PeerCapabilities::from_hello_exchange(&local_hello, &remote_hello);
+    let caps = PeerCapabilities::from_hello_exchange_archived(&local_hello, remote_hello);
     debug!(
         negotiated_version = caps.version,
         peer_list = caps.can_send_peer_list(),
@@ -213,13 +260,17 @@ mod tests {
         // Serialize
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&hello).unwrap();
 
-        // Deserialize
-        let deserialized: Hello =
-            rkyv::from_bytes::<Hello, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived = crate::rkyv_utils::access_archived::<Hello>(&serialized).unwrap();
 
-        assert_eq!(deserialized.protocol_version, hello.protocol_version);
-        assert_eq!(deserialized.features.len(), hello.features.len());
-        assert!(deserialized.features.contains(&Feature::PeerListGossip));
+        assert_eq!(
+            archived.protocol_version.to_native(),
+            hello.protocol_version
+        );
+        assert_eq!(archived.features.len(), hello.features.len());
+        assert!(archived
+            .features
+            .iter()
+            .any(|feature| matches!(feature, <Feature as Archive>::Archived::PeerListGossip)));
     }
 
     #[test]
@@ -250,10 +301,11 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_capabilities_supports_feature() {
+    fn test_peer_capabilities_supports_features() {
         let caps = PeerCapabilities::from_hello_exchange(&Hello::new(), &Hello::new());
 
         assert!(caps.supports_feature(Feature::PeerListGossip));
+        assert!(caps.supports_streaming());
     }
 
     #[test]
@@ -261,10 +313,11 @@ mod tests {
         let feature = Feature::PeerListGossip;
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&feature).unwrap();
-        let deserialized: Feature =
-            rkyv::from_bytes::<Feature, rkyv::rancor::Error>(&serialized).unwrap();
-
-        assert_eq!(deserialized, feature);
+        let archived = crate::rkyv_utils::access_archived::<Feature>(&serialized).unwrap();
+        assert!(matches!(
+            archived,
+            <Feature as Archive>::Archived::PeerListGossip
+        ));
     }
 
     #[test]

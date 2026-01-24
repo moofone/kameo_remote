@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, MessageType, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -152,7 +153,7 @@ async fn main() -> Result<()> {
 
         for (i, request) in all_requests.iter().enumerate().take(NUM_REQUESTS.min(100)) {
             // Limit individual test to 100 for speed
-            match connection.ask(request).await {
+            match connection.ask(Bytes::copy_from_slice(request)).await {
                 Ok(response) => {
                     if response.len() >= 4 {
                         let value = u32::from_be_bytes([

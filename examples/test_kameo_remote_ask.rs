@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
@@ -52,10 +53,16 @@ async fn main() {
 
     println!("Sending ask request...");
     let request = b"ECHO:Hello from Node A";
-    match conn.ask_with_timeout(request, Duration::from_secs(2)).await {
+    match conn
+        .ask_with_timeout(Bytes::copy_from_slice(request), Duration::from_secs(2))
+        .await
+    {
         Ok(response) => {
-            println!("✅ Got response: {:?}", String::from_utf8_lossy(&response));
-            assert_eq!(response, b"ECHOED:Hello from Node A");
+            println!(
+                "✅ Got response: {:?}",
+                String::from_utf8_lossy(response.as_ref())
+            );
+            assert_eq!(response.as_ref(), b"ECHOED:Hello from Node A");
         }
         Err(e) => {
             println!("❌ Ask failed: {:?}", e);

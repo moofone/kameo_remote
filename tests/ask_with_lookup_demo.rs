@@ -1,3 +1,6 @@
+#![cfg(feature = "legacy_tell_bytes")]
+
+use bytes::Bytes;
 use kameo_remote::*;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -18,17 +21,16 @@ async fn wait_for_lookup(
         }
         if start.elapsed() > timeout {
             let stats = handle.stats().await;
-            panic!("Timed out waiting for actor lookup: {} stats: {:?}", name, stats);
+            panic!(
+                "Timed out waiting for actor lookup: {} stats: {:?}",
+                name, stats
+            );
         }
         sleep(Duration::from_millis(20)).await;
     }
 }
 
-async fn wait_for_active_peers(
-    handle: &GossipRegistryHandle,
-    min_peers: usize,
-    timeout: Duration,
-) {
+async fn wait_for_active_peers(handle: &GossipRegistryHandle, min_peers: usize, timeout: Duration) {
     let start = Instant::now();
     loop {
         if handle.stats().await.active_peers >= min_peers {
@@ -265,8 +267,11 @@ async fn test_ask_with_lookup_and_performance() {
         };
 
         // Send request and wait for response
-        let response = conn.ask(query.as_bytes()).await.unwrap();
-        let response_str = String::from_utf8_lossy(&response);
+        let response = conn
+            .ask(Bytes::copy_from_slice(query.as_bytes()))
+            .await
+            .unwrap();
+        let response_str = String::from_utf8_lossy(response.as_ref());
 
         let ask_time = ask_start.elapsed();
         ask_times.push(ask_time);
@@ -302,12 +307,12 @@ async fn test_ask_with_lookup_and_performance() {
 
     // Send all queries in parallel
     let (r1, r2, r3, r4, r5, r6) = tokio::join!(
-        db_conn.ask(queries[0].1.as_bytes()),
-        compute_conn.ask(queries[1].1.as_bytes()),
-        cache_conn.ask(queries[2].1.as_bytes()),
-        db_conn.ask(queries[3].1.as_bytes()),
-        compute_conn.ask(queries[4].1.as_bytes()),
-        cache_conn.ask(queries[5].1.as_bytes()),
+        db_conn.ask(Bytes::copy_from_slice(queries[0].1.as_bytes())),
+        compute_conn.ask(Bytes::copy_from_slice(queries[1].1.as_bytes())),
+        cache_conn.ask(Bytes::copy_from_slice(queries[2].1.as_bytes())),
+        db_conn.ask(Bytes::copy_from_slice(queries[3].1.as_bytes())),
+        compute_conn.ask(Bytes::copy_from_slice(queries[4].1.as_bytes())),
+        cache_conn.ask(Bytes::copy_from_slice(queries[5].1.as_bytes())),
     );
 
     // Verify all responses
@@ -347,7 +352,8 @@ async fn test_ask_with_lookup_and_performance() {
     println!("\n📊 PART 3: ASK() VS TELL() COMPARISON");
     println!("=====================================");
 
-    let test_message = "PING test request".as_bytes();
+    let test_message = b"PING test request";
+    let ask_payload = Bytes::from_static(b"PING test request");
     let iterations = 100;
 
     println!(
@@ -383,7 +389,7 @@ async fn test_ask_with_lookup_and_performance() {
     );
     let ask_start = Instant::now();
     for _ in 0..iterations {
-        let _ = db_conn.ask(test_message).await.unwrap();
+        let _ = db_conn.ask(ask_payload.clone()).await.unwrap();
     }
     let ask_total = ask_start.elapsed();
     let ask_avg = ask_total / iterations;
@@ -562,7 +568,7 @@ async fn test_ask_high_throughput() {
     // Warmup
     println!("\n🔥 Warming up...");
     for _ in 0..10 {
-        let _ = api_conn.ask(b"warmup").await.unwrap();
+        let _ = api_conn.ask(Bytes::from_static(b"warmup")).await.unwrap();
     }
 
     // High-throughput test
@@ -581,8 +587,8 @@ async fn test_ask_high_throughput() {
             let request_id = batch * concurrent_requests + i;
             let handle = tokio::spawn(async move {
                 let req_start = Instant::now();
-                let request = format!("REQUEST:{}", request_id);
-                let _ = conn.ask(request.as_bytes()).await.unwrap();
+                let request = Bytes::from(format!("REQUEST:{}", request_id).into_bytes());
+                let _ = conn.ask(request).await.unwrap();
                 req_start.elapsed()
             });
             handles.push(handle);

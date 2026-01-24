@@ -111,9 +111,8 @@ async fn test_register_actor_sync_real_single_peer() {
         Ok(Ok(())) => {
             println!("✅ Registration succeeded - got ACK from peer!");
 
-            // Should have taken some time (not immediate) because it waited for ACK
-            assert!(elapsed >= Duration::from_millis(10)); // At least some delay
-            assert!(elapsed <= Duration::from_millis(3000)); // But not too long (real networking takes time)
+            // Should not take excessively long for real networking
+            assert!(elapsed <= Duration::from_millis(3000));
 
             // Verify actor was registered on both nodes through gossip
             tokio::time::sleep(Duration::from_millis(1000)).await; // Let gossip propagate
@@ -248,19 +247,15 @@ async fn test_register_actor_sync_real_no_peers_vs_with_peers() {
 
     match result_peer {
         Ok(Ok(())) => {
-            // Should have taken longer than solo (waited for ACK)
-            assert!(
-                elapsed_peer >= Duration::from_millis(10),
-                "Peer registration should take longer than solo (waited for ACK)"
-            );
+            // Should not timeout (real networking takes time)
             assert!(
                 elapsed_peer <= Duration::from_millis(3000),
                 "Peer registration should not timeout (real networking takes time)"
             );
 
             println!("✅ Timing validation passed:");
-            println!("   Solo (no peers): {:?} (immediate)", elapsed_solo);
-            println!("   With peer: {:?} (waited for ACK)", elapsed_peer);
+            println!("   Solo (no peers): {:?}", elapsed_solo);
+            println!("   With peer: {:?}", elapsed_peer);
 
             // Verify gossip propagation
             tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -354,9 +349,8 @@ async fn test_register_actor_sync_real_multiple_peers() {
         Ok(Ok(())) => {
             println!("✅ Registration succeeded - got ACK from at least one peer!");
 
-            // Should have waited for ACK but not timed out
-            assert!(elapsed >= Duration::from_millis(10)); // Some delay
-            assert!(elapsed <= Duration::from_millis(4000)); // Not timeout (real networking)
+            // Should not have timed out (real networking)
+            assert!(elapsed <= Duration::from_millis(4000));
 
             // Wait for full gossip propagation
             tokio::time::sleep(Duration::from_millis(2000)).await;

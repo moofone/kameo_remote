@@ -269,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = GossipRegistryHandle::new_with_tls(bind_addr, secret_key, Some(config)).await?;
 
     // Bootstrap connections
-    handle.bootstrap_non_blocking(bootstrap).await;
+    handle.bootstrap(bootstrap).await;
 
     println!("Node started on {}", bind_addr);
 

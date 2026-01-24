@@ -128,7 +128,9 @@ impl PeerState {
     pub fn should_retry(&self, now: u64) -> bool {
         match self {
             PeerState::Failed { since, attempts } => {
-                let backoff = 2u64.saturating_pow(*attempts as u32).min(MAX_BACKOFF_SECONDS);
+                let backoff = 2u64
+                    .saturating_pow(*attempts as u32)
+                    .min(MAX_BACKOFF_SECONDS);
                 now >= since.saturating_add(backoff)
             }
             _ => true, // Non-failed states can always "retry"
@@ -310,7 +312,91 @@ impl PeerDiscovery {
 
         // Atomically mark candidates as pending using peer_states
         for addr in &candidates {
-            self.peer_states.insert(*addr, PeerState::Pending { since: now });
+            self.peer_states
+                .insert(*addr, PeerState::Pending { since: now });
+            // Also update legacy fields for backward compatibility
+            self.pending_peers.insert(*addr, now);
+        }
+
+        candidates
+    }
+
+    /// Process incoming peer list gossip using parsed socket addresses.
+    /// Avoids allocating PeerInfoGossip for archived paths.
+    pub fn on_peer_list_gossip_addrs<I>(&mut self, peers: I) -> Vec<SocketAddr>
+    where
+        I: IntoIterator<Item = SocketAddr>,
+    {
+        let now = current_timestamp();
+        let mut candidates = Vec::new();
+
+        // Calculate how many more peers we can connect to using unified state
+        // IMPORTANT: Include pending to prevent concurrent gossip overcommit
+        let connected_count = self.connected_count_unified();
+        let pending_count = self.pending_count_unified();
+        let current_count = connected_count + pending_count;
+        let remaining_slots = self.config.max_peers.saturating_sub(current_count);
+
+        if remaining_slots == 0 {
+            debug!(
+                connected = connected_count,
+                pending = pending_count,
+                max = self.config.max_peers,
+                "at soft cap, not accepting new peer candidates"
+            );
+            return candidates;
+        }
+
+        for addr in peers {
+            // Filter self
+            if addr == self.local_addr {
+                continue;
+            }
+
+            // Check state using unified peer_states
+            if let Some(state) = self.peer_states.get(&addr) {
+                match state {
+                    PeerState::Connected => {
+                        // Already connected, skip
+                        continue;
+                    }
+                    PeerState::Pending { .. } => {
+                        // Already pending, skip
+                        continue;
+                    }
+                    PeerState::Failed { .. } => {
+                        // Check if backoff expired
+                        if !state.should_retry(now) {
+                            debug!(
+                                addr = %addr,
+                                backoff_secs = state.backoff_seconds(),
+                                "peer in backoff, skipping"
+                            );
+                            continue;
+                        }
+                        // Backoff expired, can retry
+                    }
+                }
+            }
+
+            // Filter unsafe addresses
+            if !self.is_safe_to_dial(&addr) {
+                debug!(addr = %addr, "address blocked by security filter");
+                continue;
+            }
+
+            candidates.push(addr);
+
+            // Stop at soft cap
+            if candidates.len() >= remaining_slots {
+                break;
+            }
+        }
+
+        // Atomically mark candidates as pending using peer_states
+        for addr in &candidates {
+            self.peer_states
+                .insert(*addr, PeerState::Pending { since: now });
             // Also update legacy fields for backward compatibility
             self.pending_peers.insert(*addr, now);
         }
@@ -429,10 +515,13 @@ impl PeerDiscovery {
                 legacy_state.consecutive_failures = new_attempts;
                 legacy_state.last_failure = now;
             } else {
-                self.failed_peers.insert(addr, FailureState {
-                    consecutive_failures: new_attempts,
-                    last_failure: now,
-                });
+                self.failed_peers.insert(
+                    addr,
+                    FailureState {
+                        consecutive_failures: new_attempts,
+                        last_failure: now,
+                    },
+                );
             }
         }
 
@@ -515,7 +604,10 @@ impl PeerDiscovery {
 
     /// Count peers in Connected state (from unified peer_states)
     pub fn connected_count_unified(&self) -> usize {
-        self.peer_states.values().filter(|s| s.is_connected()).count()
+        self.peer_states
+            .values()
+            .filter(|s| s.is_connected())
+            .count()
     }
 
     /// Count peers in Pending state (from unified peer_states)
@@ -570,14 +662,12 @@ impl PeerDiscovery {
 
         // Also update legacy fields for backward compatibility
         if pending_ttl > 0 {
-            self.pending_peers.retain(|_, added_at| {
-                now.saturating_sub(*added_at) <= pending_ttl
-            });
+            self.pending_peers
+                .retain(|_, added_at| now.saturating_sub(*added_at) <= pending_ttl);
         }
         if fail_ttl > 0 {
-            self.failed_peers.retain(|_, state| {
-                now.saturating_sub(state.last_failure) <= fail_ttl
-            });
+            self.failed_peers
+                .retain(|_, state| now.saturating_sub(state.last_failure) <= fail_ttl);
         }
 
         stats
@@ -981,8 +1071,16 @@ mod tests {
         let failed_peer = test_addr(9001);
 
         // Insert into unified peer_states (primary) and legacy fields
-        discovery.peer_states.insert(pending_peer, PeerState::Pending { since: 0 });
-        discovery.peer_states.insert(failed_peer, PeerState::Failed { since: 1, attempts: 1 });
+        discovery
+            .peer_states
+            .insert(pending_peer, PeerState::Pending { since: 0 });
+        discovery.peer_states.insert(
+            failed_peer,
+            PeerState::Failed {
+                since: 1,
+                attempts: 1,
+            },
+        );
         discovery.pending_peers.insert(pending_peer, 0);
         discovery.failed_peers.insert(
             failed_peer,
@@ -1104,7 +1202,10 @@ mod tests {
         );
 
         let peer_c = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 52)), 8052);
-        assert_eq!(candidates2[0], peer_c, "returned candidate should be peer C");
+        assert_eq!(
+            candidates2[0], peer_c,
+            "returned candidate should be peer C"
+        );
 
         assert_eq!(
             discovery.pending_peer_count(),
@@ -1203,7 +1304,10 @@ mod tests {
         discovery.on_peer_connected(conn2);
 
         // Verify counts match
-        assert_eq!(discovery.connected_count_unified(), discovery.connected_peer_count());
+        assert_eq!(
+            discovery.connected_count_unified(),
+            discovery.connected_peer_count()
+        );
         assert_eq!(discovery.connected_count_unified(), 2);
 
         // Add pending peers via gossip
@@ -1214,7 +1318,10 @@ mod tests {
         discovery.on_peer_list_gossip(&peers);
 
         // Verify counts match
-        assert_eq!(discovery.pending_count_unified(), discovery.pending_peer_count());
+        assert_eq!(
+            discovery.pending_count_unified(),
+            discovery.pending_peer_count()
+        );
         assert_eq!(discovery.pending_count_unified(), 2);
 
         // Add a failed peer
@@ -1224,7 +1331,10 @@ mod tests {
         discovery.on_peer_failure(fail_peer);
 
         // Verify counts match
-        assert_eq!(discovery.failed_count_unified(), discovery.failed_peer_count());
+        assert_eq!(
+            discovery.failed_count_unified(),
+            discovery.failed_peer_count()
+        );
         assert_eq!(discovery.failed_count_unified(), 1);
     }
 
@@ -1246,14 +1356,25 @@ mod tests {
         let failed_peer = test_addr(9101);
 
         // Insert with old timestamps (will be expired)
-        discovery.peer_states.insert(pending_peer, PeerState::Pending { since: 0 });
-        discovery.peer_states.insert(failed_peer, PeerState::Failed { since: 1, attempts: 1 });
+        discovery
+            .peer_states
+            .insert(pending_peer, PeerState::Pending { since: 0 });
+        discovery.peer_states.insert(
+            failed_peer,
+            PeerState::Failed {
+                since: 1,
+                attempts: 1,
+            },
+        );
         // Also update legacy for consistency
         discovery.pending_peers.insert(pending_peer, 0);
-        discovery.failed_peers.insert(failed_peer, FailureState {
-            consecutive_failures: 1,
-            last_failure: 1,
-        });
+        discovery.failed_peers.insert(
+            failed_peer,
+            FailureState {
+                consecutive_failures: 1,
+                last_failure: 1,
+            },
+        );
 
         // Advance time beyond pending TTL but within failed TTL
         let now = 3;

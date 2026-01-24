@@ -108,9 +108,15 @@ mod tests {
     fn test_registration_priority_serialization() {
         let priority = RegistrationPriority::Immediate;
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&priority).unwrap();
-        let deserialized: RegistrationPriority =
-            rkyv::from_bytes::<RegistrationPriority, rkyv::rancor::Error>(&serialized).unwrap();
-        assert_eq!(priority, deserialized);
+        let archived =
+            crate::rkyv_utils::access_archived::<RegistrationPriority>(&serialized).unwrap();
+        let archived_priority = match archived {
+            <RegistrationPriority as Archive>::Archived::Normal => RegistrationPriority::Normal,
+            <RegistrationPriority as Archive>::Archived::Immediate => {
+                RegistrationPriority::Immediate
+            }
+        };
+        assert_eq!(archived_priority, priority);
     }
 
     #[test]
@@ -129,9 +135,13 @@ mod tests {
     fn test_consistency_level_serialization() {
         let level = ConsistencyLevel::Strong;
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&level).unwrap();
-        let deserialized: ConsistencyLevel =
-            rkyv::from_bytes::<ConsistencyLevel, rkyv::rancor::Error>(&serialized).unwrap();
-        assert_eq!(level, deserialized);
+        let archived = crate::rkyv_utils::access_archived::<ConsistencyLevel>(&serialized).unwrap();
+        let archived_level = match archived {
+            <ConsistencyLevel as Archive>::Archived::Eventual => ConsistencyLevel::Eventual,
+            <ConsistencyLevel as Archive>::Archived::Causal => ConsistencyLevel::Causal,
+            <ConsistencyLevel as Archive>::Archived::Strong => ConsistencyLevel::Strong,
+        };
+        assert_eq!(archived_level, level);
     }
 
     #[test]

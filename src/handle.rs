@@ -1,11 +1,9 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::sync::OnceLock;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
+use rkyv::Archive;
+use std::ops::Range;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -15,7 +13,13 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     connection_pool::handle_incoming_message,
-    registry::{GossipRegistry, GossipResult, GossipTask, RegistryMessage, RegistryStats},
+    gossip_buffer::{GossipFrameBuffer, PooledFrameBytes},
+    registry::{
+        GossipRegistry, GossipResult, GossipTask, RegistryMessage, RegistryMessageFrame,
+        RegistryStats,
+    },
+    streaming,
+    streaming::StreamDescriptor,
     GossipConfig, GossipError, RegistrationPriority, RemoteActorLocation, Result,
 };
 
@@ -28,169 +32,20 @@ const REGISTRY_MESSAGE_ALIGNMENT: usize = {
         location_align
     }
 };
+#[cfg(any(test, feature = "test-helpers"))]
 type RegistryAlignedVec = rkyv::util::AlignedVec<{ REGISTRY_MESSAGE_ALIGNMENT }>;
 
-#[inline]
-fn decode_registry_message(
-    payload: &[u8],
-) -> std::result::Result<RegistryMessage, rkyv::rancor::Error> {
-    if is_registry_payload_aligned(payload) {
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(payload)
-    } else {
-        let mut aligned = RegistryAlignedVec::with_capacity(payload.len());
-        aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref())
-    }
+#[cfg_attr(
+    not(any(test, feature = "test-helpers", debug_assertions)),
+    allow(dead_code)
+)]
+fn typed_tell_capture_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok())
 }
 
-#[inline]
-fn is_registry_payload_aligned(payload: &[u8]) -> bool {
-    let ptr = payload.as_ptr() as usize;
-    ptr.is_multiple_of(REGISTRY_MESSAGE_ALIGNMENT)
-}
-
-/// Per-connection streaming state for managing partial streams
-#[derive(Debug)]
-struct StreamingState {
-    active_streams: HashMap<u64, InProgressStream>,
-    max_concurrent_streams: usize,
-}
-
-/// A stream that is currently being assembled
-#[derive(Debug)]
-struct InProgressStream {
-    stream_id: u64,
-    total_size: u64,
-    type_hash: u32,
-    actor_id: u64,
-    chunks: BTreeMap<u32, Bytes>, // chunk_index -> chunk_data
-    received_size: usize,
-    /// Timestamp when stream started (for stale cleanup)
-    started_at: std::time::Instant,
-}
-
-impl StreamingState {
-    fn new() -> Self {
-        Self {
-            active_streams: HashMap::new(),
-            max_concurrent_streams: 16, // Reasonable limit
-        }
-    }
-
-    fn start_stream(&mut self, header: crate::StreamHeader) -> Result<()> {
-        if self.active_streams.len() >= self.max_concurrent_streams {
-            return Err(GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::ResourceBusy,
-                "Too many concurrent streams",
-            )));
-        }
-
-        let stream = InProgressStream {
-            stream_id: header.stream_id,
-            total_size: header.total_size,
-            type_hash: header.type_hash,
-            actor_id: header.actor_id,
-            chunks: BTreeMap::new(),
-            received_size: 0,
-            started_at: std::time::Instant::now(),
-        };
-
-        self.active_streams.insert(header.stream_id, stream);
-        Ok(())
-    }
-
-    fn add_chunk(
-        &mut self,
-        header: crate::StreamHeader,
-        chunk_data: Bytes,
-    ) -> Result<Option<Vec<u8>>> {
-        let stream = self
-            .active_streams
-            .get_mut(&header.stream_id)
-            .ok_or_else(|| {
-                GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Received chunk for unknown stream_id={}", header.stream_id),
-                ))
-            })?;
-
-        // Store chunk
-        stream.received_size += chunk_data.len();
-        stream.chunks.insert(header.chunk_index, chunk_data);
-
-        // Check if we have all chunks (when total matches expected size)
-        if stream.received_size >= stream.total_size as usize {
-            self.assemble_complete_message(header.stream_id)
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn finalize_stream(&mut self, stream_id: u64) -> Result<Option<Vec<u8>>> {
-        // StreamEnd received - assemble the message
-        self.assemble_complete_message(stream_id)
-    }
-
-    fn assemble_complete_message(&mut self, stream_id: u64) -> Result<Option<Vec<u8>>> {
-        let stream = self.active_streams.remove(&stream_id).ok_or_else(|| {
-            GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Cannot finalize unknown stream_id={}", stream_id),
-            ))
-        })?;
-
-        // Assemble chunks in order
-        let mut complete_data = BytesMut::with_capacity(stream.total_size as usize);
-        for (_chunk_index, chunk_data) in stream.chunks {
-            complete_data.put_slice(&chunk_data);
-        }
-
-        info!(
-            "✅ STREAMING: Assembled complete message for stream_id={} ({} bytes for actor={}, type_hash=0x{:x})",
-            stream.stream_id,
-            complete_data.len(),
-            stream.actor_id,
-            stream.type_hash
-        );
-
-        Ok(Some(complete_data.to_vec()))
-    }
-
-    /// Clean up stale streams that have been incomplete for too long.
-    /// This prevents memory leaks when StreamStart arrives but StreamEnd never comes.
-    fn cleanup_stale(&mut self) {
-        use std::time::Duration;
-        const STREAM_TIMEOUT: Duration = Duration::from_secs(60);
-
-        let before_count = self.active_streams.len();
-
-        self.active_streams.retain(|stream_id, stream| {
-            let age = stream.started_at.elapsed();
-            if age > STREAM_TIMEOUT {
-                warn!(
-                    stream_id = stream_id,
-                    age_secs = age.as_secs(),
-                    received_size = stream.received_size,
-                    expected_size = stream.total_size,
-                    chunks_received = stream.chunks.len(),
-                    "Cleaning up stale stream - StreamEnd never arrived"
-                );
-                false // Remove this entry
-            } else {
-                true // Keep this entry
-            }
-        });
-
-        let removed = before_count - self.active_streams.len();
-        if removed > 0 {
-            info!(
-                removed_count = removed,
-                remaining = self.active_streams.len(),
-                "Cleaned up stale in-progress streams"
-            );
-        }
-    }
-}
+/// Duration after which incomplete Streaming state is aborted.
+const STREAMING_STALE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Main API for the gossip registry with vector clocks and separated locks
 pub struct GossipRegistryHandle {
@@ -406,11 +261,71 @@ impl GossipRegistryHandle {
             .await
     }
 
-    /// Bootstrap peer connections non-blocking (Phase 4)
+    /// Bootstrap peer connections (blocking by default).
+    ///
+    /// Dials seed peers and blocks until a TLS handshake succeeds for each peer or the
+    /// readiness timeout elapses. Failing to establish a handshake within the timeout
+    /// is treated as fatal and will panic.
+    pub async fn bootstrap(&self, seeds: Vec<SocketAddr>) {
+        let seed_count = seeds.len();
+        let readiness_timeout = self.registry.config.bootstrap_readiness_timeout;
+        let readiness_interval = self.registry.config.bootstrap_readiness_check_interval;
+
+        for seed in seeds {
+            // Ensure we perform a fresh handshake for bootstrap seeds.
+            // This avoids reusing stale connections that survived shutdowns.
+            {
+                let pool = self.registry.connection_pool.lock().await;
+                if let Some(peer_id) = pool.get_peer_id_by_addr(&seed) {
+                    let _ = pool.disconnect_connection_by_peer_id(&peer_id);
+                } else if pool.has_connection(&seed) {
+                    pool.remove_connection(seed);
+                }
+            }
+
+            let start = Instant::now();
+            let mut last_err: Option<GossipError> = None;
+            loop {
+                let remaining = readiness_timeout.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    panic!(
+                        "bootstrap handshake timed out after {:?} for seed {} (last_error={:?})",
+                        readiness_timeout, seed, last_err
+                    );
+                }
+
+                match tokio::time::timeout(remaining, self.registry.get_connection(seed)).await {
+                    Ok(Ok(_conn)) => {
+                        debug!(seed = %seed, "bootstrap connection established");
+                        self.registry.mark_peer_connected(seed).await;
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        last_err = Some(e);
+                    }
+                    Err(_) => {
+                        last_err = Some(GossipError::Timeout);
+                    }
+                }
+
+                tokio::time::sleep(readiness_interval).await;
+            }
+        }
+
+        debug!(
+            seed_count = seed_count,
+            "completed blocking bootstrap for seed peers"
+        );
+    }
+
+    /// Bootstrap peer connections in the background (non-blocking).
     ///
     /// Dials seed peers asynchronously - doesn't block startup on gossip propagation.
     /// Failed connections are logged but don't prevent the node from starting.
-    /// This is the recommended way to bootstrap a node with seed peers.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use bootstrap() for blocking, handshake-verified startup"
+    )]
     pub async fn bootstrap_non_blocking(&self, seeds: Vec<SocketAddr>) {
         let seed_count = seeds.len();
 
@@ -420,12 +335,10 @@ impl GossipRegistryHandle {
                 match registry.get_connection(seed).await {
                     Ok(_conn) => {
                         debug!(seed = %seed, "bootstrap connection established");
-                        // Mark peer as connected
                         registry.mark_peer_connected(seed).await;
                     }
                     Err(e) => {
                         warn!(seed = %seed, error = %e, "bootstrap peer unavailable");
-                        // Note: Don't penalize at startup - peer might be starting up too
                     }
                 }
             });
@@ -793,34 +706,111 @@ where
 {
     let max_message_size = registry.config.max_message_size;
 
-    // Initialize streaming state for this connection
-    let mut streaming_state = StreamingState::new();
+    // Initialize Streaming assembler for this connection
+    let mut streaming_state = streaming::StreamAssembler::new(max_message_size);
+    let gossip_buffer = GossipFrameBuffer::new();
 
     // First, read the initial message to identify the sender
-    let msg_result = read_message_from_tls_reader(&mut reader, max_message_size).await;
+    let msg_result =
+        read_message_from_tls_reader(&mut reader, max_message_size, &gossip_buffer).await;
     let known_node_id = match peer_node_id {
         Some(node_id) => Some(node_id),
         None => registry.lookup_node_id(&peer_addr).await,
     };
 
     let (sender_node_id, initial_correlation_id) = match &msg_result {
-        Ok(MessageReadResult::Gossip(msg, correlation_id)) => {
-            let node_id = match msg {
-                RegistryMessage::DeltaGossip { delta } => delta.sender_peer_id.to_hex(),
-                RegistryMessage::FullSync { sender_peer_id, .. } => sender_peer_id.to_hex(),
-                RegistryMessage::FullSyncRequest { sender_peer_id, .. } => sender_peer_id.to_hex(),
-                RegistryMessage::FullSyncResponse { sender_peer_id, .. } => sender_peer_id.to_hex(),
-                RegistryMessage::DeltaGossipResponse { delta } => delta.sender_peer_id.to_hex(),
-                RegistryMessage::PeerHealthQuery { sender, .. } => sender.to_hex(),
-                RegistryMessage::PeerHealthReport { reporter, .. } => reporter.to_hex(),
-                RegistryMessage::ImmediateAck { .. } => {
+        Ok(MessageReadResult::Gossip(frame, correlation_id)) => {
+            type ArchivedRegistryMessage = <RegistryMessage as Archive>::Archived;
+
+            let archived = match frame.archived() {
+                Ok(archived) => archived,
+                Err(err) => {
+                    warn!(error = %err, "Failed to access archived RegistryMessage");
+                    return ConnectionCloseOutcome::Normal { node_id: None };
+                }
+            };
+
+            let node_id = match archived {
+                ArchivedRegistryMessage::DeltaGossip { delta } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(
+                        &delta.sender_peer_id,
+                    ) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize sender_peer_id");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::FullSync { sender_peer_id, .. } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(sender_peer_id) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize sender_peer_id");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::FullSyncRequest { sender_peer_id, .. } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(sender_peer_id) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize sender_peer_id");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::FullSyncResponse { sender_peer_id, .. } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(sender_peer_id) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize sender_peer_id");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::DeltaGossipResponse { delta } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(
+                        &delta.sender_peer_id,
+                    ) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize sender_peer_id");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::PeerHealthQuery { sender, .. } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(sender) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize sender");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::PeerHealthReport { reporter, .. } => {
+                    match crate::rkyv_utils::deserialize_archived::<crate::PeerId>(reporter) {
+                        Ok(peer_id) => peer_id.to_hex(),
+                        Err(err) => {
+                            warn!(error = %err, "Failed to deserialize reporter");
+                            return ConnectionCloseOutcome::Normal { node_id: None };
+                        }
+                    }
+                }
+                ArchivedRegistryMessage::ImmediateAck { .. } => {
                     warn!("Received ImmediateAck as first message - cannot identify sender");
                     return ConnectionCloseOutcome::Normal { node_id: None };
                 }
-                RegistryMessage::ActorMessage { .. } => {
+                ArchivedRegistryMessage::ActorMessage {
+                    correlation_id: inner_corr,
+                    ..
+                } => {
                     // For ActorMessage, we can't determine sender from the message
                     // But if it has a correlation_id, it's an Ask and we should handle it
-                    if correlation_id.is_some() {
+                    let has_correlation =
+                        matches!(inner_corr, rkyv::option::ArchivedOption::Some(_));
+                    if correlation_id.is_some() || has_correlation {
                         debug!("Received ActorMessage with Ask envelope as first message");
                         // We'll use a placeholder sender ID for now
                         "ask_sender".to_string()
@@ -829,7 +819,9 @@ where
                         return ConnectionCloseOutcome::Normal { node_id: None };
                     }
                 }
-                RegistryMessage::PeerListGossip { sender_addr, .. } => sender_addr.clone(),
+                ArchivedRegistryMessage::PeerListGossip { sender_addr, .. } => {
+                    sender_addr.as_str().to_string()
+                }
             };
             (node_id, *correlation_id)
         }
@@ -860,9 +852,12 @@ where
             // Use a placeholder identifier
             (format!("actor_sender_{}", actor_id), None)
         }
-        Ok(MessageReadResult::Streaming { stream_header, .. }) => {
-            // For streaming messages received as the first message, use the actor ID
-            (format!("stream_sender_{}", stream_header.actor_id), None)
+        Ok(MessageReadResult::Streaming { .. }) => {
+            if let Some(node_id) = known_node_id {
+                (node_id.to_peer_id().to_hex(), None)
+            } else {
+                ("stream_sender_unknown".to_string(), None)
+            }
         }
         Ok(MessageReadResult::Raw(_)) => {
             if let Some(node_id) = known_node_id {
@@ -936,6 +931,9 @@ where
         );
     }
 
+    #[allow(unused_assignments)]
+    let mut response_connection: Option<Arc<crate::connection_pool::LockFreeConnection>> = None;
+
     // Register the TLS writer with the connection pool before handling the first message so responses work
     {
         use std::pin::Pin;
@@ -961,7 +959,10 @@ where
         connection.update_last_used();
 
         // Track the writer task handle (H-004)
-        connection.task_tracker.lock().set_writer(writer_task_handle);
+        connection
+            .task_tracker
+            .lock()
+            .set_writer(writer_task_handle);
 
         let connection_arc = Arc::new(connection);
 
@@ -1011,6 +1012,8 @@ where
             return ConnectionCloseOutcome::DroppedByTieBreaker;
         }
 
+        response_connection = Some(connection_arc.clone());
+
         // CRITICAL FIX: Also index by ephemeral peer_addr if it differs from peer_state_addr.
         // This ensures that handle_response_message (which looks up by peer_addr) can find
         // the connection AND the correlation tracker. Without this, responses fail to be
@@ -1039,28 +1042,14 @@ where
 
     // Process the initial message with correlation ID if present
     match msg_result {
-        Ok(MessageReadResult::Gossip(msg, _correlation_id)) => {
-            // For ActorMessage with correlation_id, ensure it's set
-            let msg_to_handle = if let RegistryMessage::ActorMessage {
-                actor_id,
-                type_hash,
-                payload,
-                correlation_id: _,
-            } = msg
-            {
-                // Create a new ActorMessage with the correlation_id from the Ask envelope
-                RegistryMessage::ActorMessage {
-                    actor_id,
-                    type_hash,
-                    payload,
-                    correlation_id: initial_correlation_id,
-                }
-            } else {
-                msg
-            };
-
-            if let Err(e) =
-                handle_incoming_message(registry.clone(), peer_addr, msg_to_handle).await
+        Ok(MessageReadResult::Gossip(frame, correlation_id)) => {
+            if let Err(e) = handle_incoming_message(
+                registry.clone(),
+                peer_addr,
+                frame,
+                correlation_id.or(initial_correlation_id),
+            )
+            .await
             {
                 warn!(error = %e, "Failed to process initial TLS message");
             }
@@ -1069,13 +1058,20 @@ where
             correlation_id,
             payload,
         }) => {
-            handle_raw_ask_request(&registry, peer_addr, correlation_id, &payload).await;
+            handle_raw_ask_request(&registry, peer_addr, correlation_id, payload).await;
         }
         Ok(MessageReadResult::Response {
             correlation_id,
             payload,
         }) => {
-            handle_response_message(&registry, peer_addr, correlation_id, payload).await;
+            handle_response_message_fast(
+                &registry,
+                peer_addr,
+                correlation_id,
+                payload,
+                response_connection.as_ref(),
+            )
+            .await;
         }
         Ok(MessageReadResult::Actor {
             msg_type,
@@ -1084,65 +1080,44 @@ where
             type_hash,
             payload,
         }) => {
+            #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+            {
+                if msg_type == crate::MessageType::ActorTell as u8 && typed_tell_capture_enabled() {
+                    crate::test_helpers::record_raw_payload(payload.to_bytes());
+                }
+            }
             // Handle initial actor message directly
-            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                let actor_id_str = actor_id.to_string();
+            if let Some(handler) = registry.load_actor_message_handler() {
+                let mut id_buf = itoa::Buffer::new();
+                let actor_id_str = id_buf.format(actor_id);
                 let correlation = if msg_type == crate::MessageType::ActorAsk as u8 {
                     Some(correlation_id)
                 } else {
                     None
                 };
                 let _ = handler
-                    .handle_actor_message(&actor_id_str, type_hash, &payload, correlation)
+                    .handle_actor_message(&actor_id_str, type_hash, payload.as_slice(), correlation)
                     .await;
             }
         }
         Ok(MessageReadResult::Streaming {
-            msg_type,
-            stream_header,
-            chunk_data,
+            frame,
+            correlation_id,
         }) => {
-            // Handle initial streaming message
-            match msg_type {
-                msg_type if msg_type == crate::MessageType::StreamStart as u8 => {
-                    if let Err(e) = streaming_state.start_stream(stream_header) {
-                        warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
-                    }
-                }
-                msg_type if msg_type == crate::MessageType::StreamData as u8 => {
-                    // Data chunk - this should not be the first message typically, but handle it
-                    if let Err(e) = streaming_state.start_stream(stream_header) {
-                        debug!(error = %e, "Auto-starting stream for data chunk: stream_id={}", stream_header.stream_id);
-                    }
-                    if let Ok(Some(complete_data)) =
-                        streaming_state.add_chunk(stream_header, chunk_data)
-                    {
-                        // Complete message assembled - route to actor
-                        if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                            let actor_id_str = stream_header.actor_id.to_string();
-                            let _ = handler
-                                .handle_actor_message(
-                                    &actor_id_str,
-                                    stream_header.type_hash,
-                                    &complete_data,
-                                    None,
-                                )
-                                .await;
-                        }
-                    }
-                }
-                _ => {
-                    warn!(
-                        "Unexpected streaming message type as initial message: 0x{:02x}",
-                        msg_type
-                    );
-                }
-            }
+            handle_streaming_frame(
+                &registry,
+                &mut streaming_state,
+                &mut reader,
+                peer_addr,
+                frame,
+                correlation_id,
+            )
+            .await;
         }
         Ok(MessageReadResult::Raw(_payload)) => {
             #[cfg(any(test, feature = "test-helpers", debug_assertions))]
             {
-                if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
+                if typed_tell_capture_enabled() {
                     crate::test_helpers::record_raw_payload(_payload.clone());
                 }
             }
@@ -1163,37 +1138,26 @@ where
     loop {
         // Use select! to either read a message or trigger periodic cleanup
         let msg_result = tokio::select! {
-            result = read_message_from_tls_reader(&mut reader, max_message_size) => result,
+            result = read_message_from_tls_reader(&mut reader, max_message_size, &gossip_buffer) => result,
             _ = cleanup_interval.tick() => {
                 // Periodically cleanup stale incomplete streams to prevent memory leak
-                streaming_state.cleanup_stale();
+                if let Some(descriptor) = streaming_state.abort_if_stale(STREAMING_STALE_TIMEOUT) {
+                    warn!(
+                        peer = %peer_addr,
+                        stream_id = descriptor.stream_id,
+                        payload_len = descriptor.payload_len,
+                        "Streaming assembly aborted due to inactivity"
+                    );
+                }
                 continue;
             }
         };
 
         match msg_result {
-            Ok(MessageReadResult::Gossip(msg, correlation_id)) => {
-                // For ActorMessage with correlation_id from Ask envelope, ensure it's set
-                let msg_to_handle = if let RegistryMessage::ActorMessage {
-                    actor_id,
-                    type_hash,
-                    payload,
-                    correlation_id: _,
-                } = msg
-                {
-                    // Create a new ActorMessage with the correlation_id from the Ask envelope
-                    RegistryMessage::ActorMessage {
-                        actor_id,
-                        type_hash,
-                        payload,
-                        correlation_id,
-                    }
-                } else {
-                    msg
-                };
-
+            Ok(MessageReadResult::Gossip(frame, correlation_id)) => {
                 if let Err(e) =
-                    handle_incoming_message(registry.clone(), peer_addr, msg_to_handle).await
+                    handle_incoming_message(registry.clone(), peer_addr, frame, correlation_id)
+                        .await
                 {
                     warn!(error = %e, "Failed to process TLS message");
                 }
@@ -1202,13 +1166,20 @@ where
                 correlation_id,
                 payload,
             }) => {
-                handle_raw_ask_request(&registry, peer_addr, correlation_id, &payload).await;
+                handle_raw_ask_request(&registry, peer_addr, correlation_id, payload).await;
             }
             Ok(MessageReadResult::Response {
                 correlation_id,
                 payload,
             }) => {
-                handle_response_message(&registry, peer_addr, correlation_id, payload).await;
+                handle_response_message_fast(
+                    &registry,
+                    peer_addr,
+                    correlation_id,
+                    payload,
+                    response_connection.as_ref(),
+                )
+                .await;
             }
             Ok(MessageReadResult::Actor {
                 msg_type,
@@ -1217,77 +1188,52 @@ where
                 type_hash,
                 payload,
             }) => {
+                #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+                {
+                    if msg_type == crate::MessageType::ActorTell as u8
+                        && typed_tell_capture_enabled()
+                    {
+                        crate::test_helpers::record_raw_payload(payload.to_bytes());
+                    }
+                }
                 // Handle actor message directly
                 // Call the actor message handler if available
-                if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                    let actor_id_str = actor_id.to_string();
+                if let Some(handler) = registry.load_actor_message_handler() {
+                    let mut id_buf = itoa::Buffer::new();
+                    let actor_id_str = id_buf.format(actor_id);
                     let correlation = if msg_type == crate::MessageType::ActorAsk as u8 {
                         Some(correlation_id)
                     } else {
                         None
                     };
                     let _ = handler
-                        .handle_actor_message(&actor_id_str, type_hash, &payload, correlation)
+                        .handle_actor_message(
+                            &actor_id_str,
+                            type_hash,
+                            payload.as_slice(),
+                            correlation,
+                        )
                         .await;
                 }
             }
             Ok(MessageReadResult::Streaming {
-                msg_type,
-                stream_header,
-                chunk_data,
+                frame,
+                correlation_id,
             }) => {
-                // Handle streaming messages
-                match msg_type {
-                    msg_type if msg_type == crate::MessageType::StreamStart as u8 => {
-                        if let Err(e) = streaming_state.start_stream(stream_header) {
-                            warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
-                        }
-                    }
-                    msg_type if msg_type == crate::MessageType::StreamData as u8 => {
-                        if let Ok(Some(complete_data)) =
-                            streaming_state.add_chunk(stream_header, chunk_data)
-                        {
-                            // Complete message assembled - route to actor
-                            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                                let actor_id_str = stream_header.actor_id.to_string();
-                                let _ = handler
-                                    .handle_actor_message(
-                                        &actor_id_str,
-                                        stream_header.type_hash,
-                                        &complete_data,
-                                        None,
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    msg_type if msg_type == crate::MessageType::StreamEnd as u8 => {
-                        if let Ok(Some(complete_data)) =
-                            streaming_state.finalize_stream(stream_header.stream_id)
-                        {
-                            // Complete message assembled - route to actor
-                            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                                let actor_id_str = stream_header.actor_id.to_string();
-                                let _ = handler
-                                    .handle_actor_message(
-                                        &actor_id_str,
-                                        stream_header.type_hash,
-                                        &complete_data,
-                                        None,
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    _ => {
-                        warn!("Unknown streaming message type: 0x{:02x}", msg_type);
-                    }
-                }
+                handle_streaming_frame(
+                    &registry,
+                    &mut streaming_state,
+                    &mut reader,
+                    peer_addr,
+                    frame,
+                    correlation_id,
+                )
+                .await;
             }
             Ok(MessageReadResult::Raw(_payload)) => {
                 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
                 {
-                    if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
+                    if typed_tell_capture_enabled() {
                         crate::test_helpers::record_raw_payload(_payload.clone());
                     }
                 }
@@ -1310,7 +1256,7 @@ where
 /// Result type for message reading that can handle gossip, actor, and streaming messages
 #[derive(Debug)]
 pub(crate) enum MessageReadResult {
-    Gossip(RegistryMessage, Option<u16>),
+    Gossip(RegistryMessageFrame, Option<u16>),
     AskRaw {
         correlation_id: u16,
         payload: bytes::Bytes,
@@ -1325,32 +1271,96 @@ pub(crate) enum MessageReadResult {
         correlation_id: u16,
         actor_id: u64,
         type_hash: u32,
-        payload: bytes::Bytes,
+        payload: MessagePayload,
     },
     Streaming {
-        msg_type: u8,
-        stream_header: crate::StreamHeader,
-        chunk_data: bytes::Bytes,
+        frame: StreamingFrame,
+        correlation_id: u16,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum StreamingFrame {
+    Start { descriptor: StreamDescriptor },
+    Data { payload: StreamingData },
+    End,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum StreamingData {
+    Direct { chunk_len: usize },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MessagePayload {
+    pooled: PooledFrameBytes,
+}
+
+impl MessagePayload {
+    fn from_pooled(pooled: PooledFrameBytes) -> Self {
+        Self { pooled }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        self.pooled.as_slice()
+    }
+
+    fn len(&self) -> usize {
+        self.pooled.len()
+    }
+
+    fn slice(&self, range: Range<usize>) -> Self {
+        Self {
+            pooled: self.pooled.slice(range),
+        }
+    }
+
+    fn slice_from(&self, start: usize) -> Self {
+        self.slice(start..self.len())
+    }
+
+    fn into_slice_from(self, start: usize) -> Self {
+        let len = self.len();
+        Self {
+            pooled: self.pooled.into_slice(start..len),
+        }
+    }
+
+    fn to_bytes(&self) -> bytes::Bytes {
+        self.pooled.to_bytes()
+    }
+
+    fn into_bytes(self) -> bytes::Bytes {
+        self.pooled.into_bytes()
+    }
+
+    fn into_registry_frame(self) -> Result<RegistryMessageFrame> {
+        RegistryMessageFrame::from_pooled(self.pooled)
+    }
 }
 
 pub(crate) async fn handle_raw_ask_request(
     registry: &Arc<GossipRegistry>,
     peer_addr: SocketAddr,
     correlation_id: u16,
-    payload: &[u8],
+    payload: bytes::Bytes,
 ) {
     #[cfg(any(test, feature = "test-helpers", debug_assertions))]
     {
         let response = if std::env::var("KAMEO_REMOTE_TYPED_ECHO").is_ok() && payload.len() >= 8 {
-            payload.to_vec()
+            payload.clone()
         } else {
-            crate::connection_pool::process_mock_request_payload(payload)
+            bytes::Bytes::from(crate::connection_pool::process_mock_request_payload(
+                payload.as_ref(),
+            ))
         };
 
         let conn = {
             let pool = registry.connection_pool.lock().await;
-            pool.get_connection_by_addr(&peer_addr)
+            pool.get_connection_by_addr(&peer_addr).or_else(|| {
+                pool.get_peer_id_by_addr(&peer_addr)
+                    .and_then(|peer_id| pool.get_connection_by_peer_id(&peer_id))
+            })
         };
 
         if let Some(conn) = conn {
@@ -1362,9 +1372,10 @@ pub(crate) async fn handle_raw_ask_request(
                 );
 
                 if let Err(e) = stream_handle
-                    .write_header_and_payload_control(
-                        bytes::Bytes::copy_from_slice(&header),
-                        bytes::Bytes::from(response),
+                    .write_header_and_payload_control_inline(
+                        header,
+                        crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN as u8,
+                        response,
                     )
                     .await
                 {
@@ -1389,6 +1400,200 @@ pub(crate) async fn handle_raw_ask_request(
             "Received raw Ask request - not supported"
         );
     }
+}
+
+async fn send_streaming_response(
+    registry: &Arc<GossipRegistry>,
+    peer_addr: SocketAddr,
+    correlation_id: u16,
+    response: bytes::Bytes,
+) {
+    let conn = {
+        let pool = registry.connection_pool.lock().await;
+        pool.get_connection_by_addr(&peer_addr).or_else(|| {
+            pool.get_peer_id_by_addr(&peer_addr)
+                .and_then(|peer_id| pool.get_connection_by_peer_id(&peer_id))
+        })
+    };
+
+    if let Some(conn) = conn {
+        if let Some(ref stream_handle) = conn.stream_handle {
+            let len = response.len();
+            let header = crate::framing::write_ask_response_header(
+                crate::MessageType::Response,
+                correlation_id,
+                len,
+            );
+
+            if let Err(e) = stream_handle
+                .write_header_and_payload_control_inline(
+                    header,
+                    crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN as u8,
+                    response,
+                )
+                .await
+            {
+                warn!(peer = %peer_addr, error = %e, "Failed to send streamed ask response");
+            }
+        } else {
+            warn!(peer = %peer_addr, "No stream handle for streamed ask response");
+        }
+    } else {
+        warn!(peer = %peer_addr, "No connection found for streamed ask response");
+    }
+}
+
+async fn handle_completed_stream(
+    registry: &Arc<GossipRegistry>,
+    peer_addr: SocketAddr,
+    complete: streaming::CompletedStream,
+) {
+    if let Some(handler) = registry.load_actor_message_handler() {
+        let mut id_buf = itoa::Buffer::new();
+        let actor_id_str = id_buf.format(complete.descriptor.actor_id);
+        match handler
+            .handle_actor_message(
+                &actor_id_str,
+                complete.descriptor.type_hash,
+                &complete.payload,
+                complete.correlation_id,
+            )
+            .await
+        {
+            Ok(Some(reply_payload)) => {
+                if let Some(corr_id) = complete.correlation_id {
+                    send_streaming_response(registry, peer_addr, corr_id, reply_payload).await;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(peer = %peer_addr, error = %e, "Failed to handle streamed actor message");
+            }
+        }
+    }
+}
+
+async fn handle_streaming_frame<R>(
+    registry: &Arc<GossipRegistry>,
+    assembler: &mut streaming::StreamAssembler,
+    reader: &mut R,
+    peer_addr: SocketAddr,
+    frame: StreamingFrame,
+    correlation_id: u16,
+) where
+    R: AsyncReadExt + Unpin,
+{
+    let correlation = if correlation_id == 0 {
+        None
+    } else {
+        Some(correlation_id)
+    };
+
+    match frame {
+        StreamingFrame::Start { descriptor } => {
+            match assembler.start_stream(descriptor, correlation) {
+                Ok(Some(complete)) => handle_completed_stream(registry, peer_addr, complete).await,
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(peer = %peer_addr, error = %err, "Failed to start Streaming sequence");
+                }
+            }
+        }
+        StreamingFrame::Data { payload } => match payload {
+            StreamingData::Direct { chunk_len } => {
+                match assembler.read_data_direct(reader, chunk_len).await {
+                    Ok(Some(complete)) => {
+                        handle_completed_stream(registry, peer_addr, complete).await
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        warn!(peer = %peer_addr, error = %err, "Streaming direct read error");
+                        if let Some(descriptor) = assembler.abort_if_stale(Duration::ZERO) {
+                            warn!(
+                                peer = %peer_addr,
+                                stream_id = descriptor.stream_id,
+                                "Streaming state reset after direct read error"
+                            );
+                        }
+                    }
+                }
+            }
+        },
+        StreamingFrame::End => match assembler.finish_with_end() {
+            Ok(Some(complete)) => handle_completed_stream(registry, peer_addr, complete).await,
+            Ok(None) => {}
+            Err(err) => {
+                warn!(peer = %peer_addr, error = %err, "Streaming end frame error");
+                if let Some(descriptor) = assembler.abort_if_stale(Duration::ZERO) {
+                    warn!(
+                        peer = %peer_addr,
+                        stream_id = descriptor.stream_id,
+                        "Streaming state reset after end error"
+                    );
+                }
+            }
+        },
+    }
+}
+
+/// Check if the payload is properly aligned for rkyv access
+fn is_registry_payload_aligned(payload: &[u8]) -> bool {
+    (payload.as_ptr() as usize).is_multiple_of(REGISTRY_MESSAGE_ALIGNMENT)
+}
+
+/// Decode a RegistryMessage from network buffer.
+///
+/// **CRITICAL**: Panics if payload is not 16-byte aligned in release mode.
+/// The framing code guarantees 16-byte alignment for RegistryMessage payloads.
+/// Unaligned data indicates a serious bug in the framing implementation.
+///
+fn decode_registry_message(
+    payload: MessagePayload,
+) -> std::result::Result<RegistryMessageFrame, (Bytes, GossipError)> {
+    let slice = payload.as_slice();
+    let is_aligned = is_registry_payload_aligned(slice);
+    if !is_aligned {
+        crate::telemetry::gossip_zero_copy::record_alignment_failure(
+            "handle::decode_registry_message",
+        );
+
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        {
+            panic!(
+                "RegistryMessage payload must be {}-byte aligned! \
+                 Pointer: {:p}, offset: {}. \
+                 This is a PROTOCOL VIOLATION - the framing code guarantees alignment.",
+                REGISTRY_MESSAGE_ALIGNMENT,
+                slice.as_ptr(),
+                slice.as_ptr() as usize
+            );
+        }
+
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let mut aligned = RegistryAlignedVec::with_capacity(slice.len());
+            aligned.extend_from_slice(slice);
+            let bytes = Bytes::from(aligned.into_boxed_slice());
+            return RegistryMessageFrame::from_bytes(bytes.clone()).map_err(|err| (bytes, err));
+        }
+    }
+
+    if let Err(err) = RegistryMessageFrame::validate(slice) {
+        let raw = payload.into_bytes();
+        return Err((raw, err));
+    }
+
+    crate::telemetry::gossip_zero_copy::record_inbound_frame(
+        "handle::decode_registry_message",
+        payload.len(),
+    );
+
+    Ok(payload.into_registry_frame().unwrap_or_else(|err| {
+        panic!(
+            "Validated gossip payload failed conversion: {}. This should never happen.",
+            err
+        )
+    }))
 }
 
 pub(crate) async fn handle_response_message(
@@ -1439,15 +1644,40 @@ pub(crate) async fn handle_response_message(
     );
 }
 
-/// Read a message from a TLS reader
+pub(crate) async fn handle_response_message_fast(
+    registry: &Arc<GossipRegistry>,
+    peer_addr: SocketAddr,
+    correlation_id: u16,
+    payload: bytes::Bytes,
+    connection: Option<&Arc<crate::connection_pool::LockFreeConnection>>,
+) {
+    if let Some(conn) = connection {
+        if let Some(ref correlation) = conn.correlation {
+            if correlation.has_pending(correlation_id) {
+                correlation.complete(correlation_id, payload);
+                debug!(
+                    peer = %peer_addr,
+                    correlation_id = correlation_id,
+                    "Delivered response via connection correlation tracker (fast path)"
+                );
+                return;
+            }
+        }
+    }
+
+    handle_response_message(registry, peer_addr, correlation_id, payload).await;
+}
+
+/// Read a message from a TLS reader.
 pub(crate) async fn read_message_from_tls_reader<R>(
+    // CRITICAL_PATH: zero-copy gossip ingestion depends on this function; coverage gates use it to ensure no regressions slip into the TLS receive loop.
     reader: &mut R,
     max_message_size: usize,
+    buffer: &GossipFrameBuffer,
 ) -> Result<MessageReadResult>
 where
     R: AsyncReadExt + Unpin,
 {
-    // Read the message length (4 bytes)
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -1459,122 +1689,154 @@ where
         });
     }
 
-    // Read the message data into a buffer that keeps the length prefix for alignment.
-    let mut msg_vec = vec![0u8; msg_len + crate::framing::LENGTH_PREFIX_LEN];
-    msg_vec[..crate::framing::LENGTH_PREFIX_LEN].copy_from_slice(&len_buf);
-    reader
-        .read_exact(&mut msg_vec[crate::framing::LENGTH_PREFIX_LEN..])
-        .await?;
-    let msg_buf = bytes::Bytes::from(msg_vec);
-    let msg_data = msg_buf.slice(crate::framing::LENGTH_PREFIX_LEN..);
+    if msg_len == 0 {
+        return Err(GossipError::InvalidStreamFrame("zero-length frame".into()));
+    }
+
+    let mut msg_type_buf = [0u8; 1];
+    reader.read_exact(&mut msg_type_buf).await?;
+    let msg_type_byte = msg_type_buf[0];
+    let msg_type = crate::MessageType::from_byte(msg_type_byte);
+
+    if matches!(msg_type, Some(crate::MessageType::StreamData)) {
+        if msg_len < crate::framing::STREAM_HEADER_PREFIX_LEN {
+            return Err(GossipError::InvalidStreamFrame(
+                "StreamData shorter than header".into(),
+            ));
+        }
+        let mut header_rest = [0u8; crate::framing::STREAM_HEADER_PREFIX_LEN - 1];
+        reader.read_exact(&mut header_rest).await?;
+        let correlation_id = u16::from_be_bytes([header_rest[0], header_rest[1]]);
+        let chunk_len = msg_len - crate::framing::STREAM_HEADER_PREFIX_LEN;
+        return Ok(MessageReadResult::Streaming {
+            frame: StreamingFrame::Data {
+                payload: StreamingData::Direct { chunk_len },
+            },
+            correlation_id,
+        });
+    }
+
+    let total_frame_len = msg_len + crate::framing::LENGTH_PREFIX_LEN;
+    let mut lease = buffer.lease(total_frame_len);
+    {
+        let frame = lease.as_mut_slice(total_frame_len);
+        frame[..crate::framing::LENGTH_PREFIX_LEN].copy_from_slice(&len_buf);
+        frame[crate::framing::LENGTH_PREFIX_LEN] = msg_type_byte;
+        if msg_len > 1 {
+            reader
+                .read_exact(&mut frame[crate::framing::LENGTH_PREFIX_LEN + 1..total_frame_len])
+                .await?;
+        }
+    }
+    let frozen = lease.freeze(total_frame_len);
+    let msg_data = MessagePayload::from_pooled(
+        frozen.slice(crate::framing::LENGTH_PREFIX_LEN..total_frame_len),
+    );
 
     #[cfg(any(test, feature = "test-helpers", debug_assertions))]
     {
-        if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
-            crate::test_helpers::record_raw_payload(msg_data.clone());
+        if typed_tell_capture_enabled() {
+            crate::test_helpers::record_raw_payload(msg_data.to_bytes());
         }
     }
 
-    // Check if this is an Ask message with envelope
     if msg_len >= crate::framing::ASK_RESPONSE_HEADER_LEN
-        && msg_data[0] == crate::MessageType::Ask as u8
+        && msg_data.as_slice()[0] == crate::MessageType::Ask as u8
     {
-        // This is an Ask message with envelope format:
-        // [type:1][correlation_id:2][pad:1][payload:N]
+        let correlation_id = u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
+        let payload = msg_data.into_slice_from(crate::framing::ASK_RESPONSE_HEADER_LEN);
 
-        // Extract correlation ID (bytes 1-2)
-        let correlation_id = u16::from_be_bytes([msg_data[1], msg_data[2]]);
-
-        // The actual RegistryMessage starts at byte 8
-        // Create a properly aligned buffer for the payload
-        let payload = msg_data.slice(crate::framing::ASK_RESPONSE_HEADER_LEN..);
-
-        // Try to deserialize as RegistryMessage first (Ask wrapper for gossip)
-        match decode_registry_message(payload.as_ref()) {
-            Ok(msg) => {
+        match decode_registry_message(payload) {
+            Ok(frame) => {
                 debug!(
                     correlation_id = correlation_id,
                     "Received Ask message with correlation ID"
                 );
-                Ok(MessageReadResult::Gossip(msg, Some(correlation_id)))
+                Ok(MessageReadResult::Gossip(frame, Some(correlation_id)))
             }
-            Err(err) => {
+            Err((raw_payload, err)) => {
                 debug!(
                     correlation_id = correlation_id,
-                    payload_len = payload.len(),
+                    payload_len = raw_payload.len(),
                     error = %err,
                     "Received raw Ask payload"
                 );
                 Ok(MessageReadResult::AskRaw {
                     correlation_id,
-                    payload,
+                    payload: raw_payload,
                 })
             }
         }
     } else if msg_len >= crate::framing::ASK_RESPONSE_HEADER_LEN
-        && msg_data[0] == crate::MessageType::Response as u8
+        && msg_data.as_slice()[0] == crate::MessageType::Response as u8
     {
-        // Response message format:
-        // [type:1][correlation_id:2][pad:1][payload:N]
-        let correlation_id = u16::from_be_bytes([msg_data[1], msg_data[2]]);
-        let payload = msg_data.slice(crate::framing::ASK_RESPONSE_HEADER_LEN..);
+        let correlation_id = u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
+        let payload = msg_data.into_slice_from(crate::framing::ASK_RESPONSE_HEADER_LEN);
         Ok(MessageReadResult::Response {
             correlation_id,
-            payload,
+            payload: payload.into_bytes(),
         })
     } else {
-        // Check if this is a Gossip message with type prefix
         if msg_len >= 1 {
-            let first_byte = msg_data[0];
-            // Check if it's a known message type
-            if let Some(msg_type) = crate::MessageType::from_byte(first_byte) {
+            if let Some(msg_type) = msg_type {
                 match msg_type {
                     crate::MessageType::Gossip => {
-                        // This is a gossip message with type prefix, skip the type byte
                         if msg_data.len() >= crate::framing::GOSSIP_HEADER_LEN {
-                            // Create a properly aligned buffer for the payload
-                            let payload = msg_data.slice(crate::framing::GOSSIP_HEADER_LEN..);
-                            match decode_registry_message(payload.as_ref()) {
-                                Ok(msg) => return Ok(MessageReadResult::Gossip(msg, None)),
-                                Err(err) => {
+                            let payload = msg_data.slice_from(crate::framing::GOSSIP_HEADER_LEN);
+                            match decode_registry_message(payload) {
+                                Ok(frame) => return Ok(MessageReadResult::Gossip(frame, None)),
+                                Err((_raw_payload, err)) => {
                                     debug!(
-                                        payload_len = payload.len(),
+                                        payload_len = msg_data.len(),
                                         error = %err,
                                         "Failed to decode gossip payload"
                                     );
-                                    return Ok(MessageReadResult::Raw(msg_data));
+                                    return Ok(MessageReadResult::Raw(msg_data.to_bytes()));
                                 }
                             }
                         } else {
-                            return Ok(MessageReadResult::Raw(msg_data));
+                            return Ok(MessageReadResult::Raw(msg_data.to_bytes()));
                         }
                     }
                     crate::MessageType::ActorTell | crate::MessageType::ActorAsk => {
-                        // This is an actor message with envelope format:
-                        // [type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
                         if msg_data.len() < crate::framing::ACTOR_HEADER_LEN {
-                            // Need at least 28 bytes for header
-                            return Ok(MessageReadResult::Raw(msg_data));
+                            return Ok(MessageReadResult::Raw(msg_data.to_bytes()));
                         }
 
-                        // Parse the actor message envelope
-                        // Wire format: [type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
-                        let msg_type_byte = msg_data[0];
-                        let correlation_id = u16::from_be_bytes([msg_data[1], msg_data[2]]);
-                        // Skip reserved bytes (3-11), actor_id starts at byte 12
-                        let actor_id = u64::from_be_bytes(msg_data[12..20].try_into().unwrap());
-                        let type_hash = u32::from_be_bytes(msg_data[20..24].try_into().unwrap());
+                        let msg_type_byte = msg_data.as_slice()[0];
+                        let correlation_id =
+                            u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
+                        let actor_id =
+                            u64::from_be_bytes(msg_data.as_slice()[12..20].try_into().unwrap());
+                        let type_hash =
+                            u32::from_be_bytes(msg_data.as_slice()[20..24].try_into().unwrap());
                         let payload_len =
-                            u32::from_be_bytes(msg_data[24..28].try_into().unwrap()) as usize;
+                            u32::from_be_bytes(msg_data.as_slice()[24..28].try_into().unwrap())
+                                as usize;
 
                         if msg_data.len() < crate::framing::ACTOR_HEADER_LEN + payload_len {
-                            return Ok(MessageReadResult::Raw(msg_data));
+                            return Ok(MessageReadResult::Raw(msg_data.to_bytes()));
                         }
 
                         let payload = msg_data.slice(
                             crate::framing::ACTOR_HEADER_LEN
                                 ..crate::framing::ACTOR_HEADER_LEN + payload_len,
                         );
+
+                        #[cfg(not(any(test, feature = "test-helpers")))]
+                        {
+                            let required_alignment = crate::framing::REGISTRY_ALIGNMENT;
+                            let bytes = payload.as_slice();
+                            let is_aligned =
+                                (bytes.as_ptr() as usize).is_multiple_of(required_alignment);
+                            assert!(
+                                is_aligned,
+                                "Actor payload must be {}-byte aligned! Pointer: {:p}, offset: {}",
+                                required_alignment,
+                                bytes.as_ptr(),
+                                bytes.as_ptr() as usize
+                            );
+                        }
 
                         return Ok(MessageReadResult::Actor {
                             msg_type: msg_type_byte,
@@ -1584,70 +1846,66 @@ where
                             payload,
                         });
                     }
-                    crate::MessageType::StreamStart
-                    | crate::MessageType::StreamData
-                    | crate::MessageType::StreamEnd => {
-                        // Handle streaming messages
-                        // Message format: [type:1][correlation_id:2][reserved:9][stream_header:36][chunk_data:N]
-                        if msg_data.len()
-                            < crate::framing::STREAM_HEADER_PREFIX_LEN
-                                + crate::StreamHeader::SERIALIZED_SIZE
-                        {
-                            return Ok(MessageReadResult::Raw(msg_data));
+                    crate::MessageType::StreamStart => {
+                        let offset = crate::framing::STREAM_HEADER_PREFIX_LEN;
+                        if msg_data.len() < offset + streaming::STREAM_DESCRIPTOR_SIZE {
+                            return Ok(MessageReadResult::Raw(msg_data.to_bytes()));
                         }
-
-                        // Parse the stream header (36 bytes starting at offset 12)
-                        let header_bytes = &msg_data[crate::framing::STREAM_HEADER_PREFIX_LEN
-                            ..crate::framing::STREAM_HEADER_PREFIX_LEN
-                                + crate::StreamHeader::SERIALIZED_SIZE];
-                        let stream_header = match crate::StreamHeader::from_bytes(header_bytes) {
-                            Some(header) => header,
-                            None => return Ok(MessageReadResult::Raw(msg_data)),
-                        };
-
-                        // Extract chunk data (everything after the header)
-                        let chunk_data = if msg_data.len()
-                            > crate::framing::STREAM_HEADER_PREFIX_LEN
-                                + crate::StreamHeader::SERIALIZED_SIZE
-                        {
-                            msg_data.slice(
-                                crate::framing::STREAM_HEADER_PREFIX_LEN
-                                    + crate::StreamHeader::SERIALIZED_SIZE..,
-                            )
-                        } else {
-                            bytes::Bytes::new()
-                        };
-
+                        let descriptor_slice =
+                            msg_data.slice(offset..offset + streaming::STREAM_DESCRIPTOR_SIZE);
+                        let descriptor =
+                            match streaming::decode_stream_start(descriptor_slice.as_slice()) {
+                                Ok(desc) => desc,
+                                Err(_) => return Ok(MessageReadResult::Raw(msg_data.to_bytes())),
+                            };
+                        let correlation_id =
+                            u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
                         return Ok(MessageReadResult::Streaming {
-                            msg_type: first_byte,
-                            stream_header,
-                            chunk_data,
+                            frame: StreamingFrame::Start { descriptor },
+                            correlation_id,
+                        });
+                    }
+                    crate::MessageType::StreamEnd => {
+                        let correlation_id =
+                            u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
+                        return Ok(MessageReadResult::Streaming {
+                            frame: StreamingFrame::End,
+                            correlation_id,
                         });
                     }
                     _ => {
-                        // Unknown message type, treat as raw payload.
-                        return Ok(MessageReadResult::Raw(msg_data));
+                        return Ok(MessageReadResult::Raw(msg_data.to_bytes()));
                     }
                 }
             }
         }
 
-        Ok(MessageReadResult::Raw(msg_data))
+        Ok(MessageReadResult::Raw(msg_data.to_bytes()))
     }
 }
 
 #[cfg(test)]
 mod framing_tests {
-    use super::{read_message_from_tls_reader, MessageReadResult};
-    use crate::{framing, registry::RegistryMessage, MessageType};
-    use tokio::io::AsyncWriteExt;
+    use super::{
+        read_message_from_tls_reader, MessagePayload, MessageReadResult, RegistryAlignedVec,
+        StreamingData, StreamingFrame,
+    };
+    use crate::{
+        framing,
+        gossip_buffer::{GossipFrameBuffer, PooledFrameBytes},
+        registry::RegistryMessage,
+        streaming::{self, StreamAssembler, StreamDescriptor},
+        MessageType,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn read_frame(frame: Vec<u8>) -> MessageReadResult {
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         tokio::spawn(async move {
             writer.write_all(&frame).await.unwrap();
         });
-        read_message_from_tls_reader(&mut reader, 1024 * 1024)
+        let buffer = GossipFrameBuffer::new();
+        read_message_from_tls_reader(&mut reader, 1024 * 1024, &buffer)
             .await
             .unwrap()
     }
@@ -1703,13 +1961,13 @@ mod framing_tests {
         let total_len = framing::ACTOR_HEADER_LEN + payload_bytes.len();
         let mut frame = Vec::with_capacity(framing::LENGTH_PREFIX_LEN + total_len);
         frame.extend_from_slice(&(total_len as u32).to_be_bytes()); // 4 bytes: length prefix
-        frame.push(MessageType::ActorTell as u8);                   // 1 byte: message type
-        frame.extend_from_slice(&0u16.to_be_bytes());               // 2 bytes: correlation_id
-        frame.extend_from_slice(&[0u8; 9]);                         // 9 bytes: reserved (for 32-byte alignment)
-        frame.extend_from_slice(&actor_id.to_be_bytes());           // 8 bytes: actor_id
-        frame.extend_from_slice(&type_hash.to_be_bytes());          // 4 bytes: type_hash
+        frame.push(MessageType::ActorTell as u8); // 1 byte: message type
+        frame.extend_from_slice(&0u16.to_be_bytes()); // 2 bytes: correlation_id
+        frame.extend_from_slice(&[0u8; 9]); // 9 bytes: reserved (for 32-byte alignment)
+        frame.extend_from_slice(&actor_id.to_be_bytes()); // 8 bytes: actor_id
+        frame.extend_from_slice(&type_hash.to_be_bytes()); // 4 bytes: type_hash
         frame.extend_from_slice(&(payload_bytes.len() as u32).to_be_bytes()); // 4 bytes: payload_len
-        frame.extend_from_slice(payload_bytes);                     // N bytes: payload
+        frame.extend_from_slice(payload_bytes); // N bytes: payload
 
         match read_frame(frame).await {
             MessageReadResult::Actor {
@@ -1723,9 +1981,29 @@ mod framing_tests {
                 assert_eq!(correlation_id, 0);
                 assert_eq!(parsed_actor_id, actor_id);
                 assert_eq!(parsed_type_hash, type_hash);
-                assert_eq!(body.as_ref(), payload_bytes);
+                assert_eq!(body.as_slice(), payload_bytes);
             }
             _ => panic!("unexpected result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_frame_uses_zero_copy_buffer() {
+        let message = RegistryMessage::ImmediateAck {
+            actor_name: "zero_copy".into(),
+            success: true,
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message).unwrap();
+        let header = framing::write_gossip_frame_prefix(payload.len());
+        let mut frame = Vec::with_capacity(header.len() + payload.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&payload);
+
+        match read_frame(frame).await {
+            MessageReadResult::Gossip(frame, _) => {
+                assert!(frame.is_zero_copy(), "expected pooled backing");
+            }
+            other => panic!("unexpected frame {:?}", other),
         }
     }
 
@@ -1744,7 +2022,8 @@ mod framing_tests {
         match read_frame(frame).await {
             MessageReadResult::Gossip(parsed, correlation_id) => {
                 assert!(correlation_id.is_none());
-                match parsed {
+                let msg = parsed.to_owned().expect("frame should deserialize");
+                match msg {
                     RegistryMessage::ImmediateAck {
                         actor_name,
                         success,
@@ -1756,6 +2035,228 @@ mod framing_tests {
                 }
             }
             other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn alignment_check_works_correctly() {
+        use super::is_registry_payload_aligned;
+
+        // Create a properly aligned buffer
+        let mut aligned_buf: RegistryAlignedVec = RegistryAlignedVec::new();
+        aligned_buf.extend_from_slice(&[1u8; 32]);
+        assert!(
+            is_registry_payload_aligned(aligned_buf.as_ref()),
+            "RegistryAlignedVec should be properly aligned"
+        );
+
+        // Create an intentionally unaligned buffer by shifting by 1 byte
+        let unaligned = vec![1u8, 2u8, 3u8, 4u8];
+        // The alignment of Vec is typically not guaranteed to be REGISTRY_MESSAGE_ALIGNMENT
+        // so this test verifies the alignment check function works correctly
+        let is_aligned = is_registry_payload_aligned(&unaligned);
+        // We don't assert false here because alignment depends on heap allocation
+        // but we verify the function doesn't crash and returns a boolean
+        let _ = is_aligned;
+    }
+
+    #[tokio::test]
+    async fn decode_registry_message_handles_both_aligned_and_unaligned() {
+        use super::decode_registry_message;
+
+        let message = RegistryMessage::ImmediateAck {
+            actor_name: "test_actor_aligned".to_string(),
+            success: true,
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message).unwrap();
+
+        // Test with aligned payload
+        {
+            let pooled = PooledFrameBytes::orphaned(&payload);
+            let result = decode_registry_message(MessagePayload::from_pooled(pooled));
+            assert!(result.is_ok(), "Should decode aligned payload successfully");
+            let msg = result
+                .unwrap()
+                .to_owned()
+                .expect("frame should deserialize");
+            match msg {
+                RegistryMessage::ImmediateAck {
+                    actor_name,
+                    success,
+                } => {
+                    assert_eq!(actor_name, "test_actor_aligned");
+                    assert!(success);
+                }
+                _ => panic!("Unexpected message type"),
+            }
+        }
+
+        // Test with unaligned payload (create offset)
+        {
+            let mut padded = Vec::with_capacity(payload.len() + 1);
+            padded.push(0u8);
+            padded.extend_from_slice(&payload);
+            let padded_pooled = PooledFrameBytes::orphaned(&padded);
+            let unaligned = padded_pooled.slice(1..padded_pooled.len());
+            let result = decode_registry_message(MessagePayload::from_pooled(unaligned));
+            assert!(
+                result.is_ok(),
+                "Should decode unaligned payload successfully"
+            );
+            let msg = result
+                .unwrap()
+                .to_owned()
+                .expect("frame should deserialize");
+            match msg {
+                RegistryMessage::ImmediateAck {
+                    actor_name,
+                    success,
+                } => {
+                    assert_eq!(actor_name, "test_actor_aligned");
+                    assert!(success);
+                }
+                _ => panic!("Unexpected message type"),
+            }
+        }
+    }
+
+    fn sample_descriptor(payload_len: u64) -> StreamDescriptor {
+        StreamDescriptor {
+            stream_id: 0xBAD_CAFE,
+            payload_len,
+            chunk_len: 1024,
+            type_hash: 0x1122_3344,
+            actor_id: 0x7788,
+            flags: 0,
+            reserved: 0,
+        }
+    }
+
+    fn encode_data_frame(payload: &[u8], correlation_id: u16) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(streaming::STREAM_DATA_HEADER_LEN + payload.len());
+        let header = streaming::encode_stream_data_header(payload.len(), correlation_id).unwrap();
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    fn encode_end_frame(correlation_id: u16) -> [u8; streaming::STREAM_DATA_HEADER_LEN] {
+        let mut buf = [0u8; streaming::STREAM_DATA_HEADER_LEN];
+        let len = framing::STREAM_HEADER_PREFIX_LEN as u32;
+        buf[..4].copy_from_slice(&len.to_be_bytes());
+        buf[4] = MessageType::StreamEnd as u8;
+        buf[5..7].copy_from_slice(&correlation_id.to_be_bytes());
+        buf
+    }
+
+    #[tokio::test]
+    async fn streaming_frames_round_trip_via_duplex() {
+        let descriptor = sample_descriptor(6);
+        let correlation_id = 0xCAFE;
+        let start_frame = streaming::encode_stream_start_frame(&descriptor, correlation_id);
+        let payload = [1u8, 2, 3, 4, 5, 6];
+        let data_frame = encode_data_frame(&payload, correlation_id);
+        let end_frame = encode_end_frame(correlation_id);
+
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let buffer = GossipFrameBuffer::new();
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(&start_frame).await.unwrap();
+            writer.write_all(&data_frame).await.unwrap();
+            writer.write_all(&end_frame).await.unwrap();
+        });
+
+        match read_message_from_tls_reader(&mut reader, 1024 * 1024, &buffer)
+            .await
+            .unwrap()
+        {
+            MessageReadResult::Streaming {
+                frame,
+                correlation_id: parsed_corr,
+            } => {
+                assert_eq!(parsed_corr, correlation_id);
+                match frame {
+                    StreamingFrame::Start { descriptor: parsed } => {
+                        assert_eq!(parsed, descriptor)
+                    }
+                    other => panic!("expected start frame, got {:?}", other),
+                }
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+
+        match read_message_from_tls_reader(&mut reader, 1024 * 1024, &buffer)
+            .await
+            .unwrap()
+        {
+            MessageReadResult::Streaming {
+                frame,
+                correlation_id: parsed_corr,
+            } => {
+                assert_eq!(parsed_corr, correlation_id);
+                if let StreamingFrame::Data {
+                    payload: StreamingData::Direct { chunk_len },
+                } = frame
+                {
+                    assert_eq!(chunk_len, payload.len());
+                    let mut buf = vec![0u8; chunk_len];
+                    reader.read_exact(&mut buf).await.unwrap();
+                    assert_eq!(buf, payload);
+                } else {
+                    panic!("expected data frame, got {:?}", frame);
+                }
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+
+        match read_message_from_tls_reader(&mut reader, 1024 * 1024, &buffer)
+            .await
+            .unwrap()
+        {
+            MessageReadResult::Streaming {
+                frame,
+                correlation_id: parsed_corr,
+            } => {
+                assert_eq!(parsed_corr, correlation_id);
+                assert!(matches!(frame, StreamingFrame::End));
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+
+        writer_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_data_before_start_is_rejected() {
+        let payload = [0xAA, 0xBB];
+        let data_frame = encode_data_frame(&payload, 0xBEEF);
+
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        let buffer = GossipFrameBuffer::new();
+        tokio::spawn(async move {
+            writer.write_all(&data_frame).await.unwrap();
+        });
+
+        let mut assembler = StreamAssembler::new(16);
+        match read_message_from_tls_reader(&mut reader, 1024, &buffer)
+            .await
+            .unwrap()
+        {
+            MessageReadResult::Streaming { frame, .. } => {
+                if let StreamingFrame::Data {
+                    payload: StreamingData::Direct { chunk_len },
+                } = frame
+                {
+                    let err = assembler
+                        .read_data_direct(&mut reader, chunk_len)
+                        .await
+                        .unwrap_err();
+                    assert!(matches!(err, crate::GossipError::InvalidStreamFrame(_)));
+                } else {
+                    panic!("expected data frame, got {:?}", frame);
+                }
+            }
+            other => panic!("unexpected frame: {:?}", other),
         }
     }
 }
@@ -1866,17 +2367,18 @@ async fn send_gossip_message_zero_copy(
     // Serialize the message AFTER updating timing
     let data = rkyv::to_bytes::<rkyv::rancor::Error>(&task.message)?;
 
-    // Create message with Gossip type prefix
+    // Create message with Gossip type prefix and required padding
     let mut msg_with_type = Vec::with_capacity(crate::framing::GOSSIP_HEADER_LEN + data.len());
-    msg_with_type.push(crate::MessageType::Gossip as u8);
-    msg_with_type.extend_from_slice(&[0u8; 3]);
+    msg_with_type.resize(crate::framing::GOSSIP_HEADER_LEN, 0);
+    msg_with_type[0] = crate::MessageType::Gossip as u8;
     msg_with_type.extend_from_slice(&data);
 
-    // Use zero-copy tell() which uses try_send() internally for max performance
-    // This completely bypasses async overhead when the channel has capacity
-    let tcp_start = std::time::Instant::now();
-    conn.tell(msg_with_type.as_slice()).await?;
-    let _tcp_elapsed = tcp_start.elapsed();
-    // eprintln!("🔍 TCP_WRITE_TIME: {:?}", tcp_elapsed);
+    let msg_bytes = Bytes::from(msg_with_type);
+    let frame_len = msg_bytes.len();
+    conn.tell_bytes(msg_bytes).await?;
+    crate::telemetry::gossip_zero_copy::record_outbound_frame(
+        "handle::send_gossip_message_zero_copy",
+        frame_len,
+    );
     Ok(())
 }

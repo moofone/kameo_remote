@@ -1,0 +1,218 @@
+═══════════════════════════════════════════════════════════════
+Step 1: All Unit & Integration Tests
+═══════════════════════════════════════════════════════════════
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)
+warning: unused import: `kameo_remote::*`
+ --> tests/body_allocation_baseline.rs:8:5
+  |
+8 | use kameo_remote::*;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `deallocations` is never read
+  --> tests/body_allocation_baseline.rs:47:5
+   |
+45 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+46 |     allocations: usize,
+47 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "body_allocation_baseline") generated 2 warnings (run `cargo fix --test "body_allocation_baseline"` to apply 1 suggestion)
+warning: field `deallocations` is never read
+  --> tests/bytemuck_allocation_tests.rs:99:5
+   |
+97 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+98 |     allocations: usize,
+99 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "bytemuck_allocation_tests") generated 1 warning
+warning: unused variable: `type_hash`
+  --> examples/console_tell_ask_server.rs:65:9
+   |
+65 |         type_hash: u32,
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_type_hash`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (example "console_tell_ask_server") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 23s
+     Running unittests src/lib.rs (target/debug/deps/kameo_remote-90626d82ae5fca82)
+
+running 152 tests
+test config::tests::test_config_clone ... ok
+
+thread 'config::tests::test_default_config' (154204684) panicked at src/config.rs:205:9:
+assertion `left == right` failed
+  left: 5s
+ right: 30s
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test config::tests::test_custom_config ... ok
+test config::tests::test_peer_retry_constant ... ok
+test connection_pool::tests::test_buffer_config_default ... ok
+test connection_pool::tests::test_buffer_config_minimum_size ... ok
+test connection_pool::tests::test_buffer_config_validation ... ok
+test connection_pool::tests::test_connection_handle_debug ... ok
+test connection_pool::tests::test_control_reserved_slots_bounds ... ok
+test connection_pool::tests::test_should_flush_rules ... ok
+test config::tests::test_config_debug ... ok
+test connection_pool::tests::test_streaming_threshold_saturation ... ok
+test connection_pool::tests::test_streaming_threshold_calculation ... ok
+test framing::tests::ask_response_payload_offset_aligned ... ok
+test config::tests::test_default_config ... FAILED
+test framing::tests::actor_payload_offset_aligned ... ok
+test framing::tests::codec_trap_length_prefix_stripped_requires_more_padding ... ok
+test framing::tests::gossip_payload_is_16_byte_aligned ... ok
+test framing::tests::write_ask_response_header_sets_length_and_pad ... ok
+test framing::tests::write_gossip_frame_prefix_sets_padding ... ok
+test framing::tests::header_lengths_hold_for_varied_payload_sizes ... ok
+test handle::framing_tests::alignment_check_works_correctly ... ok
+test handle_builder::tests::test_builder_pattern ... ignored, gossip propagation timing variance in CI
+test handshake::tests::test_hello_new ... ok
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+test handshake::tests::test_feature_serialization ... ok
+test handshake::tests::test_hello_serialization ... ok
+test handle::framing_tests::response_parses_with_padded_header ... ok
+test handle::framing_tests::actor_tell_parses_with_reordered_header ... ok
+test handle::framing_tests::decode_registry_message_handles_both_aligned_and_unaligned ... ok
+test handle::framing_tests::ask_raw_parses_with_padded_header ... ok
+test handle::framing_tests::gossip_registry_payload_deserializes_from_aligned_buffer ... ok
+test handshake::tests::test_peer_capabilities_from_hello_exchange_partial_features ... ok
+test handshake::tests::test_hello_handshake_negotiation ... ok
+test handshake::tests::test_peer_capabilities_from_hello_exchange_both_v2 ... ok
+test peer_discovery::tests::test_bogon_filtering_link_local ... ok
+test handshake::tests::test_peer_capabilities_supports_feature ... ok
+test peer_discovery::tests::test_bogon_filtering_loopback ... ok
+test connection_pool::tests::test_connection_pool_new ... ok
+test peer_discovery::tests::test_cleanup_expired_uses_unified_state ... ok
+test peer_discovery::tests::test_cleanup_expired_entries ... ok
+test peer_discovery::tests::test_clear_pending ... ok
+test peer_discovery::tests::test_connection_clears_failure_state ... ok
+test peer_discovery::tests::test_exponential_backoff ... ok
+test peer_discovery::tests::test_filter_connected_peers ... ok
+test connection_pool::tests::test_set_registry ... ok
+test peer_discovery::tests::test_ipv6_link_local_blocked_by_default ... ok
+test peer_discovery::tests::test_filter_self ... ok
+test peer_discovery::tests::test_ipv6_loopback_blocked_by_default ... ok
+test peer_discovery::tests::test_ipv6_unique_local_respects_private_flag ... ok
+test peer_discovery::tests::test_max_failures_removal ... ok
+test peer_discovery::tests::test_on_peer_list_gossip_respects_pending_peers ... ok
+test peer_discovery::tests::test_on_peer_list_gossip_skips_already_pending ... ok
+test peer_discovery::tests::test_peer_connection_lifecycle ... ok
+test peer_discovery::tests::test_peer_failure_transitions_atomic ... ok
+test peer_discovery::tests::test_peer_state_transitions_atomic ... ok
+test peer_discovery::tests::test_private_allowed_default ... ok
+test peer_discovery::tests::test_should_retry_backoff ... ok
+test peer_discovery::tests::test_soft_cap_limiting ... ok
+test peer_discovery::tests::test_unspecified_and_broadcast_blocked ... ok
+test peer_discovery::tests::test_unified_and_legacy_counts_match ... ok
+test priority::tests::test_consistency_level_clone ... ok
+test priority::tests::test_consistency_level_debug ... ok
+test priority::tests::test_consistency_level_default ... ok
+test priority::tests::test_consistency_level_equality ... ok
+test priority::tests::test_consistency_level_serialization ... ok
+test priority::tests::test_registration_priority_clone ... ok
+test priority::tests::test_registration_priority_debug ... ok
+test priority::tests::test_registration_priority_default ... ok
+test priority::tests::test_registration_priority_fanout_multiplier ... ok
+test priority::tests::test_registration_priority_immediate_retry_count ... ok
+test priority::tests::test_registration_priority_is_critical ... ok
+test priority::tests::test_registration_priority_ordering ... ok
+test priority::tests::test_registration_priority_serialization ... ok
+test priority::tests::test_registration_priority_should_trigger_immediate_gossip ... ok
+test registry::tests::test_add_peer ... ok
+test registry::tests::test_gossip_result ... ok
+test registry::tests::test_gossip_task ... ok
+test registry::tests::test_get_change_actor_name ... ok
+test registry::tests::test_apply_delta ... ok
+test registry::tests::test_deduplicate_changes ... ok
+test registry::tests::test_check_peer_consensus ... ok
+test registry::tests::test_historical_delta ... ok
+test registry::tests::test_cleanup_dead_peers ... ok
+test registry::tests::test_peer_health_status ... ok
+test registry::tests::test_handle_peer_connection_failure ... ok
+test registry::tests::test_peer_info ... ok
+test registry::tests::test_peer_info_gossip_conversion ... ok
+test registry::tests::test_get_stats ... ok
+test registry::tests::test_apply_delta_skip_local ... ok
+test registry::tests::test_cleanup_stale_actors ... ok
+test registry::tests::test_peer_info_gossip_serialization ... ok
+test registry::tests::test_peer_info_local_factory ... ok
+test registry::tests::test_mesh_formation_metric_records_when_threshold_met ... ok
+test registry::tests::test_peer_list_gossip_serialization ... ok
+test registry::tests::test_pending_failure ... ok
+test registry::tests::test_lookup_actor_ttl ... ok
+test registry::tests::test_lookup_actor ... ok
+test registry::tests::test_on_peer_list_gossip_ingests_known_peers_and_candidates ... ok
+test registry::tests::test_prepare_gossip_round_no_peers ... ok
+test registry::tests::test_peer_list_gossip_tasks_created ... ok
+test registry::tests::test_registry_stats ... ok
+test registry::tests::test_registry_change_serialization ... ok
+test registry::tests::test_merge_full_sync ... ok
+test registry::tests::test_resolve_peer_addr_backwards_compat_none ... ok
+test registry::tests::test_resolve_peer_addr_ipv6_loopback_from_remote ... ok
+test registry::tests::test_resolve_peer_addr_loopback_from_loopback ... ok
+test registry::tests::test_register_actor ... ok
+test registry::tests::test_resolve_peer_addr_loopback_from_remote ... ok
+test registry::tests::test_registry_creation ... ok
+test registry::tests::test_register_actor_duplicate ... ok
+test registry::tests::test_resolve_peer_addr_with_invalid_string ... ok
+test registry::tests::test_resolve_peer_addr_with_ipv6_unspecified ... ok
+test registry::tests::test_registry_delta_serialization ... ok
+test registry::tests::test_resolve_peer_addr_with_none ... ok
+test registry::tests::test_register_actor_with_priority ... ok
+test registry::tests::test_registry_message_variants ... ok
+test registry::tests::test_prepare_gossip_round_with_peers ... ok
+test registry::tests::test_resolve_peer_addr_with_unspecified_ip ... ok
+test registry::tests::test_resolve_peer_addr_with_valid_bind_addr ... ok
+test registry::tests::test_should_use_delta_state ... ok
+test remote_actor_location::tests::test_actor_location_new ... ok
+test remote_actor_location::tests::test_actor_location_new_with_priority ... ok
+test remote_actor_location::tests::test_actor_location_clone ... ok
+test remote_actor_location::tests::test_actor_location_debug ... ok
+test remote_actor_location::tests::test_actor_location_equality ... ok
+test remote_actor_location::tests::test_actor_location_new_with_wall_time ... ok
+test registry::tests::test_unregister_actor ... ok
+test tests::test_current_timestamp ... ok
+test tests::test_error_conversions ... ok
+test remote_actor_location::tests::test_actor_location_new_with_wall_time_and_priority ... ok
+test registry::tests::test_trigger_immediate_gossip ... ok
+test tests::test_gossip_error_display ... ok
+test registry::tests::test_shutdown ... ok
+test tests::test_result_type ... ok
+test remote_actor_location::tests::test_actor_location_serialization ... ok
+test tls::name::tests::test_decode_invalid ... ok
+test remote_actor_location::tests::test_actor_location_with_metadata ... ok
+test tls::name::tests::test_dns_name_valid ... ok
+test tls::name::tests::test_decode_without_suffix ... ok
+test tls::name::tests::test_encode_decode_roundtrip ... ok
+test tls::resolver::tests::test_resolver_creation ... ok
+test typed::tests::pooled_payload_buf_semantics ... ok
+test typed::tests::typed_payload_parts_includes_hash_in_debug ... ok
+test tls::verifier::tests::test_extract_node_id_placeholder ... ok
+test typed::tests::pool_reuse_and_cap_behavior ... ok
+test tls::tests::test_tls_config_creation ... ok
+test tls::tests::test_alpn_selection_v2_only ... ok
+test connection_pool::tests::test_connection_handle_send_data_closed ... ok
+test connection_pool::tests::test_connection_handle_send_data ... ok
+test connection_pool::tests::test_permit_lanes_allow_control_when_ask_exhausted ... ok
+test connection_pool::tests::test_task_tracker_replaces_old_handle ... ok
+test connection_pool::tests::test_task_tracker_aborts_on_drop ... ok
+test registry::tests::test_enforce_bounds ... ok
+
+failures:
+
+failures:
+    config::tests::test_default_config
+
+test result: FAILED. 150 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+error: test failed, to rerun pass `--lib`
+❌ Some tests failed - validation failed

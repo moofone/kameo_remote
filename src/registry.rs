@@ -5,13 +5,18 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::task::JoinHandle;
 
-use dashmap::DashMap;
+use crate::gossip_buffer::PooledFrameBytes;
+use bytes::Bytes;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
+
+use dashmap::{mapref::entry::Entry as DashEntry, DashMap};
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use tokio::sync::{Mutex, RwLock};
 
+use arc_swap::ArcSwapOption;
 use rand::seq::SliceRandom;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tracing::{debug, error, info, warn};
@@ -47,7 +52,9 @@ pub fn resolve_peer_addr(
                 // Use TCP source IP with bind_addr port
                 debug!(
                     "sender_bind_addr {} has unspecified IP, using TCP source IP {} with port {}",
-                    bind_addr, tcp_source_addr.ip(), bind_addr.port()
+                    bind_addr,
+                    tcp_source_addr.ip(),
+                    bind_addr.port()
                 );
                 return SocketAddr::new(tcp_source_addr.ip(), bind_addr.port());
             }
@@ -76,7 +83,7 @@ pub fn resolve_peer_addr(
 
 /// Future type for actor message handling responses
 pub type ActorMessageFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Bytes>>> + Send + 'a>>;
 
 /// Callback trait for handling incoming actor messages
 pub trait ActorMessageHandler: Send + Sync {
@@ -88,6 +95,24 @@ pub trait ActorMessageHandler: Send + Sync {
         payload: &[u8],
         correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_>;
+
+    /// Handle an incoming actor message with numeric actor_id.
+    fn handle_actor_message_id(
+        &self,
+        actor_id: u64,
+        type_hash: u32,
+        payload: &[u8],
+        correlation_id: Option<u16>,
+    ) -> ActorMessageFuture<'_> {
+        let mut buf = itoa::Buffer::new();
+        let actor_id_str = buf.format(actor_id);
+        self.handle_actor_message(actor_id_str, type_hash, payload, correlation_id)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ActorMessageHandlerCell {
+    handler: Arc<dyn ActorMessageHandler>,
 }
 
 /// Registry change types for delta tracking with vector clocks
@@ -160,7 +185,7 @@ pub enum RegistryMessage {
         local_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         known_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         sender_peer_id: crate::PeerId,                    // Peer's unique identifier
-        sender_bind_addr: Option<String>,                 // Sender's listening address (optional for backwards compat)
+        sender_bind_addr: Option<String>, // Sender's listening address (optional for backwards compat)
         sequence: u64,
         wall_clock_time: u64,
     },
@@ -169,7 +194,7 @@ pub enum RegistryMessage {
         local_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         known_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         sender_peer_id: crate::PeerId,                    // Peer's unique identifier
-        sender_bind_addr: Option<String>,                 // Sender's listening address (optional for backwards compat)
+        sender_bind_addr: Option<String>, // Sender's listening address (optional for backwards compat)
         sequence: u64,
         wall_clock_time: u64,
     },
@@ -204,6 +229,164 @@ pub enum RegistryMessage {
         /// Sender's advertised address (so receiver can add us to their peer list)
         sender_addr: String,
     },
+}
+
+/// Zero-copy wrapper around a serialized RegistryMessage payload.
+///
+/// Holds the underlying bytes (typically reference-counted via `Bytes`) and provides
+/// validated archived access via `rkyv::access` without allocating intermediate structs.
+#[derive(Clone, Debug)]
+pub struct RegistryMessageFrame {
+    payload: RegistryFrameBacking,
+}
+
+#[derive(Clone, Debug)]
+enum RegistryFrameBacking {
+    Bytes(Bytes),
+    Pooled(PooledFrameBytes),
+}
+
+impl RegistryFrameBacking {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            RegistryFrameBacking::Bytes(bytes) => bytes.as_ref(),
+            RegistryFrameBacking::Pooled(pooled) => pooled.as_slice(),
+        }
+    }
+
+    fn into_bytes(self) -> Bytes {
+        match self {
+            RegistryFrameBacking::Bytes(bytes) => bytes,
+            RegistryFrameBacking::Pooled(pooled) => pooled.to_bytes(),
+        }
+    }
+}
+
+impl RegistryMessageFrame {
+    /// Create a new frame from serialized bytes. Performs validation immediately
+    /// so that subsequent archived() accesses can assume the payload is well-formed.
+    pub fn new(payload: Bytes) -> Result<Self> {
+        Self::from_bytes(payload)
+    }
+
+    pub fn from_bytes(payload: Bytes) -> Result<Self> {
+        // Validate once. We intentionally drop the reference afterwards because the
+        // primary goal is to ensure the bytes hold a valid archive.
+        Self::validate(&payload)?;
+        Ok(Self {
+            payload: RegistryFrameBacking::Bytes(payload),
+        })
+    }
+
+    pub fn from_pooled(payload: PooledFrameBytes) -> Result<Self> {
+        Self::validate(payload.as_slice())?;
+        Ok(Self {
+            payload: RegistryFrameBacking::Pooled(payload),
+        })
+    }
+
+    /// Borrow the archived RegistryMessage directly from the underlying bytes.
+    pub fn archived(&self) -> Result<&<RegistryMessage as Archive>::Archived> {
+        rkyv::access::<<RegistryMessage as Archive>::Archived, rkyv::rancor::Error>(
+            self.payload.as_slice(),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Borrow the raw serialized bytes (aligned, length not including frame prefix).
+    pub fn as_bytes(&self) -> &[u8] {
+        self.payload.as_slice()
+    }
+
+    /// Consume the frame and return the underlying bytes.
+    pub fn into_bytes(self) -> Bytes {
+        self.payload.into_bytes()
+    }
+
+    /// Convert to an owned RegistryMessage by deserializing the archived view.
+    /// Allocates only when an owned value is explicitly required.
+    ///
+    /// # Guard
+    /// This method is only available with the `test-helpers` feature (or tests)
+    /// to prevent accidental allocations in production code. Production code should use
+    /// `archived()` for zero-copy access.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn to_owned(&self) -> Result<RegistryMessage> {
+        let archived = self.archived()?;
+        crate::rkyv_utils::deserialize_archived::<RegistryMessage>(archived).map_err(Into::into)
+    }
+
+    pub(crate) fn validate(payload: &[u8]) -> Result<()> {
+        rkyv::access::<<RegistryMessage as Archive>::Archived, rkyv::rancor::Error>(payload)
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+    pub fn is_zero_copy(&self) -> bool {
+        matches!(self.payload, RegistryFrameBacking::Pooled(_))
+    }
+}
+
+/// Zero-copy accessor trait for archived RegistryMessage
+///
+/// This trait provides convenient zero-copy access to archived RegistryMessage data
+/// without allocating owned types. This ensures 100% zero-copy deserialization.
+pub trait RegistryMessageArchivedAccess {
+    /// Extract actor_id from ActorMessage variant (zero-copy)
+    fn actor_id(&self) -> Option<&str>;
+
+    /// Extract payload from ActorMessage variant (zero-copy)
+    fn payload(&self) -> Option<&[u8]>;
+
+    /// Extract type_hash from ActorMessage variant (zero-copy)
+    fn type_hash(&self) -> Option<u32>;
+
+    /// Extract correlation_id from ActorMessage variant (zero-copy)
+    fn correlation_id(&self) -> Option<Option<u16>>;
+
+    /// Check if this is an ActorMessage variant
+    fn is_actor_message(&self) -> bool;
+}
+
+impl RegistryMessageArchivedAccess for <RegistryMessage as rkyv::Archive>::Archived {
+    fn actor_id(&self) -> Option<&str> {
+        match self {
+            Self::ActorMessage { actor_id, .. } => Some(actor_id.as_str()),
+            _ => None,
+        }
+    }
+
+    fn payload(&self) -> Option<&[u8]> {
+        match self {
+            Self::ActorMessage { payload, .. } => Some(payload.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn type_hash(&self) -> Option<u32> {
+        match self {
+            Self::ActorMessage { type_hash, .. } => {
+                // u32_le is a newtype, use into() to convert to native u32
+                Some((*type_hash).into())
+            }
+            _ => None,
+        }
+    }
+
+    fn correlation_id(&self) -> Option<Option<u16>> {
+        match self {
+            Self::ActorMessage { correlation_id, .. } => match correlation_id {
+                rkyv::option::ArchivedOption::Some(v) => Some(Some((*v).into())),
+                rkyv::option::ArchivedOption::None => Some(None),
+            },
+            _ => None,
+        }
+    }
+
+    fn is_actor_message(&self) -> bool {
+        matches!(self, Self::ActorMessage { .. })
+    }
 }
 
 /// Statistics about the gossip registry
@@ -293,6 +476,34 @@ impl PeerInfo {
             failures: gossip.failures,
             last_attempt: gossip.last_attempt,
             last_success: gossip.last_success,
+            last_sequence: 0,
+            last_sent_sequence: 0,
+            consecutive_deltas: 0,
+            last_failure_time: None,
+        })
+    }
+
+    /// Create from archived gossip-serializable format without allocating strings.
+    pub fn from_gossip_archived(gossip: &<PeerInfoGossip as Archive>::Archived) -> Option<Self> {
+        let address: SocketAddr = gossip.address.as_str().parse().ok()?;
+        let peer_address = match &gossip.peer_address {
+            rkyv::option::ArchivedOption::Some(addr) => addr.as_str().parse().ok(),
+            rkyv::option::ArchivedOption::None => None,
+        };
+        let node_id = match &gossip.node_id {
+            rkyv::option::ArchivedOption::Some(node_id) => {
+                crate::rkyv_utils::deserialize_archived::<crate::NodeId>(node_id).ok()
+            }
+            rkyv::option::ArchivedOption::None => None,
+        };
+
+        Some(Self {
+            address,
+            peer_address,
+            node_id,
+            failures: u32::from(gossip.failures) as usize,
+            last_attempt: u64::from(gossip.last_attempt),
+            last_success: u64::from(gossip.last_success),
             last_sequence: 0,
             last_sent_sequence: 0,
             consecutive_deltas: 0,
@@ -399,12 +610,10 @@ pub struct GossipRegistry {
     pub peer_capabilities: Arc<DashMap<SocketAddr, crate::handshake::PeerCapabilities>>,
     pub peer_capabilities_by_node: Arc<DashMap<crate::NodeId, crate::handshake::PeerCapabilities>>,
     pub peer_capability_addr_to_node: Arc<DashMap<SocketAddr, crate::NodeId>>,
+    pub reconnect_tasks: Arc<DashMap<SocketAddr, ()>>,
 
     // Actor message handler callback
-    pub actor_message_handler: Arc<Mutex<Option<Arc<dyn ActorMessageHandler>>>>,
-
-    // Stream assembly state
-    pub stream_assemblies: Arc<Mutex<HashMap<u64, StreamAssembly>>>,
+    pub(crate) actor_message_handler: Arc<ArcSwapOption<ActorMessageHandlerCell>>,
 
     // Pending ACKs for synchronous registrations
     pub pending_acks: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
@@ -416,39 +625,6 @@ pub struct GossipRegistry {
 
 unsafe impl Send for GossipRegistry {}
 unsafe impl Sync for GossipRegistry {}
-
-/// State for assembling streamed messages
-#[derive(Debug)]
-pub struct StreamAssembly {
-    pub header: crate::StreamHeader,
-    pub chunks: std::collections::BTreeMap<u32, Vec<u8>>,
-    pub received_bytes: usize,
-    /// Timestamp when stream assembly started (for stale cleanup)
-    pub started_at: std::time::Instant,
-}
-
-impl StreamAssembly {
-    /// Check if the stream assembly is complete (all chunks received with no gaps)
-    pub fn is_complete(&self) -> bool {
-        let expected_chunks = self
-            .header
-            .total_size
-            .div_ceil(crate::connection_pool::STREAM_CHUNK_SIZE as u64);
-
-        if self.chunks.len() as u64 != expected_chunks {
-            return false;
-        }
-
-        // Verify all indices 0..N-1 are present (no gaps)
-        for i in 0..expected_chunks as u32 {
-            if !self.chunks.contains_key(&i) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
 
 impl GossipRegistry {
     /// Create a new gossip registry
@@ -520,8 +696,8 @@ impl GossipRegistry {
             peer_capabilities: peer_capabilities.clone(),
             peer_capabilities_by_node: Arc::new(DashMap::new()),
             peer_capability_addr_to_node: Arc::new(DashMap::new()),
-            actor_message_handler: Arc::new(Mutex::new(None)),
-            stream_assemblies: Arc::new(Mutex::new(HashMap::new())),
+            reconnect_tasks: Arc::new(DashMap::new()),
+            actor_message_handler: Arc::new(ArcSwapOption::empty()),
             pending_acks: Arc::new(Mutex::new(HashMap::new())),
             discovery_task_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -623,16 +799,21 @@ impl GossipRegistry {
 
     /// Register an actor message handler callback
     pub async fn set_actor_message_handler(&self, handler: Arc<dyn ActorMessageHandler>) {
-        let mut callback_guard = self.actor_message_handler.lock().await;
-        *callback_guard = Some(handler);
+        self.actor_message_handler
+            .store(Some(Arc::new(ActorMessageHandlerCell { handler })));
         info!("actor message handler registered");
     }
 
     /// Remove the actor message handler callback
     pub async fn clear_actor_message_handler(&self) {
-        let mut callback_guard = self.actor_message_handler.lock().await;
-        *callback_guard = None;
+        self.actor_message_handler.store(None);
         info!("actor message handler cleared");
+    }
+
+    pub fn load_actor_message_handler(&self) -> Option<Arc<dyn ActorMessageHandler>> {
+        self.actor_message_handler
+            .load_full()
+            .map(|cell| cell.handler.clone())
     }
 
     /// Handle an incoming actor message by forwarding to the registered callback
@@ -642,9 +823,8 @@ impl GossipRegistry {
         type_hash: u32,
         payload: &[u8],
         correlation_id: Option<u16>,
-    ) -> Result<Option<Vec<u8>>> {
-        let handler_guard = self.actor_message_handler.lock().await;
-        if let Some(ref handler) = *handler_guard {
+    ) -> Result<Option<Bytes>> {
+        if let Some(handler) = self.load_actor_message_handler() {
             debug!(
                 actor_id = %actor_id,
                 type_hash = %format!("{:08x}", type_hash),
@@ -659,6 +839,34 @@ impl GossipRegistry {
                 actor_id = %actor_id,
                 type_hash = %format!("{:08x}", type_hash),
                 "no actor message handler registered - message dropped"
+            );
+            Ok(None)
+        }
+    }
+
+    /// Handle an incoming actor message by numeric actor_id.
+    pub async fn handle_actor_message_id(
+        &self,
+        actor_id: u64,
+        type_hash: u32,
+        payload: &[u8],
+        correlation_id: Option<u16>,
+    ) -> Result<Option<Bytes>> {
+        if let Some(handler) = self.load_actor_message_handler() {
+            debug!(
+                actor_id = actor_id,
+                type_hash = %format!("{:08x}", type_hash),
+                payload_len = payload.len(),
+                "forwarding actor message to handler (numeric actor_id)"
+            );
+            handler
+                .handle_actor_message_id(actor_id, type_hash, payload, correlation_id)
+                .await
+        } else {
+            warn!(
+                actor_id = actor_id,
+                type_hash = %format!("{:08x}", type_hash),
+                "no actor message handler registered - message dropped (numeric actor_id)"
             );
             Ok(None)
         }
@@ -1098,12 +1306,20 @@ impl GossipRegistry {
             let failed_peers = gossip_state.peers.len() - active_peers;
 
             // Peer discovery metrics (Phase 5)
-            let discovered_peers = gossip_state.known_peers.len();
-            let failed_discovery_attempts = gossip_state
-                .peer_discovery
-                .as_ref()
-                .map(|pd| pd.failed_peer_count() as u64)
-                .unwrap_or(0);
+            let discovered_peers = if self.config.enable_peer_discovery {
+                gossip_state.known_peers.len()
+            } else {
+                0
+            };
+            let failed_discovery_attempts = if self.config.enable_peer_discovery {
+                gossip_state
+                    .peer_discovery
+                    .as_ref()
+                    .map(|pd| pd.failed_peer_count() as u64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             // Calculate mesh connectivity: active connections / discovered peers
             let avg_mesh_connectivity = if discovered_peers > 0 {
@@ -2179,44 +2395,6 @@ impl GossipRegistry {
             let mut connection_pool = self.connection_pool.lock().await;
             connection_pool.cleanup_stale_connections();
         }
-
-        // Clean up stale stream assemblies (incomplete streams older than 60 seconds)
-        self.cleanup_stale_stream_assemblies().await;
-    }
-
-    /// Clean up incomplete stream assemblies that have been stale for too long.
-    /// This prevents memory leaks when StreamStart arrives but StreamEnd never comes.
-    pub async fn cleanup_stale_stream_assemblies(&self) {
-        const STREAM_ASSEMBLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-        let mut assemblies = self.stream_assemblies.lock().await;
-        let before_count = assemblies.len();
-
-        assemblies.retain(|stream_id, assembly| {
-            let age = assembly.started_at.elapsed();
-            if age > STREAM_ASSEMBLY_TIMEOUT {
-                warn!(
-                    stream_id = stream_id,
-                    age_secs = age.as_secs(),
-                    received_bytes = assembly.received_bytes,
-                    expected_bytes = assembly.header.total_size,
-                    chunks_received = assembly.chunks.len(),
-                    "Cleaning up stale stream assembly - StreamEnd never arrived"
-                );
-                false // Remove this entry
-            } else {
-                true // Keep this entry
-            }
-        });
-
-        let removed = before_count - assemblies.len();
-        if removed > 0 {
-            info!(
-                removed_count = removed,
-                remaining = assemblies.len(),
-                "Cleaned up stale stream assemblies"
-            );
-        }
     }
 
     /// Clean up actors from peers that have been disconnected for longer than dead_peer_timeout
@@ -2537,7 +2715,97 @@ impl GossipRegistry {
             }
         });
 
+        self.ensure_reconnect_task(failed_peer_addr);
         Ok(())
+    }
+
+    fn ensure_reconnect_task(&self, peer_addr: SocketAddr) {
+        match self.reconnect_tasks.entry(peer_addr) {
+            DashEntry::Occupied(_) => {
+                debug!(peer = %peer_addr, "reconnect worker already active");
+            }
+            DashEntry::Vacant(entry) => {
+                entry.insert(());
+                let retry_interval = self.config.peer_retry_interval;
+                let registry = self.clone();
+                tokio::spawn(async move {
+                    registry.run_reconnect_loop(peer_addr, retry_interval).await;
+                });
+            }
+        }
+    }
+
+    async fn run_reconnect_loop(self, peer_addr: SocketAddr, retry_interval: Duration) {
+        let mut attempt = 0u64;
+        loop {
+            if self.is_shutdown().await {
+                debug!(
+                    peer = %peer_addr,
+                    "reconnect worker exiting during shutdown"
+                );
+                break;
+            }
+
+            if self.has_active_connection(&peer_addr).await {
+                debug!(
+                    peer = %peer_addr,
+                    "reconnect worker stopping - connection already active"
+                );
+                break;
+            }
+
+            sleep(retry_interval).await;
+
+            if self.has_active_connection(&peer_addr).await {
+                debug!(
+                    peer = %peer_addr,
+                    "reconnect worker stopping after external heal"
+                );
+                break;
+            }
+
+            attempt += 1;
+            warn!(
+                peer = %peer_addr,
+                attempt = attempt,
+                "🔁 RECONNECT: attempting to re-establish lost socket"
+            );
+
+            let attempt_result = {
+                let mut pool = self.connection_pool.lock().await;
+                pool.get_connection(peer_addr).await
+            };
+
+            match attempt_result {
+                Ok(_) => {
+                    info!(
+                        peer = %peer_addr,
+                        attempt = attempt,
+                        "🔁 RECONNECT: connection re-established"
+                    );
+                    self.mark_peer_connected(peer_addr).await;
+                    if let Err(err) = self.trigger_immediate_gossip().await {
+                        debug!(
+                            peer = %peer_addr,
+                            error = %err,
+                            "reconnect worker: immediate gossip skipped"
+                        );
+                    }
+                    break;
+                }
+                Err(err) => {
+                    warn!(
+                        peer = %peer_addr,
+                        attempt = attempt,
+                        error = %err,
+                        "🔁 RECONNECT: attempt failed, retrying after {:?}",
+                        retry_interval
+                    );
+                }
+            }
+        }
+
+        self.reconnect_tasks.remove(&peer_addr);
     }
 
     /// Handle a peer connection failure by peer ID instead of address
@@ -2550,9 +2818,18 @@ impl GossipRegistry {
             "node disconnection detected by ID, marking connection as failed (actors remain available)"
         );
 
-        // First, find the peer address from the node ID
+        // First, find the peer address from the node ID and ensure no active connection remains.
         let failed_peer_addr = {
             let pool = self.connection_pool.lock().await;
+
+            // If there's still an active connection, this failure is stale (e.g., tie-breaker).
+            if pool.get_connection_by_peer_id(failed_peer_id).is_some() {
+                warn!(
+                    peer_id = %failed_peer_id,
+                    "ignoring stale disconnect - active connection still present"
+                );
+                return Ok(());
+            }
 
             // Try to find the address from our node ID mapping
             let addr_opt = pool.peer_id_to_addr.get(failed_peer_id).map(|entry| *entry);
@@ -2674,6 +2951,7 @@ impl GossipRegistry {
             }
         });
 
+        self.ensure_reconnect_task(failed_peer_addr);
         Ok(())
     }
 
@@ -2686,10 +2964,23 @@ impl GossipRegistry {
         };
 
         if has_active_connection {
-            error!(
+            // If we have an active socket, skip consensus and clear any pending failure state.
+            // This avoids invalidating actors for peers that have already reconnected.
+            {
+                let mut gossip_state = self.gossip_state.lock().await;
+                gossip_state.pending_peer_failures.remove(&target_peer);
+                gossip_state.peer_health_reports.remove(&target_peer);
+                if let Some(peer_info) = gossip_state.peers.get_mut(&target_peer) {
+                    peer_info.failures = 0;
+                    peer_info.last_failure_time = None;
+                    peer_info.last_success = current_timestamp();
+                }
+            }
+            info!(
                 target_peer = %target_peer,
-                "🚨 CONSENSUS WARNING: Starting consensus query for a peer we still have an ACTIVE SOCKET CONNECTION to! This indicates a logic error."
+                "skipping consensus query - active socket connection present"
             );
+            return Ok(());
         }
 
         let query_msg = RegistryMessage::PeerHealthQuery {
@@ -3312,108 +3603,6 @@ impl GossipRegistry {
         Ok(())
     }
 
-    /// Start assembling a streamed message
-    pub async fn start_stream_assembly(&self, header: crate::StreamHeader) {
-        let mut assemblies = self.stream_assemblies.lock().await;
-        assemblies.insert(
-            header.stream_id,
-            StreamAssembly {
-                header,
-                chunks: std::collections::BTreeMap::new(),
-                received_bytes: 0,
-                started_at: std::time::Instant::now(),
-            },
-        );
-        debug!(stream_id = header.stream_id, "Started stream assembly");
-    }
-
-    /// Add a chunk to stream assembly
-    pub async fn add_stream_chunk(&self, header: crate::StreamHeader, chunk_data: Vec<u8>) {
-        let mut assemblies = self.stream_assemblies.lock().await;
-        if let Some(assembly) = assemblies.get_mut(&header.stream_id) {
-            assembly.received_bytes += chunk_data.len();
-            assembly.chunks.insert(header.chunk_index, chunk_data);
-            // debug!(
-            //     stream_id = header.stream_id,
-            //     chunk_index = header.chunk_index,
-            //     received_bytes = assembly.received_bytes,
-            //     "Added chunk to stream assembly"
-            // );
-        } else {
-            warn!(
-                stream_id = header.stream_id,
-                "Stream assembly not found for chunk"
-            );
-        }
-    }
-
-    /// Complete stream assembly and return the complete message
-    pub async fn complete_stream_assembly(&self, stream_id: u64) -> Option<Vec<u8>> {
-        let mut assemblies = self.stream_assemblies.lock().await;
-        if let Some(assembly) = assemblies.remove(&stream_id) {
-            // Verify we have all chunks with proper gap detection
-            let expected_chunks = assembly
-                .header
-                .total_size
-                .div_ceil(crate::connection_pool::STREAM_CHUNK_SIZE as u64);
-
-            // ✅ PROPER: Check both count and verify all chunk indices are present
-            if assembly.chunks.len() as u64 != expected_chunks {
-                warn!(
-                    stream_id = stream_id,
-                    expected = expected_chunks,
-                    received = assembly.chunks.len(),
-                    "Incomplete stream assembly - wrong count"
-                );
-                return None;
-            }
-
-            // ✅ PROPER: Verify all indices 0..N-1 are present (no gaps)
-            for i in 0..expected_chunks as u32 {
-                if !assembly.chunks.contains_key(&i) {
-                    warn!(
-                        stream_id = stream_id,
-                        expected_chunks = expected_chunks,
-                        missing_chunk = i,
-                        received_chunks = ?assembly.chunks.keys().collect::<Vec<_>>(),
-                        "Incomplete stream assembly - missing chunk index"
-                    );
-                    return None;
-                }
-            }
-
-            // ✅ PROPER: Reassemble in correct order using chunk indices
-            let mut complete = Vec::with_capacity(assembly.header.total_size as usize);
-            for i in 0..expected_chunks as u32 {
-                if let Some(chunk) = assembly.chunks.get(&i) {
-                    complete.extend_from_slice(chunk);
-                } else {
-                    // This should never happen due to the gap check above
-                    error!(
-                        stream_id = stream_id,
-                        chunk_index = i,
-                        "Critical error: chunk missing during assembly after gap check"
-                    );
-                    return None;
-                }
-            }
-
-            info!(
-                stream_id = stream_id,
-                total_size = complete.len(),
-                "Completed stream assembly"
-            );
-
-            Some(complete)
-        } else {
-            warn!(
-                stream_id = stream_id,
-                "Stream assembly not found for completion"
-            );
-            None
-        }
-    }
-
     // =================== Peer Discovery Methods ===================
 
     /// Maximum size of peer list in gossip messages (resource exhaustion protection)
@@ -3648,6 +3837,112 @@ impl GossipRegistry {
         candidates
     }
 
+    /// Handle incoming peer list gossip using archived data (zero-copy).
+    /// Returns candidates to connect to.
+    pub async fn on_peer_list_gossip_archived(
+        &self,
+        peers: &<Vec<PeerInfoGossip> as rkyv::Archive>::Archived,
+        sender_addr: &str,
+        timestamp: u64,
+    ) -> Vec<SocketAddr> {
+        // Resource exhaustion protection - sender is sending suspicious data
+        if peers.len() > Self::MAX_PEER_LIST_SIZE {
+            warn!(
+                size = peers.len(),
+                max = Self::MAX_PEER_LIST_SIZE,
+                sender = %sender_addr,
+                "peer list too large, rejecting - potential attack"
+            );
+            // Note: We could penalize sender here, but for now just reject
+            return vec![];
+        }
+
+        // Check if peer discovery is enabled
+        if !self.config.enable_peer_discovery {
+            debug!("peer discovery disabled, ignoring peer list gossip");
+            return vec![];
+        }
+
+        let _now = current_timestamp();
+
+        // DON'T PENALIZE THE MESSENGER:
+        // Count bogon IPs to detect if sender is sending suspicious data
+        // We only penalize for INVALID data, not for unreachable peers
+        let mut bogon_count = 0;
+        for peer_gossip in peers.iter() {
+            if let Ok(addr) = peer_gossip.address.as_str().parse::<SocketAddr>() {
+                let ip = addr.ip();
+                // Check for bogon IPs that should never be in peer lists
+                if ip.is_loopback() && !self.config.allow_loopback_discovery {
+                    bogon_count += 1;
+                }
+                // Check link-local
+                if let std::net::IpAddr::V4(v4) = ip {
+                    if v4.is_link_local() && !self.config.allow_link_local_discovery {
+                        bogon_count += 1;
+                    }
+                }
+            }
+        }
+
+        // If more than 50% of peers are bogons, log warning (could penalize sender)
+        if !peers.is_empty() && bogon_count * 2 > peers.len() {
+            warn!(
+                bogon_count = bogon_count,
+                total = peers.len(),
+                sender = %sender_addr,
+                "peer list contains mostly bogon IPs - sender may be malicious"
+            );
+            // Note: We choose to log but not block - could be misconfiguration
+        }
+
+        // Ingest peers into known_peers and get candidates
+        let candidates = {
+            let mut gossip_state = self.gossip_state.lock().await;
+
+            // Update known_peers LRU cache
+            for peer_gossip in peers.iter() {
+                if let Some(peer_info) = PeerInfo::from_gossip_archived(peer_gossip) {
+                    // Conservative merge: only update if newer
+                    if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address) {
+                        // Only update if the incoming info is newer
+                        if peer_info.last_success > existing.last_success {
+                            existing.last_success = peer_info.last_success;
+                            existing.last_attempt = peer_info.last_attempt;
+                            // Don't overwrite local failure count
+                        }
+                    } else {
+                        // New peer, add to cache
+                        gossip_state.known_peers.put(peer_info.address, peer_info);
+                    }
+                }
+            }
+
+            // Get candidates from peer discovery manager
+            // Note: PeerDiscovery filters out unsafe addresses via is_safe_to_dial()
+            // but does NOT penalize the sender - only skips unsafe targets
+            if let Some(ref mut discovery) = gossip_state.peer_discovery {
+                discovery.on_peer_list_gossip_addrs(
+                    peers
+                        .iter()
+                        .filter_map(|peer| peer.address.as_str().parse::<SocketAddr>().ok()),
+                )
+            } else {
+                vec![]
+            }
+        };
+
+        debug!(
+            peer_count = peers.len(),
+            candidates = candidates.len(),
+            sender = %sender_addr,
+            timestamp = timestamp,
+            "processed peer list gossip"
+        );
+
+        candidates
+    }
+
     /// Prune stale peers from known_peers based on TTLs
     pub async fn prune_stale_peers(&self) {
         let now = current_timestamp();
@@ -3792,12 +4087,23 @@ impl GossipRegistry {
     /// Mark a peer connection as established (clears failure state)
     pub async fn mark_peer_connected(&self, addr: SocketAddr) {
         let mut gossip_state = self.gossip_state.lock().await;
+        let now = current_timestamp();
+
+        if let Some(peer_info) = gossip_state.peers.get_mut(&addr) {
+            peer_info.failures = 0;
+            peer_info.last_failure_time = None;
+            peer_info.last_success = now;
+            peer_info.last_attempt = now;
+        }
+
+        gossip_state.pending_peer_failures.remove(&addr);
+        gossip_state.peer_health_reports.remove(&addr);
 
         // Update known_peers
         if let Some(peer_info) = gossip_state.known_peers.get_mut(&addr) {
             peer_info.failures = 0;
             peer_info.last_failure_time = None;
-            peer_info.last_success = current_timestamp();
+            peer_info.last_success = now;
             if let Some(node_id) = peer_info.node_id {
                 self.peer_capability_addr_to_node.insert(addr, node_id);
                 if let Some(entry) = self.peer_capabilities_by_node.get(&node_id) {
@@ -3909,8 +4215,12 @@ impl GossipRegistry {
 mod tests {
     use super::*;
     use crate::{KeyPair, PeerId};
+    use rkyv::Archive;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
+
+    type ArchivedRegistryChange = <RegistryChange as Archive>::Archived;
+    type ArchivedRegistryMessage = <RegistryMessage as Archive>::Archived;
 
     fn test_addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
@@ -3945,12 +4255,11 @@ mod tests {
         };
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&change).unwrap();
-        let deserialized: RegistryChange =
-            rkyv::from_bytes::<RegistryChange, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived = crate::rkyv_utils::access_archived::<RegistryChange>(&serialized).unwrap();
 
-        match deserialized {
-            RegistryChange::ActorAdded { name, .. } => {
-                assert_eq!(name, "test");
+        match archived {
+            ArchivedRegistryChange::ActorAdded { name, .. } => {
+                assert_eq!(name.as_str(), "test");
             }
             _ => panic!("Wrong change type"),
         }
@@ -3968,12 +4277,14 @@ mod tests {
         };
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&delta).unwrap();
-        let deserialized: RegistryDelta =
-            rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived = crate::rkyv_utils::access_archived::<RegistryDelta>(&serialized).unwrap();
 
-        assert_eq!(deserialized.since_sequence, 10);
-        assert_eq!(deserialized.current_sequence, 15);
-        assert_eq!(deserialized.sender_peer_id, test_peer_id("test_peer"));
+        assert_eq!(archived.since_sequence.to_native(), 10);
+        assert_eq!(archived.current_sequence.to_native(), 15);
+        assert_eq!(
+            archived.sender_peer_id.0,
+            test_peer_id("test_peer").to_bytes()
+        );
     }
 
     #[test]
@@ -4002,10 +4313,9 @@ mod tests {
         };
         let msg = RegistryMessage::DeltaGossip { delta };
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
-        let deserialized: RegistryMessage =
-            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
-        match deserialized {
-            RegistryMessage::DeltaGossip { .. } => (),
+        let archived = crate::rkyv_utils::access_archived::<RegistryMessage>(&serialized).unwrap();
+        match archived {
+            ArchivedRegistryMessage::DeltaGossip { .. } => (),
             _ => panic!("Wrong message type"),
         }
 
@@ -4017,11 +4327,10 @@ mod tests {
             wall_clock_time: 1000,
         };
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
-        let deserialized: RegistryMessage =
-            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
-        match deserialized {
-            RegistryMessage::FullSyncRequest { sequence, .. } => {
-                assert_eq!(sequence, 10);
+        let archived = crate::rkyv_utils::access_archived::<RegistryMessage>(&serialized).unwrap();
+        match archived {
+            ArchivedRegistryMessage::FullSyncRequest { sequence, .. } => {
+                assert_eq!(sequence.to_native(), 10);
             }
             _ => panic!("Wrong message type"),
         }
@@ -4794,29 +5103,26 @@ mod tests {
         // Serialize
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
 
-        // Deserialize
-        let deserialized: RegistryMessage =
-            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived = crate::rkyv_utils::access_archived::<RegistryMessage>(&serialized).unwrap();
 
-        // Verify
-        match deserialized {
-            RegistryMessage::PeerListGossip {
+        match archived {
+            ArchivedRegistryMessage::PeerListGossip {
                 peers,
                 timestamp,
                 sender_addr,
             } => {
                 assert_eq!(peers.len(), 2);
-                assert_eq!(peers[0].address, "127.0.0.1:8080");
+                assert_eq!(peers[0].address.as_str(), "127.0.0.1:8080");
                 assert_eq!(
-                    peers[0].peer_address,
-                    Some("192.168.1.100:8080".to_string())
+                    peers[0].peer_address.as_ref().map(|addr| addr.as_str()),
+                    Some("192.168.1.100:8080")
                 );
-                assert_eq!(peers[0].failures, 0);
-                assert_eq!(peers[1].address, "127.0.0.1:8081");
-                assert_eq!(peers[1].peer_address, None);
-                assert_eq!(peers[1].failures, 2);
-                assert_eq!(timestamp, 12345);
-                assert_eq!(sender_addr, "127.0.0.1:9000");
+                assert_eq!(peers[0].failures.to_native(), 0);
+                assert_eq!(peers[1].address.as_str(), "127.0.0.1:8081");
+                assert!(peers[1].peer_address.is_none());
+                assert_eq!(peers[1].failures.to_native(), 2);
+                assert_eq!(timestamp.to_native(), 12345);
+                assert_eq!(sender_addr.as_str(), "127.0.0.1:9000");
             }
             _ => panic!("Expected PeerListGossip message"),
         }
@@ -4958,18 +5264,16 @@ mod tests {
         // Serialize
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&gossip).unwrap();
 
-        // Deserialize
-        let deserialized: PeerInfoGossip =
-            rkyv::from_bytes::<PeerInfoGossip, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived = crate::rkyv_utils::access_archived::<PeerInfoGossip>(&serialized).unwrap();
 
-        assert_eq!(deserialized.address, "10.0.0.1:9000");
+        assert_eq!(archived.address.as_str(), "10.0.0.1:9000");
         assert_eq!(
-            deserialized.peer_address,
-            Some("192.168.1.50:9000".to_string())
+            archived.peer_address.as_ref().map(|addr| addr.as_str()),
+            Some("192.168.1.50:9000")
         );
-        assert_eq!(deserialized.failures, 5);
-        assert_eq!(deserialized.last_attempt, 5000);
-        assert_eq!(deserialized.last_success, 4000);
+        assert_eq!(archived.failures.to_native(), 5);
+        assert_eq!(archived.last_attempt.to_native(), 5000);
+        assert_eq!(archived.last_success.to_native(), 4000);
     }
 
     // Tests for resolve_peer_addr function

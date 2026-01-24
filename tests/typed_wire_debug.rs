@@ -1,6 +1,7 @@
 #[cfg(debug_assertions)]
 mod tests {
-    use kameo_remote::{decode_typed, encode_typed, wire_type};
+    use kameo_remote::typed::decode_typed_zero_copy;
+    use kameo_remote::{encode_typed, wire_type};
 
     #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
     struct Ping {
@@ -19,15 +20,18 @@ mod tests {
     fn typed_roundtrip_ok() {
         let msg = Ping { id: 7 };
         let payload = encode_typed(&msg).expect("encode_typed should succeed");
-        let decoded: Ping = decode_typed(payload.as_ref()).expect("decode_typed should succeed");
-        assert_eq!(decoded, msg);
+        let archived =
+            decode_typed_zero_copy::<Ping>(payload.as_ref()).expect("decode_typed should succeed");
+        assert_eq!(archived.id.to_native(), msg.id);
     }
 
     #[test]
     fn typed_hash_mismatch_errors_in_debug() {
         let msg = Ping { id: 42 };
         let payload = encode_typed(&msg).expect("encode_typed should succeed");
-        let err = decode_typed::<Pong>(payload.as_ref()).unwrap_err();
+        let err = decode_typed_zero_copy::<Pong>(payload.as_ref())
+            .err()
+            .expect("expected hash mismatch error");
         let err_str = err.to_string();
         assert!(
             err_str.contains("hash mismatch"),

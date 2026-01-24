@@ -1,3 +1,5 @@
+#![cfg(any(debug_assertions, feature = "test-helpers"))]
+
 use kameo_remote::{wire_type, GossipConfig, GossipRegistryHandle, KeyPair};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -40,8 +42,12 @@ async fn test_typed_ask_over_tls_with_pooled_path() {
 
     let conn = handle_a.get_connection(addr_b).await.unwrap();
     let request = Ping { id: 42 };
-    let response: Ping = conn.ask_typed(&request).await.unwrap();
-    assert_eq!(response, request);
+    let response = conn
+        .ask_typed_archived::<Ping, Ping>(&request)
+        .await
+        .unwrap();
+    let archived = response.archived().unwrap();
+    assert_eq!(archived.id, request.id);
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;
@@ -86,19 +92,19 @@ async fn test_typed_tell_over_tls_with_pooled_path() {
     conn.tell_typed(&request).await.unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    let mut decoded: Option<Ping> = None;
+    let mut decoded_id: Option<u64> = None;
     while Instant::now() < deadline {
         if let Some(payload) =
             kameo_remote::test_helpers::wait_for_raw_payload(Duration::from_millis(200)).await
         {
-            if let Ok(msg) = kameo_remote::decode_typed::<Ping>(&payload) {
-                decoded = Some(msg);
+            if let Ok(archived) = kameo_remote::typed::decode_typed_zero_copy::<Ping>(&payload) {
+                decoded_id = Some(archived.id.to_native());
                 break;
             }
         }
     }
 
-    if decoded.is_none() {
+    if decoded_id.is_none() {
         let payloads = kameo_remote::test_helpers::drain_raw_payloads();
         let lengths: Vec<usize> = payloads.iter().map(|p| p.len()).collect();
         panic!(
@@ -108,7 +114,7 @@ async fn test_typed_tell_over_tls_with_pooled_path() {
         );
     }
 
-    assert_eq!(decoded, Some(request));
+    assert_eq!(decoded_id, Some(request.id));
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;

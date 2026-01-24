@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 /// Default retry interval for failed peer connections
-pub const DEFAULT_PEER_RETRY_SECONDS: u64 = 5;
+/// Connections should attempt to recover once per second by default.
+pub const DEFAULT_PEER_RETRY_SECONDS: u64 = 1;
 
 /// Default maximum failed connection attempts before marking peer as failed
 pub const DEFAULT_MAX_PEER_FAILURES: usize = 3;
@@ -16,7 +17,7 @@ pub const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_DEAD_PEER_TIMEOUT_SECS: u64 = 900;
 
 /// Default max concurrent ask inflight
-pub const DEFAULT_ASK_INFLIGHT_LIMIT: usize = 128;
+pub const DEFAULT_ASK_INFLIGHT_LIMIT: usize = 100;
 
 /// Default small cluster threshold - clusters with this many nodes or fewer use full sync
 /// Set to 0 to always use delta sync when possible
@@ -142,7 +143,7 @@ impl Default for GossipConfig {
             vector_clock_retention_period: Duration::from_secs(7200), // 2 hours (was 1 hour)
             max_vector_clock_size: 1000,                         // Compact after 1000 entries
             small_cluster_threshold: DEFAULT_SMALL_CLUSTER_THRESHOLD,
-            bootstrap_readiness_timeout: Duration::from_secs(30),
+            bootstrap_readiness_timeout: Duration::from_secs(5),
             bootstrap_readiness_check_interval: Duration::from_millis(100),
             bootstrap_max_retries: 5, // Increased from 3 to handle startup race conditions
             bootstrap_retry_delay: Duration::from_secs(5),
@@ -202,7 +203,7 @@ mod tests {
             Duration::from_secs(7200)
         );
         assert_eq!(config.small_cluster_threshold, 5);
-        assert_eq!(config.bootstrap_readiness_timeout, Duration::from_secs(30));
+        assert_eq!(config.bootstrap_readiness_timeout, Duration::from_secs(5));
         assert_eq!(
             config.bootstrap_readiness_check_interval,
             Duration::from_millis(100)
@@ -273,6 +274,6 @@ mod tests {
 
     #[test]
     fn test_peer_retry_constant() {
-        assert_eq!(DEFAULT_PEER_RETRY_SECONDS, 5);
+        assert_eq!(DEFAULT_PEER_RETRY_SECONDS, 1);
     }
 }

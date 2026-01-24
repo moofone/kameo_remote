@@ -3,6 +3,9 @@ use bytes::{Buf, Bytes};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(debug_assertions)]
+use bytes::BufMut;
+
 const SERIALIZER_POOL_SIZE: usize = 64;
 const MAX_POOLED_BUFFER_CAPACITY: usize = 1024 * 1024; // 1MB
 const MAX_POOLED_ARENA_CAPACITY: usize = 1024 * 1024; // 1MB
@@ -63,6 +66,19 @@ impl SerializerPool {
             guard.push(ctx);
         }
     }
+
+    fn acquire_many(&self, count: usize) -> Vec<Box<SerializerCtx>> {
+        let mut guard = self.inner.lock().expect("serializer pool poisoned");
+        let mut ctxs = Vec::with_capacity(count);
+        for _ in 0..count {
+            if let Some(ctx) = guard.pop() {
+                ctxs.push(ctx);
+            } else {
+                ctxs.push(Box::new(SerializerCtx::new()));
+            }
+        }
+        ctxs
+    }
 }
 
 fn serializer_pool() -> &'static Arc<SerializerPool> {
@@ -70,6 +86,7 @@ fn serializer_pool() -> &'static Arc<SerializerPool> {
     POOL.get_or_init(|| Arc::new(SerializerPool::new()))
 }
 
+#[inline]
 fn encode_typed_in<T>(value: &T, ctx: &mut SerializerCtx) -> Result<usize>
 where
     T: WireEncode,
@@ -101,6 +118,14 @@ impl PooledPayload {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        if let Some(ctx) = self.ctx.as_ref() {
+            &ctx.writer[..self.len]
+        } else {
+            &[]
+        }
     }
 }
 
@@ -227,10 +252,10 @@ where
 
     #[cfg(debug_assertions)]
     {
-        let mut buf = Vec::with_capacity(8 + payload.len());
-        buf.extend_from_slice(&T::TYPE_HASH.to_be_bytes());
+        let mut buf = bytes::BytesMut::with_capacity(8 + payload.len());
+        buf.put_u64(T::TYPE_HASH);
         buf.extend_from_slice(payload.as_ref());
-        Ok(Bytes::from(buf))
+        Ok(buf.freeze())
     }
 
     #[cfg(not(debug_assertions))]
@@ -271,6 +296,115 @@ pub fn typed_payload_parts<T: WireType>(
     {
         let total_len = payload.len();
         return (payload, None, total_len);
+    }
+}
+
+/// Pad an optional 8-byte type-hash prefix to 16 bytes for alignment-sensitive paths.
+pub fn pad_type_hash_prefix(prefix: Option<[u8; 8]>) -> (Option<[u8; 16]>, u8) {
+    let prefix_len = prefix.as_ref().map(|p| p.len()).unwrap_or(0) as u8;
+    let padded = prefix.map(|p| {
+        let mut out = [0u8; 16];
+        out[..p.len()].copy_from_slice(&p);
+        out
+    });
+    (padded, prefix_len)
+}
+
+/// Pre-encoded batch of typed messages backed by pooled buffers.
+pub struct TypedBatch<T: WireType> {
+    payloads: Vec<PooledPayload>,
+    _marker: PhantomData<T>,
+}
+
+impl<T: WireType> TypedBatch<T> {
+    /// Number of payloads encoded in the batch.
+    pub fn len(&self) -> usize {
+        self.payloads.len()
+    }
+
+    /// Whether the batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.payloads.is_empty()
+    }
+}
+
+impl<T: WireEncode> TypedBatch<T> {
+    /// Create an empty batch.
+    pub fn new() -> Self {
+        Self {
+            payloads: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Create an empty batch with the provided capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            payloads: Vec::with_capacity(capacity),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Encode and append a value using the pooled serializer.
+    pub fn push(&mut self, value: &T) -> Result<()> {
+        let payload = encode_typed_pooled(value)?;
+        self.payloads.push(payload);
+        Ok(())
+    }
+
+    /// Extend the batch from a slice of values.
+    pub fn extend_from_slice(&mut self, values: &[T]) -> Result<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        let pool = serializer_pool().clone();
+        let mut ctxs = pool.acquire_many(values.len());
+        for value in values {
+            let mut ctx = ctxs
+                .pop()
+                .expect("serializer pool returned fewer contexts than requested");
+            let len = match encode_typed_in(value, &mut ctx) {
+                Ok(len) => len,
+                Err(err) => {
+                    pool.release(ctx);
+                    for remaining in ctxs.drain(..) {
+                        pool.release(remaining);
+                    }
+                    return Err(err);
+                }
+            };
+
+            self.payloads.push(PooledPayload {
+                ctx: Some(ctx),
+                pool: pool.clone(),
+                len,
+                pos: 0,
+            });
+        }
+        Ok(())
+    }
+
+    /// Encode a batch from a slice of values.
+    pub fn from_slice(values: &[T]) -> Result<Self> {
+        let mut batch = Self::with_capacity(values.len());
+        batch.extend_from_slice(values)?;
+        Ok(batch)
+    }
+}
+
+impl<T: WireEncode> Default for TypedBatch<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: WireType> IntoIterator for TypedBatch<T> {
+    type Item = PooledPayload;
+    type IntoIter = std::vec::IntoIter<PooledPayload>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.payloads.into_iter()
     }
 }
 
@@ -339,6 +473,23 @@ mod tests {
             assert!(prefix.is_some());
         }
     }
+
+    #[test]
+    fn typed_batch_from_slice_encodes_all_messages() {
+        let msgs = vec![TestMsg { value: 1 }, TestMsg { value: 2 }];
+        let batch = TypedBatch::from_slice(&msgs).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert!(!batch.is_empty());
+    }
+
+    #[test]
+    fn typed_batch_into_iter_consumes_payloads() {
+        let msgs = vec![TestMsg { value: 7 }];
+        let batch = TypedBatch::from_slice(&msgs).unwrap();
+        let mut iter = batch.into_iter();
+        assert!(iter.next().is_some());
+        assert!(iter.next().is_none());
+    }
 }
 
 /// Zero-copy wrapper for archived payloads that keeps the underlying bytes alive.
@@ -383,9 +534,15 @@ where
     }
 }
 
-/// Decode a typed message from the wire.
+/// Decode a typed message into an owned value.
 ///
 /// In debug builds, verifies and strips the type hash prefix.
+///
+/// # Deprecated
+/// This allocates. Prefer `decode_typed_archived` or `decode_typed_zero_copy`.
+#[cfg(any(test, feature = "allow-non-zero-copy"))]
+#[deprecated(note = "Non-zero-copy; use decode_typed_archived or decode_typed_zero_copy.")]
+#[allow(deprecated)]
 pub fn decode_typed<T>(payload: &[u8]) -> Result<T>
 where
     T: WireType + rkyv::Archive,
@@ -419,12 +576,12 @@ where
             )));
         }
         let body = &payload[8..];
-        Ok(rkyv::from_bytes::<T, rkyv::rancor::Error>(body)?)
+        Ok(crate::rkyv_utils::deserialize_from_bytes::<T>(body)?)
     }
 
     #[cfg(not(debug_assertions))]
     {
-        Ok(rkyv::from_bytes::<T, rkyv::rancor::Error>(payload)?)
+        Ok(crate::rkyv_utils::deserialize_from_bytes::<T>(payload)?)
     }
 }
 
@@ -478,6 +635,69 @@ where
             offset: 0,
             _marker: PhantomData,
         })
+    }
+}
+
+/// Decode a typed message using zero-copy deserialization - MOST EFFICIENT
+///
+/// This is the RECOMMENDED function for hot paths. It returns a direct reference
+/// to the archived data without any allocation. The returned reference is tied
+/// to the lifetime of the input bytes.
+///
+/// **Performance**: 0 bytes allocated
+/// **Use case**: Hot paths, high-frequency message processing
+///
+/// # Example
+/// ```ignore
+/// let archived = decode_typed_zero_copy::<MyMessage>(&bytes)?;
+/// let field = archived.my_field(); // Access archived fields
+/// ```
+pub fn decode_typed_zero_copy<T>(payload: &[u8]) -> Result<&<T as rkyv::Archive>::Archived>
+where
+    T: WireType + rkyv::Archive,
+    for<'b> T::Archived: rkyv::Portable
+        + rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'b>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    #[cfg(debug_assertions)]
+    {
+        if payload.len() < 8 {
+            return Err(GossipError::InvalidConfig(format!(
+                "typed payload too short for type hash ({})",
+                T::TYPE_NAME
+            )));
+        }
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&payload[..8]);
+        let hash = u64::from_be_bytes(hash_bytes);
+        if hash != T::TYPE_HASH {
+            return Err(GossipError::InvalidConfig(format!(
+                "typed payload hash mismatch for {}: expected {:016x}, got {:016x}",
+                T::TYPE_NAME,
+                T::TYPE_HASH,
+                hash
+            )));
+        }
+        let body = &payload[8..];
+        Ok(rkyv::access::<
+            <T as rkyv::Archive>::Archived,
+            rkyv::rancor::Error,
+        >(body)?)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        Ok(rkyv::access::<
+            <T as rkyv::Archive>::Archived,
+            rkyv::rancor::Error,
+        >(payload)?)
     }
 }
 

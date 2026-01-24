@@ -51,7 +51,7 @@ static GLOBAL: CountingAlloc = CountingAlloc;
 /// Console tell/ask client (TLS).
 ///
 /// Usage:
-///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub [tell_count] [ask_count] [ask_concurrency] [--typed]
+///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub [tell_count] [ask_count] [ask_concurrency] [--typed] [--streaming-ask] [--ask-payload-bytes N]
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -69,6 +69,13 @@ async fn main() -> Result<()> {
     let ask_count: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(100);
     let ask_concurrency: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(50);
     let run_typed = args.iter().any(|arg| arg == "--typed");
+    let use_streaming_ask = args.iter().any(|arg| arg == "--streaming-ask");
+    let ask_payload_bytes = args
+        .iter()
+        .position(|arg| arg == "--ask-payload-bytes")
+        .and_then(|idx| args.get(idx + 1))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
 
     println!("🔐 Console Tell/Ask Client (TLS)");
     println!("================================\n");
@@ -121,32 +128,85 @@ async fn main() -> Result<()> {
     println!("✅ Tell sent");
 
     // Ask (request-response)
-    let ask_msg = RegistryMessage::ActorMessage {
-        actor_id,
-        type_hash,
-        payload: b"ask:ping".to_vec(),
-        correlation_id: None,
+    let mut ask_payload = if ask_payload_bytes > 0 {
+        vec![b'x'; ask_payload_bytes]
+    } else {
+        b"ask:ping".to_vec()
     };
-    let ask_bytes = Bytes::from(rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
-        &ask_msg,
-        Vec::new(),
-    )?);
-    let response = conn.ask_bytes(ask_bytes.clone()).await?;
+    let threshold = conn.streaming_threshold();
+    let payload_len = ask_payload.len();
+    let can_ring_buffer = payload_len <= threshold;
+    let should_stream = use_streaming_ask || payload_len > threshold;
 
-    println!("✅ Ask response: {:?}", String::from_utf8_lossy(&response));
+    let ask_bytes = if can_ring_buffer {
+        let ask_msg = RegistryMessage::ActorMessage {
+            actor_id,
+            type_hash,
+            payload: ask_payload.clone(),
+            correlation_id: None,
+        };
+        Bytes::from(rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+            &ask_msg,
+            Vec::new(),
+        )?)
+    } else {
+        Bytes::new()
+    };
+
+    let streaming_payload = if should_stream {
+        if can_ring_buffer {
+            Bytes::copy_from_slice(&ask_payload)
+        } else {
+            Bytes::from(std::mem::take(&mut ask_payload))
+        }
+    } else {
+        Bytes::new()
+    };
+
+    if use_streaming_ask || payload_len > threshold {
+        let actor_id = 42u64;
+        let response = conn
+            .ask_streaming_bytes(
+                streaming_payload.clone(),
+                type_hash,
+                actor_id,
+                Duration::from_secs(5),
+            )
+            .await?;
+        if response.len() > 256 {
+            println!(
+                "✅ Streaming ask response: {} bytes (preview: {:?})",
+                response.len(),
+                String::from_utf8_lossy(&response[..64.min(response.len())])
+            );
+        } else {
+            println!(
+                "✅ Streaming ask response: {:?}",
+                String::from_utf8_lossy(response.as_ref())
+            );
+        }
+    } else {
+        let response = conn.ask(ask_bytes.clone()).await?;
+        println!(
+            "✅ Ask response: {:?}",
+            String::from_utf8_lossy(response.as_ref())
+        );
+    }
 
     if run_typed {
         #[cfg(debug_assertions)]
         {
-            // Typed ask (debug-only type hash verification)
-            let typed_response: EchoResponse = conn
-                .ask_typed::<EchoRequest, EchoResponse>(&EchoRequest {
+            // Typed ask (debug-only type hash verification) using zero-copy archived response
+            let archived_response = conn
+                .ask_typed_archived::<EchoRequest, EchoResponse>(&EchoRequest {
                     payload: b"ask:typed".to_vec(),
                 })
                 .await?;
+            let archived = archived_response.archived()?;
+            let payload = archived.payload.as_slice();
             println!(
-                "✅ Typed ask response: {:?}",
-                String::from_utf8_lossy(&typed_response.payload)
+                "✅ Typed ask response (zero-copy): {:?}",
+                String::from_utf8_lossy(payload)
             );
         }
         #[cfg(not(debug_assertions))]
@@ -179,7 +239,7 @@ async fn main() -> Result<()> {
         print_alloc_delta("tell()", before, after);
     }
 
-    if ask_count > 0 {
+    if ask_count > 0 && payload_len <= threshold {
         println!(
             "\n🔸 Ask benchmark (count = {}, concurrency = {})",
             ask_count, ask_concurrency
@@ -197,7 +257,7 @@ async fn main() -> Result<()> {
             let payload = ask_payload.clone();
             in_flight.push(Box::pin(async move {
                 let start = Instant::now();
-                let _ = conn_clone.ask_bytes(payload).await?;
+                let _ = conn_clone.ask(payload).await?;
                 Ok::<Duration, anyhow::Error>(start.elapsed())
             }));
             remaining -= 1;
@@ -211,7 +271,7 @@ async fn main() -> Result<()> {
                 let payload = ask_payload.clone();
                 in_flight.push(Box::pin(async move {
                     let start = Instant::now();
-                    let _ = conn_clone.ask_bytes(payload).await?;
+                    let _ = conn_clone.ask(payload).await?;
                     Ok::<Duration, anyhow::Error>(start.elapsed())
                 }));
                 remaining -= 1;
@@ -228,12 +288,88 @@ async fn main() -> Result<()> {
             ask_total.as_secs_f64()
         );
         print_alloc_delta("ask()", before, after);
+    } else if ask_count > 0 {
+        println!(
+            "\n⚠️  Ask benchmark skipped: payload {} bytes exceeds ring-buffer threshold {}. Use --ask-payload-bytes <= {} to compare.",
+            payload_len,
+            threshold,
+            threshold
+        );
+    }
+
+    if ask_count > 0 && use_streaming_ask {
+        println!(
+            "\n🔸 Streaming ask benchmark (count = {}, concurrency = {}, payload = {} bytes)",
+            ask_count, ask_concurrency, payload_len
+        );
+        let before = alloc_snapshot();
+        let payload = streaming_payload.clone();
+        let mut in_flight: FuturesUnordered<BoxFuture<'static, Result<Duration, anyhow::Error>>> =
+            FuturesUnordered::new();
+        let ask_start = Instant::now();
+        let mut remaining = ask_count;
+        let actor_id = 42u64;
+        let type_hash = type_hash;
+
+        let initial = ask_concurrency.min(remaining);
+        for _ in 0..initial {
+            let conn_clone = conn.clone();
+            let payload = payload.clone();
+            in_flight.push(Box::pin(async move {
+                let start = Instant::now();
+                let _ = conn_clone
+                    .ask_streaming_bytes(
+                        payload.clone(),
+                        type_hash,
+                        actor_id,
+                        Duration::from_secs(5),
+                    )
+                    .await?;
+                Ok::<Duration, anyhow::Error>(start.elapsed())
+            }));
+            remaining -= 1;
+        }
+
+        let mut ask_latencies = Vec::with_capacity(ask_count);
+        while let Some(result) = in_flight.next().await {
+            ask_latencies.push(result?);
+            if remaining > 0 {
+                let conn_clone = conn.clone();
+                let payload = payload.clone();
+                in_flight.push(Box::pin(async move {
+                    let start = Instant::now();
+                    let _ = conn_clone
+                        .ask_streaming_bytes(
+                            payload.clone(),
+                            type_hash,
+                            actor_id,
+                            Duration::from_secs(5),
+                        )
+                        .await?;
+                    Ok::<Duration, anyhow::Error>(start.elapsed())
+                }));
+                remaining -= 1;
+            }
+        }
+
+        let ask_total = ask_start.elapsed();
+        let ask_rps = ask_count as f64 / ask_total.as_secs_f64();
+        let after = alloc_snapshot();
+        print_latency_stats("ask_streaming()", &ask_latencies);
+        println!(
+            "ask_streaming() throughput: {:.0} req/sec (total {:.3}s)",
+            ask_rps,
+            ask_total.as_secs_f64()
+        );
+        print_alloc_delta("ask_streaming()", before, after);
     }
 
     // Keep the client alive so the server doesn't mark the peer as failed.
     println!("\nPress Enter to exit...");
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
+    registry.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
 }
 

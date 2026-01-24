@@ -43,9 +43,18 @@ impl ReplyTo {
     {
         let payload = crate::typed::encode_typed_pooled(value)?;
         let (payload, prefix, payload_len) = crate::typed::typed_payload_parts::<T>(payload);
+        let (prefix_padded, _prefix_len) = crate::typed::pad_type_hash_prefix(prefix);
         self.connection
-            .send_response_pooled(self.correlation_id, payload, prefix, payload_len)
+            .send_response_pooled(self.correlation_id, payload, prefix_padded, payload_len)
             .await
+    }
+
+    /// Reply with an archived typed payload without re-serializing.
+    pub async fn reply_typed_archived<T>(
+        self,
+        payload: crate::typed::ArchivedBytes<T>,
+    ) -> Result<()> {
+        self.reply_bytes(payload.into_bytes()).await
     }
 
     /// Reply with a serializable type using rkyv

@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy_tell_bytes")]
+
 use kameo_remote::*;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;

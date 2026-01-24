@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::info;
@@ -66,43 +67,46 @@ async fn test_basic_ask_correlation() {
             "Sending ask request: {:?}",
             String::from_utf8_lossy(request)
         );
-        let response = conn.ask(request).await.unwrap();
-        assert_eq!(response, b"ECHOED:Hello from Node A");
-        info!("ECHO test passed: {:?}", String::from_utf8_lossy(&response));
+        let response = conn.ask(Bytes::copy_from_slice(request)).await.unwrap();
+        assert_eq!(response.as_ref(), b"ECHOED:Hello from Node A");
+        info!(
+            "ECHO test passed: {:?}",
+            String::from_utf8_lossy(response.as_ref())
+        );
 
         // Test REVERSE command
         let request = b"REVERSE:12345";
-        let response = conn.ask(request).await.unwrap();
-        assert_eq!(response, b"REVERSED:54321");
+        let response = conn.ask(Bytes::copy_from_slice(request)).await.unwrap();
+        assert_eq!(response.as_ref(), b"REVERSED:54321");
         info!(
             "REVERSE test passed: {:?}",
-            String::from_utf8_lossy(&response)
+            String::from_utf8_lossy(response.as_ref())
         );
 
         // Test COUNT command
         let request = b"COUNT:Hello World";
-        let response = conn.ask(request).await.unwrap();
-        assert_eq!(response, b"COUNTED:11 chars");
+        let response = conn.ask(Bytes::copy_from_slice(request)).await.unwrap();
+        assert_eq!(response.as_ref(), b"COUNTED:11 chars");
         info!(
             "COUNT test passed: {:?}",
-            String::from_utf8_lossy(&response)
+            String::from_utf8_lossy(response.as_ref())
         );
 
         // Test HASH command
         let request = b"HASH:test";
-        let response = conn.ask(request).await.unwrap();
-        let response_str = String::from_utf8_lossy(&response);
+        let response = conn.ask(Bytes::copy_from_slice(request)).await.unwrap();
+        let response_str = String::from_utf8_lossy(response.as_ref());
         assert!(response_str.starts_with("HASHED:"));
         info!("HASH test passed: {}", response_str);
 
         // Test default processing
         let request = b"Just a plain message";
-        let response = conn.ask(request).await.unwrap();
+        let response = conn.ask(Bytes::copy_from_slice(request)).await.unwrap();
         let expected = b"RECEIVED:20 bytes, content: 'Just a plain message'";
-        assert_eq!(response, expected);
+        assert_eq!(response.as_ref(), expected);
         info!(
             "Default processing test passed: {:?}",
-            String::from_utf8_lossy(&response)
+            String::from_utf8_lossy(response.as_ref())
         );
     }
 
@@ -128,10 +132,10 @@ async fn test_basic_ask_correlation() {
 
         for (i, (request, expected_prefix)) in requests.iter().enumerate() {
             let conn_clone = conn.clone();
-            let request = request.to_string().into_bytes();
+            let request = Bytes::from(request.to_string().into_bytes());
             let expected_prefix = expected_prefix.to_string();
             let future = tokio::spawn(async move {
-                let response = conn_clone.ask(&request).await.unwrap();
+                let response = conn_clone.ask(request).await.unwrap();
                 (i, response, expected_prefix)
             });
             futures.push(future);
@@ -140,7 +144,7 @@ async fn test_basic_ask_correlation() {
         // Verify all responses match their requests
         for future in futures {
             let (i, response, expected_prefix) = future.await.unwrap();
-            let response_str = String::from_utf8_lossy(&response);
+            let response_str = String::from_utf8_lossy(response.as_ref());
 
             if expected_prefix == "HASHED:" {
                 assert!(response_str.starts_with(&expected_prefix));
@@ -252,12 +256,13 @@ async fn test_ask_high_throughput() {
         let conn_clone = conn.clone();
         let handle = tokio::spawn(async move {
             // Use ECHO to verify the request is transmitted correctly
-            let request = format!("ECHO:High throughput request {}", i).into_bytes();
-            let response = conn_clone.ask(&request).await.unwrap();
+            let request_str = format!("ECHO:High throughput request {}", i);
+            let request = Bytes::from(request_str.clone().into_bytes());
+            let response = conn_clone.ask(request).await.unwrap();
 
             // Verify we got the correct echoed response
             let expected = format!("ECHOED:High throughput request {}", i).into_bytes();
-            assert_eq!(response, expected);
+            assert_eq!(response.as_ref(), expected);
         });
         handles.push(handle);
     }

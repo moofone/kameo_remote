@@ -1,0 +1,50 @@
+name: Gossip Zero-Copy Validation
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "spec/GOSSIP_ZERO_COPY.md"
+      - "sprints/GOSSIP_ZERO_COPY/**"
+      - ".github/workflows/gossip-zero-copy.yml"
+
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-llvm-cov
+        run: |
+          cargo install cargo-llvm-cov || true
+          rustup component add llvm-tools-preview
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace -D warnings
+
+      - name: Gossip zero-copy validation
+        run: ./scripts/full_validation.sh
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gossip-zero-copy-artifacts
+          path: |
+            logs/validation_*.txt
+            reports/coverage_gaps_*.md
+            reports/coverage.lcov
+          if-no-files-found: ignore

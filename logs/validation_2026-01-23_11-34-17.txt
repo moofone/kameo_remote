@@ -1,0 +1,4 @@
+═══════════════════════════════════════════════════════════════
+Step 1: All Unit & Integration Tests
+═══════════════════════════════════════════════════════════════
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)

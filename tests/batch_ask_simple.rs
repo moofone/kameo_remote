@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, Result};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,7 +45,7 @@ async fn test_batch_ask_simple() -> Result<()> {
     {
         let request = 42u32.to_be_bytes();
         let start = Instant::now();
-        let response = conn.ask(&request).await?;
+        let response = conn.ask(Bytes::copy_from_slice(&request)).await?;
         let elapsed = start.elapsed();
 
         assert_eq!(response.len(), 4);

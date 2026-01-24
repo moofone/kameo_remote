@@ -352,17 +352,26 @@ mod tests {
             RemoteActorLocation::new_with_priority(addr, peer_id, RegistrationPriority::Immediate);
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&location).unwrap();
-        let deserialized: RemoteActorLocation =
-            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived =
+            crate::rkyv_utils::access_archived::<RemoteActorLocation>(&serialized).unwrap();
 
-        assert_eq!(location.address, deserialized.address);
-        assert_eq!(location.wall_clock_time, deserialized.wall_clock_time);
-        assert_eq!(location.priority, deserialized.priority);
+        assert_eq!(archived.address.as_str(), location.address.as_str());
         assert_eq!(
-            location.local_registration_time,
-            deserialized.local_registration_time
+            archived.wall_clock_time.to_native(),
+            location.wall_clock_time
         );
-        assert_eq!(location.metadata, deserialized.metadata);
+        let archived_priority = match archived.priority {
+            <RegistrationPriority as Archive>::Archived::Normal => RegistrationPriority::Normal,
+            <RegistrationPriority as Archive>::Archived::Immediate => {
+                RegistrationPriority::Immediate
+            }
+        };
+        assert_eq!(archived_priority, location.priority);
+        assert_eq!(
+            archived.local_registration_time.to_native(),
+            location.local_registration_time
+        );
+        assert_eq!(archived.metadata.as_slice(), location.metadata.as_slice());
     }
 
     #[test]
@@ -379,9 +388,9 @@ mod tests {
 
         // Test serialization with metadata
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&location).unwrap();
-        let deserialized: RemoteActorLocation =
-            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
+        let archived =
+            crate::rkyv_utils::access_archived::<RemoteActorLocation>(&serialized).unwrap();
 
-        assert_eq!(location.metadata, deserialized.metadata);
+        assert_eq!(archived.metadata.as_slice(), location.metadata.as_slice());
     }
 }

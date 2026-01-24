@@ -1,0 +1,353 @@
+# Allocation measurements run
+Fri 23 Jan 2026 14:12:37 AST
+
+## bytemuck_allocation_tests (baseline)
+warning: field `deallocations` is never read
+  --> tests/bytemuck_allocation_tests.rs:99:5
+   |
+97 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+98 |     allocations: usize,
+99 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "bytemuck_allocation_tests") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/bytemuck_allocation_tests.rs (target/debug/deps/bytemuck_allocation_tests-a7b60943283e9d5f)
+
+running 10 tests
+
+=== BASELINE: Hash Extraction (copy_from_slice) ===
+Allocations: 0 (0 bytes) | Time: 286.833µs
+  Result: 0 heap allocations (expected 0 - stack only)
+
+=== BASELINE: StreamHeader Full Roundtrip ===
+test baseline_hash_extraction_allocations ... ok
+Allocations: 1000 (0 bytes) | Time: 240.583µs
+  Result: 1000 allocations per 1000 roundtrips
+  Total bytes allocated: 0
+
+=== BASELINE: Hash Extraction Performance ===
+test baseline_full_streamheader_roundtrip_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 2.107ms
+  Result: 0 heap allocations per 100,000 calls
+
+=== BASELINE: Header Assembly (copy_from_slice) ===
+test baseline_hash_extraction_performance ... ok
+Allocations: 0 (0 bytes) | Time: 248.625µs
+  Result: 0 heap allocations (expected 0 - stack only)
+test baseline_header_assembly_allocations ... ok
+
+=== BASELINE: PublicKey::from_bytes ===
+Allocations: 0 (0 bytes) | Time: 12.272792ms
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: NodeId::from_bytes ===
+test baseline_key_conversion_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 12.066958ms
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: StreamHeader::from_bytes ===
+test baseline_node_id_conversion_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 151.834µs
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: StreamHeader::to_bytes ===
+test baseline_streamheader_from_bytes_allocations ... ok
+Allocations: 1000 (0 bytes) | Time: 97.292µs
+  Result: 1000 allocations per 1000 calls
+  Total bytes allocated: 0
+  Bytes per call: 0
+
+
+╔═══════════════════════════════════════════════════════════════╗
+║           BASELINE ALLOCATION SUMMARY REPORT                  ║
+╚═══════════════════════════════════════════════════════════════╝
+
+1. StreamHeader::to_bytes (1000 calls)
+test baseline_streamheader_to_bytes_allocations ... ok
+Allocations: 1000 (0 bytes) | Time: 99.666µs
+   → 1000 allocations, 0 bytes (0 bytes/call)
+
+2. StreamHeader::from_bytes (1000 calls)
+Allocations: 0 (0 bytes) | Time: 131.125µs
+   → 0 allocations, 0 bytes
+
+3. Hash extraction (10000 calls)
+Allocations: 0 (0 bytes) | Time: 232.416µs
+   → 0 heap allocations (stack only)
+
+4. PublicKey::from_bytes (1000 calls)
+Allocations: 0 (0 bytes) | Time: 12.357417ms
+   → 0 allocations, 0 bytes
+
+5. Header assembly (10000 calls)
+Allocations: 0 (0 bytes) | Time: 234.875µs
+   → 0 heap allocations (stack only)
+
+6. StreamHeader roundtrip (1000 calls)
+Allocations: 1000 (0 bytes) | Time: 240.541µs
+   → 1000 allocations, 0 bytes
+
+═══════════════════════════════════════════════════════════════
+  BASELINE COMPLETE - DO NOT MODIFY UNTIL OPTIMIZATION PHASE
+═══════════════════════════════════════════════════════════════
+
+=== BASELINE: StreamHeader Various Sizes ===
+Allocations: 100 (0 bytes) | Time: 11µs
+  Size 64: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 9.375µs
+  Size 256: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 9.25µs
+  Size 1024: 100 allocations per 100 calls (0 bytes)
+test baseline_summary_all_tests ... ok
+Allocations: 100 (0 bytes) | Time: 10.834µs
+  Size 4096: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.125µs
+  Size 16384: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.583µs
+  Size 65536: 100 allocations per 100 calls (0 bytes)
+test baseline_streamheader_various_sizes_allocations ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+## body_allocation_baseline
+warning: unused import: `kameo_remote::*`
+ --> tests/body_allocation_baseline.rs:8:5
+  |
+8 | use kameo_remote::*;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `deallocations` is never read
+  --> tests/body_allocation_baseline.rs:47:5
+   |
+45 | struct AllocationMetrics {
+   |        ----------------- field in this struct
+46 |     allocations: usize,
+47 |     deallocations: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kameo_remote` (test "body_allocation_baseline") generated 2 warnings (run `cargo fix --test "body_allocation_baseline"` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/body_allocation_baseline.rs (target/debug/deps/body_allocation_baseline-5351baead5d5099c)
+
+running 3 tests
+
+=== BASELINE: Distributed Actor Messages (remote_tell) ===
+Same pattern as above, sent over distributed system
+
+=== BASELINE: RegistryMessage Body Deserialization ===
+Current code: rkyv::from_bytes::<RegistryMessage>()
+
+╔═════════════════════════════════════════════════╗
+║           BASELINE BODY ALLOCATION SUMMARY                  ║
+╚═══════════════════════════════════════════════════╝
+
+KEY FINDING:
+  rkyv::from_bytes::<RegistryMessage>() ALLOCATES entire message
+  → Allocates: RegistryMessage enum + all Vec<u8> fields
+  → Per-message cost: ~1KB (varies by message type)
+
+EXPECTED OPTIMIZED:
+  rkyv::access::<RegistryMessage>() returns &Archived<RegistryMessage>
+  → Zero-copy reference into network buffer
+  → NO allocations for message body
+
+EXPECTED REDUCTION:
+  ~90%+ reduction in body allocations (much larger than header win)
+  Dramatic impact on high-throughput distributed systems
+test baseline_summary ... ok
+Allocations: 590 (1523 bytes) | Time: 1.799333ms
+BEFORE (Current rkyv::from_bytes):
+  → 590 allocations per 100 deserializations
+  → Total bytes: 1523
+  → Avg bytes per deserialization: 15
+
+This shows:
+  → RegistryMessage struct is allocated
+  → All Vec<u8> fields are allocated
+  → ActorMessage struct is allocated
+  → Total: ~1KB per message
+test baseline_registry_message_body_allocations ... ok
+Allocations: 608 (18446744073709543184 bytes) | Time: 1.897667ms
+BEFORE (Current rkyv::from_bytes):
+  → 608 allocations per 100 deserializations
+  → Total bytes: 18446744073709543184
+test baseline_distributed_actor_messages ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+## pooled_send_bench
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/pooled_send_bench.rs (target/debug/deps/pooled_send_bench-90d91d9c5aac9ab4)
+
+running 1 test
+🎫 [PERMIT] #0 acquiring control permit (available: 32/256)
+🎫 [PERMIT] #32 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #64 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #96 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #128 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #160 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #192 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #224 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #256 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #288 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #320 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #352 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #384 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #416 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #448 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #480 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #512 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #544 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #576 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #608 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #640 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #672 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #704 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #736 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #768 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #800 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #832 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #864 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #896 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #928 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #960 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #992 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1000 acquiring control permit (available: 24/256)
+[tell] size=128B count=1000 throughput=917151 msg/s allocs=129 deallocs=126
+[ask] size=128B count=1000 throughput=2077741 msg/s allocs=51 deallocs=54
+🎫 [PERMIT] #1048 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1080 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1112 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1144 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1176 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1208 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1240 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1272 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1304 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1336 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1368 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1400 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1432 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1464 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1496 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1528 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1560 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1592 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1624 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1656 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1688 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1720 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1752 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1784 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1816 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1848 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1880 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1912 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1944 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #1976 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2000 acquiring control permit (available: 8/256)
+🎫 [PERMIT] #2008 acquiring control permit (available: 0/256)
+[tell] size=4096B count=1000 throughput=725383 msg/s allocs=125 deallocs=129
+[ask] size=4096B count=1000 throughput=1272333 msg/s allocs=50 deallocs=54
+🎫 [PERMIT] #2064 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2096 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2128 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2160 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2192 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2224 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2256 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2288 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2320 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2352 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2384 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2416 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2448 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2480 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2512 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2544 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2576 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2608 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2640 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2672 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2704 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2736 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2768 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2800 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2832 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2864 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2896 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2928 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2960 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #2992 acquiring control permit (available: 0/256)
+🎫 [PERMIT] #3000 acquiring control permit (available: 24/256)
+🎫 [PERMIT] #3024 acquiring control permit (available: 0/256)
+[tell] size=65536B count=1000 throughput=267347 msg/s allocs=128 deallocs=132
+[ask] size=65536B count=1000 throughput=437461 msg/s allocs=32 deallocs=34
+test test_pooled_send_benchmarks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+## zero_copy_benchmarks
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/zero_copy_benchmarks.rs (target/debug/deps/zero_copy_benchmarks-0311ebd85e3277a2)
+
+running 2 tests
+📊 Zero-Copy Deserialization Benefit Analysis
+========================================
+
+Typical DeltaGossip Message Breakdown:
+  RegistryMessage enum: 200 bytes
+  RegistryDelta struct: 100 bytes
+  Changes Vec: 5000 bytes
+  Actor payload: 10240 bytes
+  ──────────────────────────────
+  Total serialized: ~15540 bytes
+
+Allocations with rkyv::from_bytes (current):
+  RegistryMessage: 200 bytes
+  RegistryDelta: 100 bytes
+  Changes Vec: 5000 bytes
+  Payload Vec<u8>: 10240 bytes
+  ──────────────────────────────
+  TOTAL ALLOCATED: ~15540 bytes
+
+Allocations with rkyv::access (theoretical zero-copy):
+  RegistryMessage: 0 bytes (reference into buffer)
+  RegistryDelta: 0 bytes (reference into buffer)
+  Changes: 0 bytes (ArchivedVec references buffer)
+  Payload: 0 bytes (ArchivedVec<u8> references buffer)
+  ──────────────────────────────
+  TOTAL ALLOCATED: 0 bytes
+
+📉 Theoretical Allocation Reduction:
+  Savings: ~15540 bytes (100%)
+
+💡 Note: Full zero-copy requires `Portable` trait,
+   which is not available for Vec<u8> and String.
+   When Portable becomes available, rkyv::access
+   can eliminate 15540 bytes per message deserialization.
+
+test show_zero_copy_theoretical_benefit ... ok
+✅ rkyv::from_bytes Benchmark (Current Implementation):
+   Total time: 6.218ms
+   Per operation: 6.22 μs
+   Operations/sec: 160823
+
+test benchmark_from_bytes_allocation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

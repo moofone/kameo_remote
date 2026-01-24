@@ -48,8 +48,8 @@ async fn create_node(
 /// Test that max_peers limit is respected under rapid peer discovery
 /// This verifies the TOCTOU fix: pending_peers are counted in slot calculation
 #[tokio::test]
-async fn test_max_peers_respected_under_concurrent_discovery() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn test_max_peers_respected_under_concurrent_discovery(
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = toctou_test_config();
 
     // Create a hub node (our test subject)
@@ -78,11 +78,11 @@ async fn test_max_peers_respected_under_concurrent_discovery() -> Result<(), Box
 
     // All peers bootstrap to hub rapidly (without waiting between)
     // This creates the race condition scenario
-    peer_1.bootstrap_non_blocking(vec![hub_addr]).await;
-    peer_2.bootstrap_non_blocking(vec![hub_addr]).await;
-    peer_3.bootstrap_non_blocking(vec![hub_addr]).await;
-    peer_4.bootstrap_non_blocking(vec![hub_addr]).await;
-    peer_5.bootstrap_non_blocking(vec![hub_addr]).await;
+    peer_1.bootstrap(vec![hub_addr]).await;
+    peer_2.bootstrap(vec![hub_addr]).await;
+    peer_3.bootstrap(vec![hub_addr]).await;
+    peer_4.bootstrap(vec![hub_addr]).await;
+    peer_5.bootstrap(vec![hub_addr]).await;
 
     // Let gossip propagate and connections settle
     sleep(Duration::from_millis(800)).await;
@@ -123,7 +123,7 @@ async fn test_connection_teardown_aborts_tasks() -> Result<(), Box<dyn std::erro
     // Connect B to A
     node_a.registry.add_peer(addr_b).await;
     node_b.registry.add_peer(addr_a).await;
-    node_b.bootstrap_non_blocking(vec![addr_a]).await;
+    node_b.bootstrap(vec![addr_a]).await;
 
     // Wait for connection
     sleep(Duration::from_millis(300)).await;
@@ -177,7 +177,7 @@ async fn test_peer_state_transitions() -> Result<(), Box<dyn std::error::Error>>
     node_a.registry.add_peer(addr_b).await;
 
     // Attempt connection
-    node_a.bootstrap_non_blocking(vec![addr_b]).await;
+    node_a.bootstrap(vec![addr_b]).await;
 
     // Wait for connection attempt
     sleep(Duration::from_millis(300)).await;

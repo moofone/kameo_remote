@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::info;
@@ -53,13 +54,19 @@ async fn test_connection_survives_multiple_gossip_rounds() {
 
     // Connect A -> B (single direction is sufficient for this test)
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.expect("Failed to connect A -> B");
+    peer_b
+        .connect(&addr_b)
+        .await
+        .expect("Failed to connect A -> B");
 
     // Wait for connection to stabilize
     sleep(Duration::from_millis(200)).await;
 
     // Initial verification - connection should be available
-    handle_a.get_connection(addr_b).await.expect("Initial connection failed");
+    handle_a
+        .get_connection(addr_b)
+        .await
+        .expect("Initial connection failed");
     info!("Initial connection established");
 
     // Wait for multiple gossip rounds (which trigger FullSync/FullSyncResponse)
@@ -71,7 +78,9 @@ async fn test_connection_survives_multiple_gossip_rounds() {
     // After many gossip rounds, connection should STILL be available
     // This is the critical test - without the fix, get_connection would fail
     // because the address mappings would be corrupted
-    handle_a.get_connection(addr_b).await
+    handle_a
+        .get_connection(addr_b)
+        .await
         .expect("Connection should still be available after gossip rounds - fix verified!");
 
     info!("Connection still available after gossip rounds - PASS");
@@ -127,9 +136,15 @@ async fn test_addr_mappings_preserved_after_fullsync() {
     sleep(Duration::from_millis(500)).await;
 
     // Verify initial state
-    let conn = handle_a.get_connection(addr_b).await.expect("Initial connection");
-    let response = conn.ask(b"ECHO:test").await.expect("Initial ask");
-    assert_eq!(response, b"ECHOED:test");
+    let conn = handle_a
+        .get_connection(addr_b)
+        .await
+        .expect("Initial connection");
+    let response = conn
+        .ask(Bytes::from_static(b"ECHO:test"))
+        .await
+        .expect("Initial ask");
+    assert_eq!(response.as_ref(), b"ECHOED:test");
 
     // Now let many gossip rounds happen
     for round in 0..20 {
@@ -139,19 +154,30 @@ async fn test_addr_mappings_preserved_after_fullsync() {
         match handle_a.get_connection(addr_b).await {
             Ok(conn) => {
                 let request = format!("ECHO:round{}", round);
-                match conn.ask(request.as_bytes()).await {
+                match conn.ask(Bytes::copy_from_slice(request.as_bytes())).await {
                     Ok(response) => {
                         let expected = format!("ECHOED:round{}", round);
-                        assert_eq!(response, expected.as_bytes(), "Round {} mismatch", round);
+                        assert_eq!(
+                            response.as_ref(),
+                            expected.as_bytes(),
+                            "Round {} mismatch",
+                            round
+                        );
                         info!("Round {} message delivered successfully", round);
                     }
                     Err(e) => {
-                        panic!("Round {} ask failed: {} - address mappings likely corrupted!", round, e);
+                        panic!(
+                            "Round {} ask failed: {} - address mappings likely corrupted!",
+                            round, e
+                        );
                     }
                 }
             }
             Err(e) => {
-                panic!("Round {} connection lost: {} - address mappings corrupted!", round, e);
+                panic!(
+                    "Round {} connection lost: {} - address mappings corrupted!",
+                    round, e
+                );
             }
         }
     }
@@ -203,7 +229,10 @@ async fn test_reconnect_cleanup() {
     sleep(Duration::from_millis(200)).await;
 
     // Verify initial connection available
-    handle_a.get_connection(addr_b).await.expect("Initial connection should work");
+    handle_a
+        .get_connection(addr_b)
+        .await
+        .expect("Initial connection should work");
     info!("Initial connection established");
 
     // Disconnect by shutting down B
@@ -221,7 +250,7 @@ async fn test_reconnect_cleanup() {
         Some(GossipConfig {
             gossip_interval: Duration::from_secs(300),
             ..Default::default()
-        })
+        }),
     )
     .await
     .unwrap();
@@ -234,7 +263,9 @@ async fn test_reconnect_cleanup() {
 
     // The critical test: verify get_connection works for the NEW peer
     // This would fail if old address mappings weren't cleaned up properly
-    handle_a.get_connection(addr_b).await
+    handle_a
+        .get_connection(addr_b)
+        .await
         .expect("Reconnection should work - address mappings correctly updated");
 
     info!("Reconnection successful - no orphaned address entries");

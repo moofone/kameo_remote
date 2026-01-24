@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::info;
@@ -67,8 +68,8 @@ async fn test_ask_response_with_correlation() {
         let conn = pool.connections_by_addr.get(&addr_a).unwrap();
         
         // Send ask request
-        let request = b"2 + 2 = ?";
-        let response_future = conn.ask(request);
+        let request = Bytes::from_static(b"2 + 2 = ?");
+        let response_future = conn.ask(request.clone());
         
         // Simulate calculator actor processing on Node A
         // In a real system, this would be handled by the actor framework
@@ -81,7 +82,7 @@ async fn test_ask_response_with_correlation() {
         // For now, let's test the ask timeout
         match tokio::time::timeout(Duration::from_millis(100), response_future).await {
             Ok(Ok(response)) => {
-                info!("Got response: {:?}", String::from_utf8_lossy(&response));
+                info!("Got response: {:?}", String::from_utf8_lossy(response.as_ref()));
             }
             Ok(Err(e)) => {
                 info!("Ask failed: {}", e);
@@ -104,14 +105,20 @@ async fn test_ask_response_with_correlation() {
         for i in 0..5 {
             let conn_clone = conn.clone();
             let handle = tokio::spawn(async move {
-                let request = format!("Echo request {}", i).into_bytes();
+                let request = Bytes::from(format!("Echo request {}", i).into_bytes());
                 let start = std::time::Instant::now();
-                
-                match tokio::time::timeout(Duration::from_millis(100), conn_clone.ask(&request)).await {
+
+                match tokio::time::timeout(Duration::from_millis(100), conn_clone.ask(request))
+                    .await
+                {
                     Ok(Ok(response)) => {
                         let elapsed = start.elapsed();
-                        info!("Request {} got response in {:?}: {:?}", 
-                            i, elapsed, String::from_utf8_lossy(&response));
+                        info!(
+                            "Request {} got response in {:?}: {:?}",
+                            i,
+                            elapsed,
+                            String::from_utf8_lossy(response.as_ref())
+                        );
                     }
                     Ok(Err(e)) => {
                         info!("Request {} failed: {}", i, e);

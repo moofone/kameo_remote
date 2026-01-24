@@ -1,6 +1,7 @@
 pub mod config;
 pub mod connection_pool;
 pub mod framing;
+pub mod gossip_buffer;
 mod handle;
 mod handle_builder;
 pub mod handshake;
@@ -9,11 +10,23 @@ pub mod priority;
 pub mod registry;
 pub mod remote_actor_location;
 pub mod reply_to;
+mod rkyv_utils;
 pub mod stream_writer;
+pub mod streaming;
+pub mod telemetry;
 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
 pub mod test_helpers;
 pub mod tls;
 pub mod typed;
+
+#[cfg(all(
+    feature = "legacy_tell_bytes",
+    not(feature = "legacy_tell_bytes_unlocked")
+))]
+compile_error!(
+    "The 'legacy_tell_bytes' feature is deprecated. \
+enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to opt back in explicitly."
+);
 
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -34,7 +47,10 @@ pub use handle_builder::GossipRegistryBuilder;
 pub use priority::{ConsistencyLevel, RegistrationPriority};
 pub use remote_actor_location::RemoteActorLocation;
 pub use reply_to::{ReplyTo, TimeoutReplyTo};
-pub use typed::{decode_typed, encode_typed, WireEncode, WireType};
+#[cfg(any(test, feature = "allow-non-zero-copy"))]
+#[allow(deprecated)]
+pub use typed::decode_typed;
+pub use typed::{encode_typed, TypedBatch, WireEncode, WireType};
 
 // =================== New Iroh-style types ===================
 
@@ -370,6 +386,13 @@ impl VectorClock {
         self.clocks.get(node_id).map(|v| *v).unwrap_or(0)
     }
 
+    /// Iterate over vector clock entries without allocating.
+    pub fn iter_entries(&self) -> impl Iterator<Item = (NodeId, u64)> + '_ {
+        self.clocks
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+    }
+
     /// Check if this vector clock happened before another
     pub fn happens_before(&self, other: &VectorClock) -> bool {
         matches!(self.compare(other), ClockOrdering::Before)
@@ -591,7 +614,7 @@ impl std::fmt::Debug for KeyPair {
 }
 
 /// Peer identifier - contains the Ed25519 public key
-#[derive(Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PeerId([u8; 32]);
 
 impl PeerId {
@@ -1014,11 +1037,11 @@ pub enum MessageType {
     ActorTell = 3,
     /// Direct actor ask message (no wrapping)
     ActorAsk = 4,
-    /// Start of a streaming transfer
+    /// Start of a streaming transfer (zero-copy descriptor)
     StreamStart = 0x10,
-    /// Streaming data chunk
+    /// Streaming data chunk (written directly into final buffer)
     StreamData = 0x11,
-    /// End of streaming transfer
+    /// Optional terminator emitted after completion
     StreamEnd = 0x12,
 }
 
@@ -1041,10 +1064,11 @@ impl MessageType {
 
 /// Header for streaming protocol messages
 #[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[repr(C)]
 pub struct StreamHeader {
     /// Unique stream identifier
     pub stream_id: u64,
-    /// Total size of the complete message
+    /// Total size of complete message
     pub total_size: u64,
     /// Size of this chunk (0 for start/end markers)
     pub chunk_size: u32,
@@ -1057,10 +1081,54 @@ pub struct StreamHeader {
 }
 
 impl StreamHeader {
-    /// Size of the serialized header
+    /// Size of serialized header
     pub const SERIALIZED_SIZE: usize = 8 + 8 + 4 + 4 + 4 + 8; // 36 bytes
 
-    /// Serialize header to bytes
+    /// Zero-copy byte access - returns a reference to the header's byte representation (NATIVE byte order)
+    ///
+    /// This is the optimized path that requires NO allocations. Use this in hot paths
+    /// where you need to access header bytes without copying for LOCAL operations
+    /// like checksum calculation, comparison, or memory-mapped I/O.
+    ///
+    /// **NOTE:** This returns bytes in NATIVE byte order, NOT big-endian.
+    /// For network serialization (big-endian), use the deprecated `to_bytes()` method.
+    /// For zero-copy when the data is already big-endian aligned, use `as_be_bytes()`.
+    ///
+    /// # Example
+    /// ```rust
+    /// use kameo_remote::StreamHeader;
+    ///
+    /// let header = StreamHeader {
+    ///     stream_id: 42,
+    ///     total_size: 1_024,
+    ///     chunk_size: 256,
+    ///     chunk_index: 0,
+    ///     type_hash: 0xDEADBEEF,
+    ///     actor_id: 7,
+    /// };
+    ///
+    /// let bytes: &[u8] = header.as_bytes();
+    /// assert_eq!(bytes.len(), StreamHeader::SERIALIZED_SIZE);
+    /// ```
+    pub fn as_bytes(&self) -> &[u8] {
+        // Zero-copy: reinterpret StreamHeader as byte slice (native byte order)
+        // Safe because: (1) #[repr(C)] ensures consistent layout,
+        // (2) we only return a reference, don't take ownership,
+        // (3) lifetime is tied to self
+        unsafe {
+            std::slice::from_raw_parts(
+                self as *const StreamHeader as *const u8,
+                Self::SERIALIZED_SIZE,
+            )
+        }
+    }
+
+    /// Serialize header to big-endian bytes for network transmission.
+    ///
+    /// This method allocates a new Vec and converts to big-endian byte order,
+    /// which is the wire format for the streaming protocol.
+    ///
+    /// For zero-copy access in native byte order, use `as_bytes()`.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(Self::SERIALIZED_SIZE);
         bytes.extend_from_slice(&self.stream_id.to_be_bytes());
@@ -1072,7 +1140,10 @@ impl StreamHeader {
         bytes
     }
 
-    /// Parse header from bytes
+    /// Parse header from big-endian bytes (network format).
+    ///
+    /// This method handles big-endian network data by copying and converting byte order.
+    /// Safe for any byte alignment since it creates a new struct.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < Self::SERIALIZED_SIZE {
             return None;
@@ -1087,7 +1158,85 @@ impl StreamHeader {
             actor_id: u64::from_be_bytes(bytes[28..36].try_into().ok()?),
         })
     }
+
+    /// Parse header from big-endian bytes using zero-copy (always aligned).
+    ///
+    /// **Alignment Guarantee**: The protocol is designed so StreamHeader is always at
+    /// an 8-byte aligned offset (16 bytes from message start). This method uses unsafe
+    /// direct field reads for maximum performance.
+    ///
+    /// **Runtime Check**: In production (non-test) builds, this panics if the data is
+    /// not properly aligned, catching protocol bugs immediately.
+    ///
+    /// **Performance**: Zero Vec allocation, direct field reads, no fallback overhead.
+    pub fn from_bytes_zero_copy(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::SERIALIZED_SIZE {
+            return None;
+        }
+
+        // SAFETY CHECK: Verify alignment in production (panics if not aligned)
+        #[cfg(not(test))]
+        {
+            let is_aligned = (bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<u64>());
+            assert!(
+                is_aligned,
+                "StreamHeader must be 8-byte aligned! Pointer: {:p}, offset: {}. \
+                 This is a protocol violation - the message format guarantees alignment at offset 16.",
+                bytes.as_ptr(),
+                bytes.as_ptr() as usize
+            );
+        }
+
+        // SAFETY: We control the protocol and StreamHeader is always at 8-byte aligned offset
+        // The message format guarantees StreamHeader is at offset 16 from message start.
+        unsafe {
+            let ptr = bytes.as_ptr();
+            Some(Self {
+                stream_id: u64::from_be_bytes(*(ptr as *const [u8; 8])),
+                total_size: u64::from_be_bytes(*(ptr.add(8) as *const [u8; 8])),
+                chunk_size: u32::from_be_bytes(*(ptr.add(16) as *const [u8; 4])),
+                chunk_index: u32::from_be_bytes(*(ptr.add(20) as *const [u8; 4])),
+                type_hash: u32::from_be_bytes(*(ptr.add(24) as *const [u8; 4])),
+                actor_id: u64::from_be_bytes(*(ptr.add(28) as *const [u8; 8])),
+            })
+        }
+    }
 }
+
+/// Complete wire message for streaming protocol (header + data)
+///
+/// This struct combines the stream header with data for serialization.
+/// For zero-copy deserialization, we rely on `rkyv::access` (see `rkyv_utils`)
+/// for the header and handle the payload as a separate slice to avoid copying
+/// large data chunks.
+///
+/// The key optimization is using rkyv for header serialization/deserialization,
+/// which eliminates byte-swapping overhead compared to manual to_bytes/from_bytes.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[repr(C)]
+pub struct StreamWireMessage {
+    pub header: StreamHeader,
+    pub data: Vec<u8>,
+}
+
+impl StreamWireMessage {
+    pub const SERIALIZED_SIZE: usize = StreamHeader::SERIALIZED_SIZE; // header only, data varies
+}
+
+// Static alignment assertions for compile-time verification
+const _: () = {
+    // Verify that when embedded at 32-byte offset, alignment is preserved
+    struct TestPacking {
+        _pad: [u8; 32],
+        header: StreamHeader,
+    }
+    assert!(
+        std::mem::offset_of!(TestPacking, header) == 32,
+        "StreamHeader must start at 32-byte offset"
+    );
+
+    // Note: StreamHeader methods (as_bytes, from_bytes_slice) are verified by tests
+};
 
 /// Errors that can occur in the gossip registry
 #[derive(Error, Debug)]
@@ -1145,6 +1294,12 @@ pub enum GossipError {
 
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+
+    #[error("invalid stream frame: {0}")]
+    InvalidStreamFrame(String),
+
+    #[error("legacy tell() API disabled (enable the 'legacy_tell_bytes' feature to re-enable)")]
+    LegacyTellApiDisabled,
 }
 
 pub type Result<T> = std::result::Result<T, GossipError>;

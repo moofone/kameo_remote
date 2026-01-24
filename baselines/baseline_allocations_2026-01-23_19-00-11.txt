@@ -1,0 +1,102 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/bytemuck_allocation_tests.rs (target/debug/deps/bytemuck_allocation_tests-a7b60943283e9d5f)
+
+running 10 tests
+
+=== BASELINE: StreamHeader Full Roundtrip ===
+Allocations: 1000 (0 bytes) | Time: 228.625µs
+  Result: 1000 allocations per 1000 roundtrips
+  Total bytes allocated: 0
+
+=== BASELINE: Hash Extraction (copy_from_slice) ===
+test baseline_full_streamheader_roundtrip_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 218.167µs
+  Result: 0 heap allocations (expected 0 - stack only)
+
+=== BASELINE: Hash Extraction Performance ===
+test baseline_hash_extraction_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 2.041083ms
+  Result: 0 heap allocations per 100,000 calls
+
+=== BASELINE: Header Assembly (copy_from_slice) ===
+test baseline_hash_extraction_performance ... ok
+Allocations: 0 (0 bytes) | Time: 224.833µs
+  Result: 0 heap allocations (expected 0 - stack only)
+
+=== BASELINE: PublicKey::from_bytes ===
+test baseline_header_assembly_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 11.477292ms
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: NodeId::from_bytes ===
+test baseline_key_conversion_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 11.583208ms
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: StreamHeader::from_bytes ===
+test baseline_node_id_conversion_allocations ... ok
+Allocations: 0 (0 bytes) | Time: 145.958µs
+  Result: 0 allocations per 1000 calls
+  Total bytes allocated: 0
+
+=== BASELINE: StreamHeader::to_bytes ===
+test baseline_streamheader_from_bytes_allocations ... ok
+Allocations: 1000 (0 bytes) | Time: 95.834µs
+  Result: 1000 allocations per 1000 calls
+  Total bytes allocated: 0
+  Bytes per call: 0
+
+=== BASELINE: StreamHeader Various Sizes ===
+test baseline_streamheader_to_bytes_allocations ... ok
+Allocations: 100 (0 bytes) | Time: 13µs
+  Size 64: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.208µs
+  Size 256: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.125µs
+  Size 1024: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.083µs
+  Size 4096: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 11.084µs
+  Size 16384: 100 allocations per 100 calls (0 bytes)
+Allocations: 100 (0 bytes) | Time: 10.292µs
+  Size 65536: 100 allocations per 100 calls (0 bytes)
+
+
+╔═══════════════════════════════════════════════════════════════╗
+║           BASELINE ALLOCATION SUMMARY REPORT                  ║
+╚═══════════════════════════════════════════════════════════════╝
+
+1. StreamHeader::to_bytes (1000 calls)
+test baseline_streamheader_various_sizes_allocations ... ok
+Allocations: 1000 (0 bytes) | Time: 100.375µs
+   → 1000 allocations, 0 bytes (0 bytes/call)
+
+2. StreamHeader::from_bytes (1000 calls)
+Allocations: 0 (0 bytes) | Time: 137.792µs
+   → 0 allocations, 0 bytes
+
+3. Hash extraction (10000 calls)
+Allocations: 0 (0 bytes) | Time: 210.625µs
+   → 0 heap allocations (stack only)
+
+4. PublicKey::from_bytes (1000 calls)
+Allocations: 0 (0 bytes) | Time: 11.862ms
+   → 0 allocations, 0 bytes
+
+5. Header assembly (10000 calls)
+Allocations: 0 (0 bytes) | Time: 218.042µs
+   → 0 heap allocations (stack only)
+
+6. StreamHeader roundtrip (1000 calls)
+Allocations: 1000 (0 bytes) | Time: 239.333µs
+   → 1000 allocations, 0 bytes
+
+═══════════════════════════════════════════════════════════════
+  BASELINE COMPLETE - DO NOT MODIFY UNTIL OPTIMIZATION PHASE
+═══════════════════════════════════════════════════════════════
+test baseline_summary_all_tests ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
