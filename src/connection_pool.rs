@@ -3251,42 +3251,6 @@ impl ConnectionHandle {
             .await
     }
 
-    /// Ask method for large messages that need streaming.
-    ///
-    /// This method streams large payloads to avoid buffer overflow while still
-    /// waiting for a response. Used by kameo for large actor messages that exceed
-    /// the streaming threshold.
-    ///
-    /// NOTE: This method performs a single copy of the payload to convert it to Bytes,
-    /// then delegates to `ask_streaming_bytes()` which uses zero-copy chunking.
-    /// If you already have a Bytes buffer, use `ask_streaming_bytes()` directly
-    /// to avoid this copy.
-    ///
-    /// # Arguments
-    /// * `payload` - The message payload to stream
-    /// * `type_hash` - The type hash for the message
-    /// * `actor_id` - The target actor ID
-    /// * `timeout` - How long to wait for a response
-    ///
-    /// # Returns
-    /// The response bytes from the actor
-    pub async fn ask_streaming(
-        &self,
-        payload: &[u8],
-        type_hash: u32,
-        actor_id: u64,
-        timeout: Duration,
-    ) -> Result<bytes::Bytes> {
-        // Delegate to zero-copy implementation with a single copy at the entry point
-        self.ask_streaming_bytes(
-            bytes::Bytes::copy_from_slice(payload),
-            type_hash,
-            actor_id,
-            timeout,
-        )
-        .await
-    }
-
     /// Zero-copy streaming ask that takes Bytes directly.
     ///
     /// This version avoids copying the payload data by using Bytes::slice()

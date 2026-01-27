@@ -6,3 +6,14 @@ sprints/
 qa/
 spec/
 .DS_Store
+
+# Generated files and reports
+baselines/
+logs/
+reports/
+*.profraw
+*.profdata
+
+# Test and benchmark outputs
+benches/output/
+
