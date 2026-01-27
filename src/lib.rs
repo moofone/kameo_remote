@@ -24,7 +24,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tracing::error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use config::GossipConfig;
@@ -1015,12 +1014,18 @@ pub enum MessageType {
     ActorTell = 3,
     /// Direct actor ask message (no wrapping)
     ActorAsk = 4,
-    /// Start of a streaming transfer
+    /// Start of a streaming REQUEST transfer
     StreamStart = 0x10,
-    /// Streaming data chunk
+    /// Streaming REQUEST data chunk
     StreamData = 0x11,
-    /// End of streaming transfer
+    /// End of streaming REQUEST transfer
     StreamEnd = 0x12,
+    /// Start of a streaming RESPONSE transfer
+    StreamResponseStart = 0x13,
+    /// Streaming RESPONSE data chunk
+    StreamResponseData = 0x14,
+    /// End of streaming RESPONSE transfer
+    StreamResponseEnd = 0x15,
 }
 
 impl MessageType {
@@ -1035,8 +1040,29 @@ impl MessageType {
             0x10 => Some(MessageType::StreamStart),
             0x11 => Some(MessageType::StreamData),
             0x12 => Some(MessageType::StreamEnd),
+            0x13 => Some(MessageType::StreamResponseStart),
+            0x14 => Some(MessageType::StreamResponseData),
+            0x15 => Some(MessageType::StreamResponseEnd),
             _ => None,
         }
+    }
+
+    /// Check if this is a streaming response message type
+    pub fn is_streaming_response(&self) -> bool {
+        matches!(
+            self,
+            MessageType::StreamResponseStart
+                | MessageType::StreamResponseData
+                | MessageType::StreamResponseEnd
+        )
+    }
+
+    /// Check if this is a streaming request message type
+    pub fn is_streaming_request(&self) -> bool {
+        matches!(
+            self,
+            MessageType::StreamStart | MessageType::StreamData | MessageType::StreamEnd
+        )
     }
 }
 

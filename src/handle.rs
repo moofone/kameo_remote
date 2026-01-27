@@ -1136,12 +1136,16 @@ where
         }) => {
             // Handle initial streaming message
             match msg_type {
-                msg_type if msg_type == crate::MessageType::StreamStart as u8 => {
+                msg_type if msg_type == crate::MessageType::StreamStart as u8
+                    || msg_type == crate::MessageType::StreamResponseStart as u8 =>
+                {
                     if let Err(e) = streaming_state.start_stream(stream_header) {
                         warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
                     }
                 }
-                msg_type if msg_type == crate::MessageType::StreamData as u8 => {
+                msg_type if msg_type == crate::MessageType::StreamData as u8
+                    || msg_type == crate::MessageType::StreamResponseData as u8 =>
+                {
                     // Data chunk - this should not be the first message typically, but handle it
                     if let Err(e) = streaming_state.start_stream(stream_header) {
                         debug!(error = %e, "Auto-starting stream for data chunk: stream_id={}", stream_header.stream_id);
@@ -1270,12 +1274,16 @@ where
             }) => {
                 // Handle streaming messages
                 match msg_type {
-                    msg_type if msg_type == crate::MessageType::StreamStart as u8 => {
+                    msg_type if msg_type == crate::MessageType::StreamStart as u8
+                        || msg_type == crate::MessageType::StreamResponseStart as u8 =>
+                    {
                         if let Err(e) = streaming_state.start_stream(stream_header) {
                             warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
                         }
                     }
-                    msg_type if msg_type == crate::MessageType::StreamData as u8 => {
+                    msg_type if msg_type == crate::MessageType::StreamData as u8
+                        || msg_type == crate::MessageType::StreamResponseData as u8 =>
+                    {
                         if let Ok(Some(complete_data)) =
                             streaming_state.add_chunk(stream_header, chunk_data)
                         {
@@ -1293,7 +1301,9 @@ where
                             }
                         }
                     }
-                    msg_type if msg_type == crate::MessageType::StreamEnd as u8 => {
+                    msg_type if msg_type == crate::MessageType::StreamEnd as u8
+                        || msg_type == crate::MessageType::StreamResponseEnd as u8 =>
+                    {
                         if let Ok(Some(complete_data)) =
                             streaming_state.finalize_stream(stream_header.stream_id)
                         {
@@ -1618,7 +1628,10 @@ where
                     }
                     crate::MessageType::StreamStart
                     | crate::MessageType::StreamData
-                    | crate::MessageType::StreamEnd => {
+                    | crate::MessageType::StreamEnd
+                    | crate::MessageType::StreamResponseStart
+                    | crate::MessageType::StreamResponseData
+                    | crate::MessageType::StreamResponseEnd => {
                         // Handle streaming messages
                         // Message format: [type:1][correlation_id:2][reserved:9][stream_header:36][chunk_data:N]
                         if msg_data.len()
