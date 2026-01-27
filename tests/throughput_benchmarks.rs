@@ -13,15 +13,19 @@ use tokio::{
 
 use kameo_remote::{
     handshake::Hello,
-    registry::{ActorMessageFuture, ActorMessageHandler, RegistryMessage},
+    registry::{ActorMessageFuture, ActorMessageHandler},
     tls::TlsConfig,
-    GossipConfig, GossipRegistryHandle, KeyPair,
+    typed, GossipConfig, GossipRegistryHandle, KeyPair,
 };
 
 const TEST_DATA_SIZE: usize = 100 * 1024 * 1024; // 100MB
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 const MESSAGE_COUNT: usize = 10000;
 const ASK_CONCURRENCY: usize = 256;
+const TELL_LARGE_MESSAGE_COUNT: usize = 1024;
+const BENCH_ACTOR_NAME: &str = "ask_actor";
+const BENCH_ACTOR_ID: u64 = typed::fnv1a_hash(BENCH_ACTOR_NAME);
+const BENCH_TYPE_HASH: u32 = (BENCH_ACTOR_ID & 0xFFFF_FFFF) as u32;
 
 fn throughput_guard() -> std::sync::MutexGuard<'static, ()> {
     static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -84,8 +88,13 @@ fn spawn_receiver_process(name: &str, ask_inflight_limit: usize) -> ReceiverProc
                 .set_actor_message_handler(Arc::new(BenchActorHandler))
                 .await;
 
-            // Actor messages are handled by the handler directly; bind addr is enough.
             let bind_addr = receiver_handle.registry.bind_addr;
+            receiver_handle
+                .register(BENCH_ACTOR_NAME.to_string(), bind_addr)
+                .await
+                .unwrap();
+
+            // Actor messages are handled by the handler directly; bind addr is enough.
             let peer_id = receiver_keypair.peer_id();
             ready_tx.send((peer_id, bind_addr)).ok();
 
@@ -283,6 +292,7 @@ async fn test_direct_connection_throughput() {
     // Measure throughput using existing connection
     let start_time = Instant::now();
     let mut total_bytes = 0;
+    let mut chunks_sent = 0usize;
 
     // Send data in chunks using the existing connection
     for chunk in test_data.chunks(CHUNK_SIZE) {
@@ -292,15 +302,20 @@ async fn test_direct_connection_throughput() {
             .await
             .unwrap();
         total_bytes += chunk.len();
+        chunks_sent += 1;
     }
 
     let duration = start_time.elapsed();
     let throughput = calculate_throughput(total_bytes, duration);
 
+    let chunks_per_sec = chunks_sent as f64 / duration.as_secs_f64();
+    let bytes_per_sec = total_bytes as f64 / duration.as_secs_f64();
     println!("📈 Connection Pool Results:");
     println!("   - Total bytes: {} MB", total_bytes / (1024 * 1024));
     println!("   - Duration: {:?}", duration);
     println!("   - Throughput: {:.2} MB/s", throughput);
+    println!("   - Chunks/sec (64KB): {:.0}", chunks_per_sec);
+    println!("   - Bytes/sec: {:.0}", bytes_per_sec);
 
     // Cleanup
     receiver_handle.shutdown().await;
@@ -428,6 +443,103 @@ async fn test_tell_throughput() {
     );
 }
 
+/// Test 2b: tell() throughput with 64KB payloads (streaming-size comparison)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_tell_large_payload_throughput() {
+    println!("🚀 Test 2b: tell() 64KB Throughput");
+    let _guard = throughput_guard();
+
+    let mut config = GossipConfig::default();
+    config.ask_inflight_limit = 256;
+    let receiver_addr = "127.0.0.1:0".parse().unwrap();
+    let sender_addr = "127.0.0.1:0".parse().unwrap();
+
+    let receiver_keypair = KeyPair::new_for_testing("throughput_receiver_2b");
+    let sender_keypair = KeyPair::new_for_testing("throughput_sender_2b");
+    let receiver_peer_id = receiver_keypair.peer_id();
+    let sender_peer_id = sender_keypair.peer_id();
+
+    let receiver_handle = GossipRegistryHandle::new_with_keypair(
+        receiver_addr,
+        receiver_keypair.clone(),
+        Some(config.clone()),
+    )
+    .await
+    .unwrap();
+    let sender_handle = GossipRegistryHandle::new_with_keypair(
+        sender_addr,
+        sender_keypair.clone(),
+        Some(config.clone()),
+    )
+    .await
+    .unwrap();
+
+    receiver_handle
+        .register(
+            "throughput_actor_64kb".to_string(),
+            receiver_handle.registry.bind_addr,
+        )
+        .await
+        .unwrap();
+
+    let peer_sender = receiver_handle.add_peer(&sender_peer_id).await;
+    peer_sender
+        .connect(&sender_handle.registry.bind_addr)
+        .await
+        .unwrap();
+    let peer_receiver = sender_handle.add_peer(&receiver_peer_id).await;
+    peer_receiver
+        .connect(&receiver_handle.registry.bind_addr)
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(50)).await;
+
+    let found_actor = sender_handle.lookup("throughput_actor_64kb").await;
+    assert!(found_actor.is_some(), "Actor should be found via lookup");
+
+    let actor_location = found_actor.unwrap();
+    let actor_addr: SocketAddr = actor_location.address.parse().unwrap();
+    println!("✅ Found tell actor at: {}", actor_location.address);
+
+    let connection_handle = sender_handle.get_connection(actor_addr).await.unwrap();
+    println!(
+        "🔗 Reusing existing connection for tell() to: {}",
+        connection_handle.addr
+    );
+
+    let test_message = Bytes::copy_from_slice(&generate_test_data(CHUNK_SIZE));
+    println!(
+        "📊 Sending {} messages via tell() (64KB payload)",
+        TELL_LARGE_MESSAGE_COUNT
+    );
+
+    let start_time = Instant::now();
+    for _ in 0..TELL_LARGE_MESSAGE_COUNT {
+        connection_handle
+            .tell_bytes(test_message.clone())
+            .await
+            .unwrap();
+    }
+
+    let duration = start_time.elapsed();
+    let total_bytes = TELL_LARGE_MESSAGE_COUNT * test_message.len();
+    let throughput = calculate_throughput(total_bytes, duration);
+    let messages_per_sec = TELL_LARGE_MESSAGE_COUNT as f64 / duration.as_secs_f64();
+
+    sleep(Duration::from_millis(100)).await;
+
+    println!("📈 tell() 64KB Results:");
+    println!("   - Messages sent: {}", TELL_LARGE_MESSAGE_COUNT);
+    println!("   - Total bytes: {} MB", total_bytes / (1024 * 1024));
+    println!("   - Duration: {:?}", duration);
+    println!("   - Throughput: {:.2} MB/s", throughput);
+    println!("   - Messages/sec: {:.0}", messages_per_sec);
+
+    receiver_handle.shutdown().await;
+    sender_handle.shutdown().await;
+}
+
 /// Test 3: ask() request-response performance using connection pool
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ask_throughput() {
@@ -471,15 +583,7 @@ async fn test_ask_throughput() {
         connection_handle.addr
     );
 
-    let ask_msg = RegistryMessage::ActorMessage {
-        actor_id: "ask_actor".to_string(),
-        type_hash: 0,
-        payload: b"REQUEST".to_vec(),
-        correlation_id: None,
-    };
-    let ask_bytes = Bytes::from(
-        rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(&ask_msg, Vec::new()).unwrap(),
-    );
+    let ask_payload = Bytes::from_static(b"REQUEST");
 
     let total_requests = (MESSAGE_COUNT / 10).max(ASK_CONCURRENCY * 4);
     println!(
@@ -505,10 +609,17 @@ async fn test_ask_throughput() {
     let initial = ASK_CONCURRENCY.min(remaining);
     for _ in 0..initial {
         let conn = connection_handle.clone();
-        let payload = ask_bytes.clone();
+        let payload = ask_payload.clone();
         in_flight.push(Box::pin(async move {
             let request_start = Instant::now();
-            let response = conn.ask(payload).await?;
+            let response = conn
+                .ask_actor(
+                    BENCH_ACTOR_ID,
+                    BENCH_TYPE_HASH,
+                    payload,
+                    Duration::from_secs(5),
+                )
+                .await?;
             let latency = request_start.elapsed();
             Ok::<(Duration, bytes::Bytes), kameo_remote::GossipError>((latency, response))
         }));
@@ -518,14 +629,21 @@ async fn test_ask_throughput() {
     while let Some(result) = in_flight.next().await {
         let (latency, response) = result.unwrap();
         latencies.push(latency);
-        total_bytes += ask_bytes.len() + response.len();
+        total_bytes += ask_payload.len() + response.len();
 
         if remaining > 0 {
             let conn = connection_handle.clone();
-            let payload = ask_bytes.clone();
+            let payload = ask_payload.clone();
             in_flight.push(Box::pin(async move {
                 let request_start = Instant::now();
-                let response = conn.ask(payload).await?;
+                let response = conn
+                    .ask_actor(
+                        BENCH_ACTOR_ID,
+                        BENCH_TYPE_HASH,
+                        payload,
+                        Duration::from_secs(5),
+                    )
+                    .await?;
                 let latency = request_start.elapsed();
                 Ok::<(Duration, bytes::Bytes), kameo_remote::GossipError>((latency, response))
             }));
@@ -604,15 +722,7 @@ async fn test_ask_max_inflight() {
         connection_handle.addr
     );
 
-    let ask_msg = RegistryMessage::ActorMessage {
-        actor_id: "ask_actor".to_string(),
-        type_hash: 0,
-        payload: b"REQUEST".to_vec(),
-        correlation_id: None,
-    };
-    let ask_bytes = Bytes::from(
-        rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(&ask_msg, Vec::new()).unwrap(),
-    );
+    let ask_payload = Bytes::from_static(b"REQUEST");
 
     let total_requests = max_inflight * 4;
     println!(
@@ -634,10 +744,17 @@ async fn test_ask_max_inflight() {
     let mut remaining = total_requests;
     for _ in 0..max_inflight {
         let conn = connection_handle.clone();
-        let payload = ask_bytes.clone();
+        let payload = ask_payload.clone();
         in_flight.push(Box::pin(async move {
             let request_start = Instant::now();
-            let response = conn.ask(payload).await?;
+            let response = conn
+                .ask_actor(
+                    BENCH_ACTOR_ID,
+                    BENCH_TYPE_HASH,
+                    payload,
+                    Duration::from_secs(5),
+                )
+                .await?;
             let latency = request_start.elapsed();
             Ok::<(Duration, bytes::Bytes), kameo_remote::GossipError>((latency, response))
         }));
@@ -649,13 +766,20 @@ async fn test_ask_max_inflight() {
     while let Some(result) = in_flight.next().await {
         let (latency, response) = result.unwrap();
         latencies.push(latency);
-        total_bytes += ask_bytes.len() + response.len();
+        total_bytes += ask_payload.len() + response.len();
         if remaining > 0 {
             let conn = connection_handle.clone();
-            let payload = ask_bytes.clone();
+            let payload = ask_payload.clone();
             in_flight.push(Box::pin(async move {
                 let request_start = Instant::now();
-                let response = conn.ask(payload).await?;
+                let response = conn
+                    .ask_actor(
+                        BENCH_ACTOR_ID,
+                        BENCH_TYPE_HASH,
+                        payload,
+                        Duration::from_secs(5),
+                    )
+                    .await?;
                 let latency = request_start.elapsed();
                 Ok::<(Duration, bytes::Bytes), kameo_remote::GossipError>((latency, response))
             }));

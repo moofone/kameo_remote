@@ -1,14 +1,11 @@
 [package]
 name = "kameo_remote"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [features]
 test-helpers = []
 io_uring = ["tokio-uring", "io-uring"]
-allow-non-zero-copy = []
-legacy_tell_bytes = []
-legacy_tell_bytes_unlocked = []
 
 [dependencies]
 async-trait = "0.1"

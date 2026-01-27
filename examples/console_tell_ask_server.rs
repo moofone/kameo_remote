@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing_subscriber::EnvFilter;
 
 /// Console tell/ask server (TLS).
 ///
@@ -20,7 +21,12 @@ async fn main() -> Result<()> {
         .install_default()
         .ok();
 
-    tracing_subscriber::fmt().init();
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("kameo_remote=warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init()
+        .ok();
 
     println!("🔐 Console Tell/Ask Server (TLS)");
     println!("================================\n");
@@ -37,9 +43,11 @@ async fn main() -> Result<()> {
     println!("Public key: {}\n", pub_path);
 
     let server_addr = "127.0.0.1:29200".parse()?;
+    let mut config = GossipConfig::default();
+    config.enable_peer_discovery = true;
+    config.ask_inflight_limit = 1024;
     let registry =
-        GossipRegistryHandle::new_with_tls(server_addr, secret_key, Some(GossipConfig::default()))
-            .await?;
+        GossipRegistryHandle::new_with_tls(server_addr, secret_key, Some(config)).await?;
 
     registry
         .registry

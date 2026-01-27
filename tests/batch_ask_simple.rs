@@ -56,11 +56,12 @@ async fn test_batch_ask_simple() -> Result<()> {
 
     // Test 2: Small batch
     {
-        let requests: Vec<Vec<u8>> = (0..10u32).map(|i| i.to_be_bytes().to_vec()).collect();
-        let request_refs: Vec<&[u8]> = requests.iter().map(|r| r.as_slice()).collect();
+        let requests: Vec<Bytes> = (0..10u32)
+            .map(|i| Bytes::from(i.to_be_bytes().to_vec()))
+            .collect();
 
         let start = Instant::now();
-        let receivers = conn.ask_batch(&request_refs).await?;
+        let receivers = conn.ask_batch(&requests).await?;
 
         let mut responses = Vec::new();
         for receiver in receivers {
@@ -83,13 +84,12 @@ async fn test_batch_ask_simple() -> Result<()> {
     // Test 3: Large batch
     {
         const BATCH_SIZE: usize = 100;
-        let requests: Vec<Vec<u8>> = (0..BATCH_SIZE as u32)
-            .map(|i| i.to_be_bytes().to_vec())
+        let requests: Vec<Bytes> = (0..BATCH_SIZE as u32)
+            .map(|i| Bytes::from(i.to_be_bytes().to_vec()))
             .collect();
-        let request_refs: Vec<&[u8]> = requests.iter().map(|r| r.as_slice()).collect();
 
         let start = Instant::now();
-        let receivers = conn.ask_batch(&request_refs).await?;
+        let receivers = conn.ask_batch(&requests).await?;
 
         let mut responses = Vec::new();
         for receiver in receivers {
@@ -135,12 +135,11 @@ async fn test_batch_ask_simple() -> Result<()> {
             let base = (task_id * BATCH_SIZE) as u32;
 
             let task = tokio::spawn(async move {
-                let requests: Vec<Vec<u8>> = (base..base + BATCH_SIZE as u32)
-                    .map(|i| i.to_be_bytes().to_vec())
+                let requests: Vec<Bytes> = (base..base + BATCH_SIZE as u32)
+                    .map(|i| Bytes::from(i.to_be_bytes().to_vec()))
                     .collect();
-                let request_refs: Vec<&[u8]> = requests.iter().map(|r| r.as_slice()).collect();
 
-                let receivers = conn_clone.ask_batch(&request_refs).await?;
+                let receivers = conn_clone.ask_batch(&requests).await?;
 
                 let mut responses = Vec::new();
                 for receiver in receivers {
@@ -236,11 +235,12 @@ async fn test_batch_ask_with_timeout() -> Result<()> {
     let conn = registry.get_connection_to_peer(&server_peer_id).await?;
 
     // Test batch with timeout
-    let requests: Vec<Vec<u8>> = (0..5u32).map(|i| i.to_be_bytes().to_vec()).collect();
-    let request_refs: Vec<&[u8]> = requests.iter().map(|r| r.as_slice()).collect();
+    let requests: Vec<Bytes> = (0..5u32)
+        .map(|i| Bytes::from(i.to_be_bytes().to_vec()))
+        .collect();
 
     let results = conn
-        .ask_batch_with_timeout(&request_refs, Duration::from_secs(1))
+        .ask_batch_with_timeout(&requests, Duration::from_secs(1))
         .await?;
 
     assert_eq!(results.len(), 5);

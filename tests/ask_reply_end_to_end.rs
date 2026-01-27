@@ -2,16 +2,17 @@ mod common;
 
 use bytes::Bytes;
 use common::{create_tls_node, wait_for_condition};
-use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler, RegistryMessage};
-use kameo_remote::GossipConfig;
+use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
+use kameo_remote::{typed, GossipConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-const TEST_ACTOR_ID: &str = "tls_test_actor";
-const TEST_TYPE_HASH: u32 = 0xA57A_A5C0;
+const TEST_ACTOR_NAME: &str = "tls_test_actor";
+const TEST_ACTOR_ID: u64 = typed::fnv1a_hash(TEST_ACTOR_NAME);
+const TEST_TYPE_HASH: u32 = (TEST_ACTOR_ID & 0xFFFF_FFFF) as u32;
 
 struct TestActorHandler;
 
@@ -36,18 +37,8 @@ impl ActorMessageHandler for TestActorHandler {
     }
 }
 
-fn encode_actor_ask(payload: impl Into<Vec<u8>>) -> Vec<u8> {
-    let payload = payload.into();
-    let message = RegistryMessage::ActorMessage {
-        actor_id: TEST_ACTOR_ID.to_string(),
-        type_hash: TEST_TYPE_HASH,
-        payload,
-        correlation_id: None,
-    };
-
-    rkyv::to_bytes::<rkyv::rancor::Error>(&message)
-        .expect("serialize actor message")
-        .to_vec()
+fn encode_actor_payload(payload: impl Into<Vec<u8>>) -> Bytes {
+    Bytes::from(payload.into())
 }
 
 /// Test true end-to-end ask/reply over TCP sockets
@@ -85,9 +76,17 @@ async fn test_end_to_end_ask_reply() {
     {
         let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
 
-        let request = Bytes::from(encode_actor_ask(b"Hello from test"));
+        let request = encode_actor_payload(b"Hello from test");
         let start = std::time::Instant::now();
-        let response = conn.ask(request).await.unwrap();
+        let response = conn
+            .ask_actor(
+                TEST_ACTOR_ID,
+                TEST_TYPE_HASH,
+                request,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
         let elapsed = start.elapsed();
 
         info!(
@@ -110,8 +109,15 @@ async fn test_end_to_end_ask_reply() {
             let handle = tokio::spawn(async move {
                 let request = format!("Concurrent request {}", i).into_bytes();
                 let payload_len = request.len();
-                let request_bytes = Bytes::from(encode_actor_ask(request));
-                let response = conn_clone.ask(request_bytes).await.unwrap();
+                let response = conn_clone
+                    .ask_actor(
+                        TEST_ACTOR_ID,
+                        TEST_TYPE_HASH,
+                        Bytes::from(request),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .unwrap();
                 (i, response, payload_len)
             });
             handles.push(handle);
@@ -147,8 +153,17 @@ async fn test_end_to_end_ask_reply() {
         // On Node A: Send the ask and wait for response
         let response_future = {
             let conn_clone = conn.clone();
-            let request_bytes = Bytes::from(encode_actor_ask(request_payload.clone()));
-            tokio::spawn(async move { conn_clone.ask(request_bytes).await })
+            let payload = Bytes::from(request_payload.clone());
+            tokio::spawn(async move {
+                conn_clone
+                    .ask_actor(
+                        TEST_ACTOR_ID,
+                        TEST_TYPE_HASH,
+                        payload,
+                        Duration::from_secs(5),
+                    )
+                    .await
+            })
         };
 
         // Give the message time to arrive at Node B
@@ -170,8 +185,16 @@ async fn test_end_to_end_ask_reply() {
         let start = std::time::Instant::now();
 
         for i in 0..num_requests {
-            let request = Bytes::from(encode_actor_ask(format!("Perf test {}", i).into_bytes()));
-            let response = conn.ask(request).await.unwrap();
+            let payload = Bytes::from(format!("Perf test {}", i).into_bytes());
+            let response = conn
+                .ask_actor(
+                    TEST_ACTOR_ID,
+                    TEST_TYPE_HASH,
+                    payload,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
             assert!(response.as_ref().starts_with(b"RESPONSE:"));
         }
 
@@ -247,36 +270,40 @@ async fn benchmark_streaming_ask_vs_ring_buffer() {
 
     let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
 
-    let payload_size = 256 * 1024; // 256KB (below default streaming threshold)
-    let payload = vec![0u8; payload_size];
-    let actor_id = 42u64;
-    let actor_id_str = actor_id.to_string();
-
-    let message = RegistryMessage::ActorMessage {
-        actor_id: actor_id_str,
-        type_hash: TEST_TYPE_HASH,
-        payload: payload.clone(),
-        correlation_id: None,
-    };
-    let request_bytes = Bytes::from(
-        rkyv::to_bytes::<rkyv::rancor::Error>(&message)
-            .unwrap()
-            .to_vec(),
-    );
+    // Test 1: Small payload - uses ring buffer
+    let small_payload_size = 256 * 1024; // 256KB (below default streaming threshold)
+    let small_payload_bytes = Bytes::from(vec![0u8; small_payload_size]);
 
     let iterations = 50;
 
     let start = std::time::Instant::now();
     for _ in 0..iterations {
-        let response = conn.ask(request_bytes.clone()).await.unwrap();
+        let response = conn
+            .ask_actor(
+                TEST_ACTOR_ID,
+                TEST_TYPE_HASH,
+                small_payload_bytes.clone(),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
         assert!(response.as_ref().starts_with(b"RESPONSE:"));
     }
     let ring_elapsed = start.elapsed();
 
+    // Test 2: Large payload - uses streaming automatically
+    let large_payload_size = 2 * 1024 * 1024; // 2MB (above default streaming threshold)
+    let large_payload_bytes = Bytes::from(vec![0u8; large_payload_size]);
+
     let start = std::time::Instant::now();
     for _ in 0..iterations {
         let response = conn
-            .ask_streaming(&payload, TEST_TYPE_HASH, actor_id, Duration::from_secs(3))
+            .ask_actor(
+                TEST_ACTOR_ID,
+                TEST_TYPE_HASH,
+                large_payload_bytes.clone(),
+                Duration::from_secs(10),
+            )
             .await
             .unwrap();
         assert!(response.as_ref().starts_with(b"RESPONSE:"));
@@ -285,11 +312,11 @@ async fn benchmark_streaming_ask_vs_ring_buffer() {
 
     println!(
         "Ring buffer ask ({} bytes): {:?} for {} iters",
-        payload_size, ring_elapsed, iterations
+        small_payload_size, ring_elapsed, iterations
     );
     println!(
         "Streaming ask ({} bytes): {:?} for {} iters",
-        payload_size, streaming_elapsed, iterations
+        large_payload_size, streaming_elapsed, iterations
     );
 
     handle_a.shutdown().await;

@@ -177,13 +177,14 @@ async fn test_basic_ask_correlation() {
                     "Delegated response for: {}",
                     String::from_utf8_lossy(&request)
                 );
-                reply_to.reply(response.as_bytes()).await.unwrap();
+                let payload = Bytes::from(response.into_bytes());
+                reply_to.reply(payload).await.unwrap();
             }
         });
 
         // Send an ask but delegate the reply
-        let request = b"Delegated request";
-        let reply_to = conn.ask_with_reply_to(request).await.unwrap();
+        let request = Bytes::from_static(b"Delegated request");
+        let reply_to = conn.ask_with_reply_to(request.clone()).await.unwrap();
 
         // Pass the ReplyTo to our "delegated actor"
         tx.send((request.to_vec(), reply_to)).await.unwrap();

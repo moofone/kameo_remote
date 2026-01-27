@@ -1,4 +1,4 @@
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use futures::FutureExt;
 use rkyv::Archive;
 use std::cell::UnsafeCell;
@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
 use sha2::{Digest, Sha256};
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     current_timestamp, framing,
     registry::{resolve_peer_addr, GossipRegistry, RegistryMessage, RegistryMessageFrame},
-    streaming, GossipError, Result,
+    streaming, GossipError, MessageType, Result,
 };
 
 // ==== SINGLE SOURCE OF TRUTH FOR ALL BUFFER SIZES ====
@@ -473,6 +473,10 @@ pub enum WritePayload {
         header: bytes::Bytes,
         payload: bytes::Bytes,
     },
+    ActorHeaderInline {
+        header: [u8; crate::framing::ACTOR_FRAME_HEADER_LEN],
+        payload: bytes::Bytes,
+    },
     HeaderInline {
         header: [u8; 16],
         header_len: u8,
@@ -505,6 +509,11 @@ impl std::fmt::Debug for WritePayload {
             WritePayload::HeaderPayload { header, payload } => f
                 .debug_struct("HeaderPayload")
                 .field("header_len", &header.len())
+                .field("payload_len", &payload.len())
+                .finish(),
+            WritePayload::ActorHeaderInline { payload, .. } => f
+                .debug_struct("ActorHeaderInline")
+                .field("header_len", &crate::framing::ACTOR_FRAME_HEADER_LEN)
                 .field("payload_len", &payload.len())
                 .finish(),
             WritePayload::HeaderInline {
@@ -565,6 +574,7 @@ pub struct WriteCommand {
     pub data: WritePayload,
     pub sequence: u64,
     pub permit: Option<OwnedSemaphorePermit>,
+    pub flush_hint: bool,
 }
 
 impl std::fmt::Debug for WriteCommand {
@@ -574,6 +584,7 @@ impl std::fmt::Debug for WriteCommand {
             .field("data", &self.data)
             .field("sequence", &self.sequence)
             .field("permit", &self.permit.is_some())
+            .field("flush_hint", &self.flush_hint)
             .finish()
     }
 }
@@ -760,8 +771,18 @@ pub struct VectoredWriteCommand {
 /// Commands for streaming operations
 #[derive(Debug)]
 enum StreamingCommand {
-    /// Direct write bytes for streaming
-    WriteBytes(bytes::Bytes),
+    /// StreamStart header (writer encodes on the stack)
+    StreamStart {
+        descriptor: streaming::StreamDescriptor,
+        correlation_id: u16,
+    },
+    /// StreamData header + payload (writer encodes header on the stack)
+    StreamData {
+        correlation_id: u16,
+        payload: bytes::Bytes,
+    },
+    /// StreamEnd header (writer encodes on the stack)
+    StreamEnd { correlation_id: u16 },
     /// Flush the writer
     Flush,
     /// Vectored write for header + payload (zero-copy)
@@ -811,6 +832,85 @@ async fn write_bytes_vectored_all<W: AsyncWrite + Unpin>(
                 idx += 1;
                 offset = 0;
             }
+        }
+    }
+
+    Ok(total_written)
+}
+
+async fn write_stream_start<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    descriptor: streaming::StreamDescriptor,
+    correlation_id: u16,
+) -> std::io::Result<usize> {
+    use tokio::io::AsyncWriteExt;
+
+    let header = streaming::encode_stream_start_frame(&descriptor, correlation_id);
+    writer.write_all(&header).await?;
+    Ok(header.len())
+}
+
+async fn write_stream_end<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    correlation_id: u16,
+) -> std::io::Result<usize> {
+    use tokio::io::AsyncWriteExt;
+
+    let header = streaming::encode_stream_end_header(correlation_id);
+    writer.write_all(&header).await?;
+    Ok(header.len())
+}
+
+async fn write_stream_data<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    correlation_id: u16,
+    payload: &bytes::Bytes,
+) -> std::io::Result<usize> {
+    use std::io::IoSlice;
+    use tokio::io::AsyncWriteExt;
+
+    let header = streaming::encode_stream_data_header(payload.len(), correlation_id)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+
+    let mut total_written = 0usize;
+    let mut header_off = 0usize;
+    let mut payload_off = 0usize;
+    let header_len = header.len();
+    let payload_len = payload.len();
+
+    while header_off < header_len || payload_off < payload_len {
+        let h = &header[header_off..header_len];
+        let p = &payload[payload_off..];
+        let mut slices = [IoSlice::new(h), IoSlice::new(p)];
+        let slice_count = if h.is_empty() {
+            slices[0] = IoSlice::new(p);
+            1
+        } else if p.is_empty() {
+            slices[0] = IoSlice::new(h);
+            1
+        } else {
+            2
+        };
+
+        let written = writer.write_vectored(&slices[..slice_count]).await?;
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write stream data",
+            ));
+        }
+        total_written += written;
+
+        if header_off < header_len {
+            let header_remaining = header_len - header_off;
+            if written < header_remaining {
+                header_off += written;
+                continue;
+            }
+            header_off = header_len;
+            payload_off += written - header_remaining;
+        } else {
+            payload_off += written;
         }
     }
 
@@ -906,6 +1006,7 @@ impl LockFreeStreamHandle {
                     writer_idle_for_task,
                     writer_notify_for_task,
                     streaming_rx,
+                    writer_addr,
                 )
                 .await;
                 // CRITICAL: Log when writer exits - this helps diagnose silent writer deaths
@@ -952,6 +1053,7 @@ impl LockFreeStreamHandle {
         writer_idle: Arc<AtomicBool>,
         writer_notify: Arc<Notify>,
         mut streaming_rx: mpsc::UnboundedReceiver<StreamingCommand>,
+        writer_addr: SocketAddr,
     ) where
         W: AsyncWrite + Unpin + Send + 'static,
     {
@@ -981,16 +1083,44 @@ impl LockFreeStreamHandle {
             while let Ok(cmd) = streaming_rx.try_recv() {
                 did_work = true;
                 match cmd {
-                    StreamingCommand::WriteBytes(data) => match writer.write_all(&data).await {
-                        Ok(_) => {
-                            bytes_written_counter.fetch_add(data.len(), Ordering::Relaxed);
-                            total_bytes_written += data.len();
+                    StreamingCommand::StreamStart {
+                        descriptor,
+                        correlation_id,
+                    } => match write_stream_start(&mut writer, descriptor, correlation_id).await {
+                        Ok(n) => {
+                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                            total_bytes_written += n;
                         }
                         Err(e) => {
-                            error!("Streaming write error: {}", e);
+                            error!("StreamStart write error: {}", e);
                             return;
                         }
                     },
+                    StreamingCommand::StreamData {
+                        correlation_id,
+                        payload,
+                    } => match write_stream_data(&mut writer, correlation_id, &payload).await {
+                        Ok(n) => {
+                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                            total_bytes_written += n;
+                        }
+                        Err(e) => {
+                            error!("StreamData write error: {}", e);
+                            return;
+                        }
+                    },
+                    StreamingCommand::StreamEnd { correlation_id } => {
+                        match write_stream_end(&mut writer, correlation_id).await {
+                            Ok(n) => {
+                                bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                total_bytes_written += n;
+                            }
+                            Err(e) => {
+                                error!("StreamEnd write error: {}", e);
+                                return;
+                            }
+                        }
+                    }
                     StreamingCommand::Flush => {
                         let _ = writer.flush().await;
                         flush_pending.store(false, Ordering::Release);
@@ -1000,6 +1130,12 @@ impl LockFreeStreamHandle {
                     StreamingCommand::VectoredWrite(cmd) => {
                         let VectoredWriteCommand { header, payload } = cmd;
                         let chunks = [header, payload];
+                        tracing::trace!(
+                            addr = %writer_addr,
+                            chunk_count = chunks.len(),
+                            total_bytes = chunks.iter().map(|c| c.len()).sum::<usize>(),
+                            "LockFreeStreamHandle::writer streaming vectored write command"
+                        );
                         match write_bytes_vectored_all(&mut writer, &chunks).await {
                             Ok(n) => {
                                 bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -1012,6 +1148,12 @@ impl LockFreeStreamHandle {
                         }
                     }
                     StreamingCommand::OwnedChunks(chunks) => {
+                        tracing::trace!(
+                            addr = %writer_addr,
+                            chunk_count = chunks.len(),
+                            total_bytes = chunks.iter().map(|c| c.len()).sum::<usize>(),
+                            "LockFreeStreamHandle::writer streaming owned chunks"
+                        );
                         match write_bytes_vectored_all(&mut writer, &chunks).await {
                             Ok(n) => {
                                 bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -1027,6 +1169,7 @@ impl LockFreeStreamHandle {
             }
 
             if !streaming_active.load(Ordering::Acquire) {
+                let mut force_flush = false;
                 let mut write_chunks = Vec::with_capacity(RING_BATCH_SIZE * 2);
                 let mut permits = Vec::with_capacity(RING_BATCH_SIZE);
 
@@ -1036,11 +1179,93 @@ impl LockFreeStreamHandle {
                         if let Some(permit) = command.permit.take() {
                             permits.push(permit);
                         }
+                        if command.flush_hint {
+                            force_flush = true;
+                        }
+
                         match command.data {
                             WritePayload::Single(data) => write_chunks.push(data),
                             WritePayload::HeaderPayload { header, payload } => {
                                 write_chunks.push(header);
                                 write_chunks.push(payload);
+                            }
+                            WritePayload::ActorHeaderInline { header, payload } => {
+                                const MAX_IOV: usize = 64;
+
+                                if !write_chunks.is_empty() {
+                                    let chunks = std::mem::take(&mut write_chunks);
+                                    let mut idx = 0;
+                                    let mut iov: [std::mem::MaybeUninit<IoSlice<'_>>; MAX_IOV] =
+                                        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+
+                                    for chunk in &chunks {
+                                        iov[idx].write(IoSlice::new(chunk));
+                                        idx += 1;
+                                        if idx == MAX_IOV {
+                                            let slices = unsafe {
+                                                std::slice::from_raw_parts(
+                                                    iov.as_ptr() as *const IoSlice<'_>,
+                                                    idx,
+                                                )
+                                            };
+                                            match writer.write_vectored(slices).await {
+                                                Ok(bytes_written) => {
+                                                    bytes_written_counter.fetch_add(
+                                                        bytes_written,
+                                                        Ordering::Relaxed,
+                                                    );
+                                                    total_bytes_written += bytes_written;
+                                                }
+                                                Err(_) => return,
+                                            }
+                                            idx = 0;
+                                        }
+                                    }
+
+                                    if idx > 0 {
+                                        let slices = unsafe {
+                                            std::slice::from_raw_parts(
+                                                iov.as_ptr() as *const IoSlice<'_>,
+                                                idx,
+                                            )
+                                        };
+                                        match writer.write_vectored(slices).await {
+                                            Ok(bytes_written) => {
+                                                bytes_written_counter
+                                                    .fetch_add(bytes_written, Ordering::Relaxed);
+                                                total_bytes_written += bytes_written;
+                                            }
+                                            Err(_) => return,
+                                        }
+                                    }
+                                }
+
+                                let mut offset = 0usize;
+                                while offset < crate::framing::ACTOR_FRAME_HEADER_LEN {
+                                    let chunk = &header[offset..];
+                                    match writer.write_vectored(&[IoSlice::new(chunk)]).await {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            total_bytes_written += n;
+                                            offset += n;
+                                        }
+                                        Err(_) => return,
+                                    }
+                                }
+
+                                let mut payload = payload;
+                                while !payload.is_empty() {
+                                    match writer.write_vectored(&[IoSlice::new(&payload)]).await {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            payload.advance(n);
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            total_bytes_written += n;
+                                        }
+                                        Err(_) => return,
+                                    }
+                                }
                             }
                             WritePayload::HeaderInline {
                                 header,
@@ -1465,6 +1690,20 @@ impl LockFreeStreamHandle {
                 }
 
                 drop(permits);
+
+                if force_flush {
+                    tracing::debug!(
+                        addr = %writer_addr,
+                        "LockFreeStreamHandle::writer forcing flush after control batch"
+                    );
+                    if let Err(e) = writer.flush().await {
+                        error!("Forced flush failed: {}", e);
+                        return;
+                    }
+                    bytes_since_flush = 0;
+                    last_flush = std::time::Instant::now();
+                    flush_pending.store(false, Ordering::Release);
+                }
             }
 
             bytes_since_flush += total_bytes_written;
@@ -1492,13 +1731,49 @@ impl LockFreeStreamHandle {
                         Some(cmd) = streaming_rx.recv() => {
                             writer_idle.store(false, Ordering::Release);
                             match cmd {
-                                StreamingCommand::WriteBytes(data) => {
-                                    if writer.write_all(&data).await.is_err() {
-                                        return;
+                                StreamingCommand::StreamStart {
+                                    descriptor,
+                                    correlation_id,
+                                } => match write_stream_start(
+                                    &mut writer,
+                                    descriptor,
+                                    correlation_id,
+                                )
+                                .await
+                                {
+                                    Ok(n) => {
+                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                        bytes_since_flush += n;
+                                        last_flush = std::time::Instant::now();
                                     }
-                                    bytes_written_counter.fetch_add(data.len(), Ordering::Relaxed);
-                                    bytes_since_flush += data.len();
-                                    last_flush = std::time::Instant::now();
+                                    Err(_) => return,
+                                },
+                                StreamingCommand::StreamData {
+                                    correlation_id,
+                                    payload,
+                                } => match write_stream_data(
+                                    &mut writer,
+                                    correlation_id,
+                                    &payload,
+                                )
+                                .await
+                                {
+                                    Ok(n) => {
+                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                        bytes_since_flush += n;
+                                        last_flush = std::time::Instant::now();
+                                    }
+                                    Err(_) => return,
+                                },
+                                StreamingCommand::StreamEnd { correlation_id } => {
+                                    match write_stream_end(&mut writer, correlation_id).await {
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            bytes_since_flush += n;
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                        Err(_) => return,
+                                    }
                                 }
                                 StreamingCommand::Flush => {
                                     let _ = writer.flush().await;
@@ -1542,13 +1817,49 @@ impl LockFreeStreamHandle {
                         Some(cmd) = streaming_rx.recv() => {
                             writer_idle.store(false, Ordering::Release);
                             match cmd {
-                                StreamingCommand::WriteBytes(data) => {
-                                    if writer.write_all(&data).await.is_err() {
-                                        return;
+                                StreamingCommand::StreamStart {
+                                    descriptor,
+                                    correlation_id,
+                                } => match write_stream_start(
+                                    &mut writer,
+                                    descriptor,
+                                    correlation_id,
+                                )
+                                .await
+                                {
+                                    Ok(n) => {
+                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                        bytes_since_flush += n;
+                                        last_flush = std::time::Instant::now();
                                     }
-                                    bytes_written_counter.fetch_add(data.len(), Ordering::Relaxed);
-                                    bytes_since_flush += data.len();
-                                    last_flush = std::time::Instant::now();
+                                    Err(_) => return,
+                                },
+                                StreamingCommand::StreamData {
+                                    correlation_id,
+                                    payload,
+                                } => match write_stream_data(
+                                    &mut writer,
+                                    correlation_id,
+                                    &payload,
+                                )
+                                .await
+                                {
+                                    Ok(n) => {
+                                        bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                        bytes_since_flush += n;
+                                        last_flush = std::time::Instant::now();
+                                    }
+                                    Err(_) => return,
+                                },
+                                StreamingCommand::StreamEnd { correlation_id } => {
+                                    match write_stream_end(&mut writer, correlation_id).await {
+                                        Ok(n) => {
+                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
+                                            bytes_since_flush += n;
+                                            last_flush = std::time::Instant::now();
+                                        }
+                                        Err(_) => return,
+                                    }
                                 }
                                 StreamingCommand::Flush => {
                                     let _ = writer.flush().await;
@@ -1666,13 +1977,19 @@ impl LockFreeStreamHandle {
             .expect("test: control permit acquisition failed")
     }
 
-    fn enqueue_with_permit(&self, data: WritePayload, permit: OwnedSemaphorePermit) -> Result<()> {
+    fn enqueue_with_permit(
+        &self,
+        data: WritePayload,
+        permit: OwnedSemaphorePermit,
+        flush_hint: bool,
+    ) -> Result<()> {
         let sequence = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
         let command = WriteCommand {
             channel_id: self.channel_id,
             data,
             sequence: sequence as u64,
             permit: Some(permit),
+            flush_hint,
         };
 
         if self.ring_buffer.try_push(command) {
@@ -1699,13 +2016,13 @@ impl LockFreeStreamHandle {
     #[inline]
     pub async fn write_bytes_ask(&self, data: bytes::Bytes) -> Result<()> {
         let permit = self.acquire_ask_permit().await;
-        self.enqueue_with_permit(WritePayload::Single(data), permit)
+        self.enqueue_with_permit(WritePayload::Single(data), permit, false)
     }
 
     #[inline]
     pub async fn write_bytes_control(&self, data: bytes::Bytes) -> Result<()> {
         let permit = self.acquire_control_permit().await?;
-        self.enqueue_with_permit(WritePayload::Single(data), permit)
+        self.enqueue_with_permit(WritePayload::Single(data), permit, true)
     }
 
     pub async fn write_header_and_payload_control(
@@ -1713,16 +2030,29 @@ impl LockFreeStreamHandle {
         header: bytes::Bytes,
         payload: bytes::Bytes,
     ) -> Result<()> {
+        tracing::debug!(
+            addr = %self.addr,
+            header_len = header.len(),
+            payload_len = payload.len(),
+            "LockFreeStreamHandle::write_header_and_payload_control"
+        );
         let permit = self.acquire_control_permit().await?;
-        self.enqueue_with_permit(WritePayload::HeaderPayload { header, payload }, permit)
+        self.enqueue_with_permit(
+            WritePayload::HeaderPayload { header, payload },
+            permit,
+            true,
+        )
     }
 
+    // CRITICAL_PATH: primary zero-copy send path for Bytes payloads.
     pub async fn write_header_and_payload_control_inline(
         &self,
         header: [u8; 16],
         header_len: u8,
         payload: bytes::Bytes,
     ) -> Result<()> {
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        crate::test_helpers::record_zero_copy_payload(payload.clone());
         let permit = self.acquire_control_permit().await?;
         self.enqueue_with_permit(
             WritePayload::HeaderInline {
@@ -1731,6 +2061,7 @@ impl LockFreeStreamHandle {
                 payload,
             },
             permit,
+            true,
         )
     }
 
@@ -1740,7 +2071,11 @@ impl LockFreeStreamHandle {
         payload: bytes::Bytes,
     ) -> Result<()> {
         let permit = self.acquire_ask_permit().await;
-        self.enqueue_with_permit(WritePayload::HeaderPayload { header, payload }, permit)
+        self.enqueue_with_permit(
+            WritePayload::HeaderPayload { header, payload },
+            permit,
+            false,
+        )
     }
 
     pub async fn write_header_and_payload_ask_inline(
@@ -1757,6 +2092,7 @@ impl LockFreeStreamHandle {
                 payload,
             },
             permit,
+            false,
         )
     }
 
@@ -1774,6 +2110,7 @@ impl LockFreeStreamHandle {
                 payload,
             },
             permit,
+            true,
         )
     }
 
@@ -1795,6 +2132,7 @@ impl LockFreeStreamHandle {
                 payload,
             },
             permit,
+            true,
         )
     }
 
@@ -1812,6 +2150,7 @@ impl LockFreeStreamHandle {
                 payload,
             },
             permit,
+            false,
         )
     }
 
@@ -1833,6 +2172,7 @@ impl LockFreeStreamHandle {
                 payload,
             },
             permit,
+            false,
         )
     }
 
@@ -1841,7 +2181,7 @@ impl LockFreeStreamHandle {
         B: Buf + Send + 'static,
     {
         let permit = self.acquire_control_permit().await?;
-        self.enqueue_with_permit(WritePayload::Buf(Box::new(buf)), permit)
+        self.enqueue_with_permit(WritePayload::Buf(Box::new(buf)), permit, true)
     }
 
     pub async fn write_header_and_payload_control_inline_buf<B>(
@@ -1861,6 +2201,62 @@ impl LockFreeStreamHandle {
                 payload: Box::new(payload),
             },
             permit,
+            true,
+        )
+    }
+
+    pub async fn write_header_and_payload_ask_inline_buf<B>(
+        &self,
+        header: [u8; 16],
+        header_len: u8,
+        payload: B,
+    ) -> Result<()>
+    where
+        B: Buf + Send + 'static,
+    {
+        let permit = self.acquire_ask_permit().await;
+        self.enqueue_with_permit(
+            WritePayload::HeaderInlineBuf {
+                header,
+                header_len,
+                payload: Box::new(payload),
+            },
+            permit,
+            false,
+        )
+    }
+
+    pub async fn write_actor_frame_inline(
+        &self,
+        header: [u8; crate::framing::ACTOR_FRAME_HEADER_LEN],
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        crate::test_helpers::record_zero_copy_payload(payload.clone());
+        let permit = self.acquire_control_permit().await?;
+        self.enqueue_with_permit(
+            WritePayload::ActorHeaderInline { header, payload },
+            permit,
+            true,
+        )
+    }
+
+    pub async fn write_ask_response_inline(
+        &self,
+        header: [u8; crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN],
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        crate::test_helpers::record_zero_copy_payload(payload.clone());
+        let permit = self.acquire_ask_permit().await;
+        self.enqueue_with_permit(
+            WritePayload::HeaderInline {
+                header,
+                header_len: crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN as u8,
+                payload,
+            },
+            permit,
+            false,
         )
     }
 
@@ -1869,7 +2265,7 @@ impl LockFreeStreamHandle {
         B: Buf + Send + 'static,
     {
         let permit = self.acquire_ask_permit().await;
-        self.enqueue_with_permit(WritePayload::Buf(Box::new(buf)), permit)
+        self.enqueue_with_permit(WritePayload::Buf(Box::new(buf)), permit, false)
     }
 
     /// Write Bytes to the lock-free ring buffer - NO BLOCKING, NO COPY
@@ -1881,6 +2277,7 @@ impl LockFreeStreamHandle {
             data: WritePayload::Single(data),
             sequence: sequence as u64,
             permit: None,
+            flush_hint: false,
         };
 
         // CRITICAL FIX: Don't silently drop messages when ring buffer is full!
@@ -1915,6 +2312,7 @@ impl LockFreeStreamHandle {
             data: WritePayload::HeaderPayload { header, payload },
             sequence: sequence as u64,
             permit: None,
+            flush_hint: false,
         };
 
         // CRITICAL FIX: Don't silently drop messages when ring buffer is full!
@@ -1952,6 +2350,7 @@ impl LockFreeStreamHandle {
             },
             sequence: sequence as u64,
             permit: None,
+            flush_hint: false,
         };
 
         if self.ring_buffer.try_push(command) {
@@ -1979,6 +2378,7 @@ impl LockFreeStreamHandle {
             data: WritePayload::Single(data),
             sequence: sequence as u64,
             permit: None,
+            flush_hint: false,
         };
 
         if self.ring_buffer.try_push(command) {
@@ -2005,6 +2405,7 @@ impl LockFreeStreamHandle {
             data: WritePayload::HeaderPayload { header, payload },
             sequence: sequence as u64,
             permit: None,
+            flush_hint: false,
         };
 
         if self.ring_buffer.try_push(command) {
@@ -2038,20 +2439,16 @@ impl LockFreeStreamHandle {
     }
 
     /// Write data with vectored batching - still no blocking
-    pub fn write_vectored_nonblocking(&self, data_chunks: &[&[u8]]) -> Result<()> {
+    pub fn write_vectored_nonblocking(&self, data_chunks: &[bytes::Bytes]) -> Result<()> {
         if data_chunks.is_empty() {
             return Ok(());
         }
 
         if data_chunks.len() == 1 {
-            return self.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data_chunks[0]));
+            return self.write_bytes_nonblocking(data_chunks[0].clone());
         }
 
-        let mut chunks = Vec::with_capacity(data_chunks.len());
-        for chunk in data_chunks {
-            chunks.push(bytes::Bytes::copy_from_slice(chunk));
-        }
-        self.write_vectored_nonblocking_bytes(chunks)
+        self.write_vectored_nonblocking_bytes(data_chunks.to_vec())
     }
 
     /// Write already-owned chunks without concatenation.
@@ -2068,16 +2465,15 @@ impl LockFreeStreamHandle {
     }
 
     /// Write large data in chunks to avoid blocking
-    pub fn write_chunked_nonblocking(&self, data: &[u8], chunk_size: usize) -> Result<()> {
+    pub fn write_chunked_nonblocking(&self, data: bytes::Bytes, chunk_size: usize) -> Result<()> {
         if data.is_empty() {
             return Ok(());
         }
 
-        let bytes = bytes::Bytes::copy_from_slice(data);
         let mut offset = 0usize;
-        while offset < bytes.len() {
-            let end = (offset + chunk_size).min(bytes.len());
-            let chunk = bytes.slice(offset..end);
+        while offset < data.len() {
+            let end = (offset + chunk_size).min(data.len());
+            let chunk = data.slice(offset..end);
             let _ = self.write_bytes_nonblocking(chunk);
             offset = end;
         }
@@ -2174,11 +2570,11 @@ impl LockFreeStreamHandle {
             flags: 0,
             reserved: 0,
         };
-        let header = streaming::encode_stream_start_frame(&descriptor, correlation_id);
         self.streaming_tx
-            .send(StreamingCommand::WriteBytes(bytes::Bytes::copy_from_slice(
-                &header,
-            )))
+            .send(StreamingCommand::StreamStart {
+                descriptor,
+                correlation_id,
+            })
             .map_err(|_| GossipError::Shutdown)?;
 
         // Stream chunks directly (zero-copy payload slices)
@@ -2186,18 +2582,14 @@ impl LockFreeStreamHandle {
         let total_chunks = total_len.div_ceil(CHUNK_SIZE);
         let mut idx = 0u32;
         let mut offset = 0usize;
-        let mut data_header = streaming::stream_data_header_template(correlation_id);
         while offset < total_len {
             let chunk_len = std::cmp::min(CHUNK_SIZE, total_len - offset);
-            let prefix = (framing::STREAM_HEADER_PREFIX_LEN + chunk_len) as u32;
-            data_header[..4].copy_from_slice(&prefix.to_be_bytes());
-            let header_bytes = bytes::Bytes::copy_from_slice(&data_header);
             let payload = msg.slice(offset..offset + chunk_len);
             self.streaming_tx
-                .send(StreamingCommand::VectoredWrite(VectoredWriteCommand {
-                    header: header_bytes,
+                .send(StreamingCommand::StreamData {
+                    correlation_id,
                     payload,
-                }))
+                })
                 .map_err(|_| GossipError::Shutdown)?;
 
             // Yield periodically to prevent blocking
@@ -2211,11 +2603,8 @@ impl LockFreeStreamHandle {
             offset += chunk_len;
         }
 
-        let header = streaming::encode_stream_end_header(correlation_id);
         self.streaming_tx
-            .send(StreamingCommand::WriteBytes(bytes::Bytes::copy_from_slice(
-                &header,
-            )))
+            .send(StreamingCommand::StreamEnd { correlation_id })
             .map_err(|_| GossipError::Shutdown)?;
         self.streaming_tx
             .send(StreamingCommand::Flush)
@@ -2230,7 +2619,94 @@ impl LockFreeStreamHandle {
         Ok(())
     }
 
-    async fn stream_large_message_internal_bytes(
+    /// Stream a large response payload with correlation_id tracking
+    /// Used for transparent response streaming - zero-copy
+    pub async fn stream_response_with_correlation(
+        &self,
+        msg: bytes::Bytes,
+        correlation_id: u16,
+    ) -> Result<()> {
+        use crate::current_timestamp;
+
+        const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+
+        // Acquire streaming mode atomically
+        while self
+            .streaming_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // Ensure we release streaming mode on exit
+        let _guard = StreamingGuard {
+            flag: self.streaming_active.clone(),
+        };
+
+        // Generate unique stream ID (for responses, actor_id and type_hash are 0)
+        let stream_id = current_timestamp();
+
+        // Emit StreamStart descriptor
+        let descriptor = streaming::StreamDescriptor {
+            stream_id,
+            payload_len: msg.len() as u64,
+            chunk_len: STREAM_CHUNK_SIZE as u32,
+            type_hash: 0, // Response - no type hash
+            actor_id: 0,  // Response - no actor ID
+            flags: 0,
+            reserved: 0,
+        };
+        self.streaming_tx
+            .send(StreamingCommand::StreamStart {
+                descriptor,
+                correlation_id,
+            })
+            .map_err(|_| GossipError::Shutdown)?;
+
+        // Stream chunks directly (zero-copy payload slices)
+        let total_len = msg.len();
+        let total_chunks = total_len.div_ceil(CHUNK_SIZE);
+        let mut idx = 0u32;
+        let mut offset = 0usize;
+        while offset < total_len {
+            let chunk_len = std::cmp::min(CHUNK_SIZE, total_len - offset);
+            let payload = msg.slice(offset..offset + chunk_len);
+            self.streaming_tx
+                .send(StreamingCommand::StreamData {
+                    correlation_id,
+                    payload,
+                })
+                .map_err(|_| GossipError::Shutdown)?;
+
+            // Yield periodically to prevent blocking
+            if total_chunks > 1 && idx.is_multiple_of(10) {
+                self.streaming_tx
+                    .send(StreamingCommand::Flush)
+                    .map_err(|_| GossipError::Shutdown)?;
+                tokio::task::yield_now().await;
+            }
+            idx += 1;
+            offset += chunk_len;
+        }
+
+        self.streaming_tx
+            .send(StreamingCommand::StreamEnd { correlation_id })
+            .map_err(|_| GossipError::Shutdown)?;
+        self.streaming_tx
+            .send(StreamingCommand::Flush)
+            .map_err(|_| GossipError::Shutdown)?;
+
+        debug!(
+            "✅ RESPONSE STREAMING: Successfully streamed {} MB response in {} chunks",
+            msg.len() as f64 / 1_048_576.0,
+            msg.len().div_ceil(CHUNK_SIZE)
+        );
+
+        Ok(())
+    }
+
+    async fn stream_large_message_internal(
         &self,
         msg: bytes::Bytes,
         type_hash: u32,
@@ -2241,27 +2717,11 @@ impl LockFreeStreamHandle {
             .await
     }
 
-    async fn stream_large_message_internal(
-        &self,
-        msg: &[u8],
-        type_hash: u32,
-        actor_id: u64,
-        correlation_id: u16,
-    ) -> Result<()> {
-        self.stream_large_message_internal_bytes(
-            bytes::Bytes::copy_from_slice(msg),
-            type_hash,
-            actor_id,
-            correlation_id,
-        )
-        .await
-    }
-
     /// Stream a large message directly to the socket, bypassing the ring buffer
     /// This provides maximum performance for large messages like PreBacktest
     pub async fn stream_large_message(
         &self,
-        msg: &[u8],
+        msg: bytes::Bytes,
         type_hash: u32,
         actor_id: u64,
     ) -> Result<()> {
@@ -2269,36 +2729,15 @@ impl LockFreeStreamHandle {
             .await
     }
 
-    pub async fn stream_large_message_bytes(
-        &self,
-        msg: bytes::Bytes,
-        type_hash: u32,
-        actor_id: u64,
-    ) -> Result<()> {
-        self.stream_large_message_internal_bytes(msg, type_hash, actor_id, 0)
-            .await
-    }
-
     /// Stream a large ask message directly to the socket with correlation ID.
     pub async fn stream_large_message_with_correlation(
         &self,
-        msg: &[u8],
+        msg: bytes::Bytes,
         type_hash: u32,
         actor_id: u64,
         correlation_id: u16,
     ) -> Result<()> {
         self.stream_large_message_internal(msg, type_hash, actor_id, correlation_id)
-            .await
-    }
-
-    pub async fn stream_large_message_with_correlation_bytes(
-        &self,
-        msg: bytes::Bytes,
-        type_hash: u32,
-        actor_id: u64,
-        correlation_id: u16,
-    ) -> Result<()> {
-        self.stream_large_message_internal_bytes(msg, type_hash, actor_id, correlation_id)
             .await
     }
 
@@ -2353,180 +2792,7 @@ impl Debug for LockFreeStreamHandle {
     }
 }
 
-/// Message types for seamless batching with tell()
-#[cfg_attr(
-    feature = "legacy_tell_bytes",
-    deprecated(
-        since = "0.1.0",
-        note = "TellMessage is deprecated. Switch to tell_bytes()/tell_typed() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-    )
-)]
-pub enum TellMessage<'a> {
-    Single(&'a [u8]),
-    Batch(Vec<&'a [u8]>),
-    BatchSlice(&'a [&'a [u8]]),
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> TellMessage<'a> {
-    pub fn single(data: &'a [u8]) -> Self {
-        Self::Single(data)
-    }
-
-    pub fn batch(messages: Vec<&'a [u8]>) -> Self {
-        Self::Batch(messages)
-    }
-
-    pub fn from_slice(messages: &'a [&'a [u8]]) -> Self {
-        if messages.len() == 1 {
-            Self::Single(messages[0])
-        } else {
-            Self::BatchSlice(messages)
-        }
-    }
-
-    pub async fn send_via(self, handle: &ConnectionHandle) -> Result<()> {
-        match self {
-            TellMessage::Single(data) => handle.tell_raw(data).await,
-            TellMessage::Batch(messages) => handle.tell_batch(&messages).await,
-            TellMessage::BatchSlice(messages) => handle.tell_batch(messages).await,
-        }
-    }
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<&'a [u8]> for TellMessage<'a> {
-    fn from(data: &'a [u8]) -> Self {
-        Self::Single(data)
-    }
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<Vec<&'a [u8]>> for TellMessage<'a> {
-    fn from(messages: Vec<&'a [u8]>) -> Self {
-        if messages.len() == 1 {
-            Self::Single(messages[0])
-        } else {
-            Self::Batch(messages)
-        }
-    }
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<&'a [&'a [u8]]> for TellMessage<'a> {
-    fn from(messages: &'a [&'a [u8]]) -> Self {
-        if messages.len() == 1 {
-            Self::Single(messages[0])
-        } else {
-            Self::BatchSlice(messages)
-        }
-    }
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a, const N: usize> From<&'a [u8; N]> for TellMessage<'a> {
-    fn from(data: &'a [u8; N]) -> Self {
-        Self::Single(data.as_slice())
-    }
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<&'a Vec<u8>> for TellMessage<'a> {
-    fn from(data: &'a Vec<u8>) -> Self {
-        Self::Single(data.as_slice())
-    }
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> TellMessage<'a> {
-    pub fn single(_: &'a [u8]) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-
-    pub fn batch(_: Vec<&'a [u8]>) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-
-    pub fn from_slice(_: &'a [&'a [u8]]) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-
-    pub async fn send_via(self, _: &ConnectionHandle) -> Result<()> {
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<&'a [u8]> for TellMessage<'a> {
-    fn from(_: &'a [u8]) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<Vec<&'a [u8]>> for TellMessage<'a> {
-    fn from(_: Vec<&'a [u8]>) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<&'a [&'a [u8]]> for TellMessage<'a> {
-    fn from(_: &'a [&'a [u8]]) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a, const N: usize> From<&'a [u8; N]> for TellMessage<'a> {
-    fn from(_: &'a [u8; N]) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[cfg_attr(not(feature = "legacy_tell_bytes"), allow(deprecated))]
-impl<'a> From<&'a Vec<u8>> for TellMessage<'a> {
-    fn from(_: &'a Vec<u8>) -> Self {
-        panic!("TellMessage requires the 'legacy_tell_bytes' feature or migration to tell_bytes()")
-    }
-}
-
-#[cfg(feature = "legacy_tell_bytes")]
-#[deprecated(
-    since = "0.1.0",
-    note = "tell_msg! macro is deprecated. Use tell_bytes()/tell_typed() or enable \
-'legacy_tell_bytes_unlocked' alongside 'legacy_tell_bytes' to temporarily opt back in."
-)]
-#[macro_export]
-macro_rules! tell_msg {
-    ($single:expr) => {
-        TellMessage::single($single)
-    };
-    ($($msg:expr),+ $(,)?) => {
-        TellMessage::batch(vec![$($msg),+])
-    };
-}
-
-#[cfg(not(feature = "legacy_tell_bytes"))]
-#[macro_export]
-macro_rules! tell_msg {
-    ($($msg:expr),+ $(,)?) => {
-        compile_error!("tell_msg! macro requires the 'legacy_tell_bytes' feature or migration to tell_bytes()/tell_typed() APIs");
-    };
-}
+/// Legacy `TellMessage` enum and `tell_msg!` macro were removed in 0.2.0.
 
 /// Connection pool for maintaining persistent TCP connections to peers
 /// All connections are persistent - there is no checkout/checkin
@@ -2560,7 +2826,44 @@ unsafe impl Send for ConnectionPool {}
 unsafe impl Sync for ConnectionPool {}
 
 /// Maximum number of pending responses (must be power of 2 for fast modulo)
-const PENDING_RESPONSES_SIZE: usize = 1024;
+// Keep the correlation tracker comfortably above the maximum ask_inflight_limit (1024)
+// so benchmarks that push 1K concurrent asks do not exhaust every slot and livelock.
+const PENDING_RESPONSES_SIZE: usize = 4096;
+
+/// Streaming accumulator for response chunks
+struct StreamingResponse {
+    chunks: Vec<bytes::Bytes>,
+    total_size: usize,
+}
+
+impl StreamingResponse {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            total_size: 0,
+        }
+    }
+
+    fn add_chunk(&mut self, chunk: bytes::Bytes) {
+        self.total_size += chunk.len();
+        self.chunks.push(chunk);
+    }
+
+    /// Zero-copy reassembly: combine all chunks into a single Bytes
+    fn finalize(self) -> bytes::Bytes {
+        if self.chunks.len() == 1 {
+            // Single chunk - return it directly
+            self.chunks.into_iter().next().unwrap()
+        } else {
+            // Multiple chunks - concatenate (zero-copy within each chunk)
+            let mut combined = bytes::BytesMut::with_capacity(self.total_size);
+            for chunk in self.chunks {
+                combined.put(chunk);
+            }
+            combined.freeze()
+        }
+    }
+}
 
 /// Pending response slot
 struct PendingResponseSlot {
@@ -2568,6 +2871,10 @@ struct PendingResponseSlot {
     in_use: AtomicBool,
     ready: AtomicBool,
     response: UnsafeCell<MaybeUninit<bytes::Bytes>>,
+    /// Streaming accumulator (None if not streaming)
+    streaming: UnsafeCell<MaybeUninit<StreamingResponse>>,
+    /// Flag indicating if we're receiving a streamed response
+    is_streaming: AtomicBool,
 }
 
 unsafe impl Sync for PendingResponseSlot {}
@@ -2576,8 +2883,8 @@ unsafe impl Sync for PendingResponseSlot {}
 pub(crate) struct CorrelationTracker {
     /// Next correlation ID to use
     next_id: AtomicU16,
-    /// Fixed-size array of pending responses
-    pending: [PendingResponseSlot; PENDING_RESPONSES_SIZE],
+    /// Fixed-size heap-allocated array of pending responses
+    pending: Box<[PendingResponseSlot]>,
 }
 
 impl std::fmt::Debug for CorrelationTracker {
@@ -2590,19 +2897,31 @@ impl std::fmt::Debug for CorrelationTracker {
 
 impl CorrelationTracker {
     fn new() -> Arc<Self> {
-        let pending = std::array::from_fn(|_| PendingResponseSlot {
-            notify: tokio::sync::Notify::new(),
-            in_use: AtomicBool::new(false),
-            ready: AtomicBool::new(false),
-            response: UnsafeCell::new(MaybeUninit::uninit()),
-        });
+        let mut slots = Vec::with_capacity(PENDING_RESPONSES_SIZE);
+        for _ in 0..PENDING_RESPONSES_SIZE {
+            slots.push(PendingResponseSlot {
+                notify: tokio::sync::Notify::new(),
+                in_use: AtomicBool::new(false),
+                ready: AtomicBool::new(false),
+                response: UnsafeCell::new(MaybeUninit::uninit()),
+                streaming: UnsafeCell::new(MaybeUninit::uninit()),
+                is_streaming: AtomicBool::new(false),
+            });
+        }
         Arc::new(Self {
             next_id: AtomicU16::new(1),
-            pending,
+            pending: slots.into_boxed_slice(),
         })
     }
 
     fn clear_response(slot_ref: &PendingResponseSlot) {
+        // Clean up streaming state if present
+        if slot_ref.is_streaming.swap(false, Ordering::AcqRel) {
+            unsafe {
+                (*slot_ref.streaming.get()).assume_init_drop();
+            }
+        }
+        // Clean up regular response
         if slot_ref.ready.swap(false, Ordering::AcqRel) {
             unsafe {
                 (*slot_ref.response.get()).assume_init_drop();
@@ -2630,15 +2949,12 @@ impl CorrelationTracker {
             let slot_ref = &self.pending[slot];
             if !slot_ref.in_use.swap(true, Ordering::AcqRel) {
                 Self::clear_response(slot_ref);
-                debug!(
-                    "CorrelationTracker: Allocated correlation_id {} in slot {}",
-                    id, slot
-                );
+                trace!(correlation_id = id, slot, "correlation tracker allocated");
                 return id;
             }
 
             // Slot is occupied, try next ID
-            debug!("CorrelationTracker: Slot {} occupied, trying next ID", slot);
+            trace!(slot, "correlation tracker slot occupied, trying next id");
         }
     }
 
@@ -2648,13 +2964,65 @@ impl CorrelationTracker {
         self.pending[slot].in_use.load(Ordering::Acquire)
     }
 
-    /// Complete a pending request with a response
+    /// Complete a pending request with a response (non-streaming)
     pub(crate) fn complete(&self, correlation_id: u16, response: bytes::Bytes) {
         let slot = (correlation_id as usize) % PENDING_RESPONSES_SIZE;
         let slot_ref = &self.pending[slot];
         if !slot_ref.in_use.load(Ordering::Acquire) {
             return;
         }
+        Self::clear_response(slot_ref);
+        unsafe {
+            (*slot_ref.response.get()).write(response);
+        }
+        slot_ref.ready.store(true, Ordering::Release);
+        slot_ref.notify.notify_waiters();
+        trace!(correlation_id, slot, "correlation tracker completed");
+    }
+
+    /// Start receiving a streamed response
+    pub(crate) fn start_streaming(&self, correlation_id: u16) -> bool {
+        let slot = (correlation_id as usize) % PENDING_RESPONSES_SIZE;
+        let slot_ref = &self.pending[slot];
+        if !slot_ref.in_use.load(Ordering::Acquire) {
+            return false;
+        }
+        // Initialize streaming accumulator
+        unsafe {
+            (*slot_ref.streaming.get()).write(StreamingResponse::new());
+        }
+        slot_ref.is_streaming.store(true, Ordering::Release);
+        true
+    }
+
+    /// Add a chunk to a streamed response
+    pub(crate) fn add_streaming_chunk(&self, correlation_id: u16, chunk: bytes::Bytes) -> bool {
+        let slot = (correlation_id as usize) % PENDING_RESPONSES_SIZE;
+        let slot_ref = &self.pending[slot];
+        if !slot_ref.is_streaming.load(Ordering::Acquire) {
+            return false;
+        }
+        unsafe {
+            (*slot_ref.streaming.get())
+                .assume_init_mut()
+                .add_chunk(chunk);
+        }
+        true
+    }
+
+    /// Complete a streamed response
+    pub(crate) fn complete_streaming(&self, correlation_id: u16) {
+        let slot = (correlation_id as usize) % PENDING_RESPONSES_SIZE;
+        let slot_ref = &self.pending[slot];
+        if !slot_ref.is_streaming.load(Ordering::Acquire) {
+            return;
+        }
+        // Finalize the stream
+        let response = unsafe {
+            let stream = (*slot_ref.streaming.get()).assume_init_read();
+            stream.finalize()
+        };
+        // Store the final response
         Self::clear_response(slot_ref);
         unsafe {
             (*slot_ref.response.get()).write(response);
@@ -2691,6 +3059,7 @@ impl CorrelationTracker {
                 Ok(()) => continue,
                 Err(_) => {
                     slot_ref.in_use.store(false, Ordering::Release);
+                    trace!(correlation_id, slot, "correlation tracker timeout");
                     Self::clear_response(slot_ref);
                     return Err(crate::GossipError::Timeout);
                 }
@@ -2728,137 +3097,20 @@ impl std::fmt::Debug for ConnectionHandle {
     }
 }
 
-/// Delegated reply sender for asynchronous response handling
-/// Allows passing around the ability to reply to a request without blocking the original caller
-pub struct DelegatedReplySender {
-    sender: tokio::sync::oneshot::Sender<bytes::Bytes>,
-    receiver: tokio::sync::oneshot::Receiver<bytes::Bytes>,
-    request_len: usize,
-    timeout: Option<Duration>,
-    created_at: std::time::Instant,
-}
-
-impl DelegatedReplySender {
-    /// Create a new delegated reply sender
-    pub fn new(
-        sender: tokio::sync::oneshot::Sender<bytes::Bytes>,
-        receiver: tokio::sync::oneshot::Receiver<bytes::Bytes>,
-        request_len: usize,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
-            request_len,
-            timeout: None,
-            created_at: std::time::Instant::now(),
-        }
-    }
-
-    /// Create a new delegated reply sender with timeout
-    pub fn new_with_timeout(
-        sender: tokio::sync::oneshot::Sender<bytes::Bytes>,
-        receiver: tokio::sync::oneshot::Receiver<bytes::Bytes>,
-        request_len: usize,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
-            request_len,
-            timeout: Some(timeout),
-            created_at: std::time::Instant::now(),
-        }
-    }
-
-    /// Send a reply using this delegated sender
-    /// This can be called from anywhere in the code to complete the request-response cycle
-    pub fn reply(self, response: bytes::Bytes) -> Result<()> {
-        match self.sender.send(response) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "Reply receiver was dropped",
-            ))),
-        }
-    }
-
-    /// Send a reply with error
-    pub fn reply_error(self, error: &str) -> Result<()> {
-        let error_response = bytes::Bytes::from(format!("ERROR:{}", error).into_bytes());
-        self.reply(error_response)
-    }
-
-    /// Wait for the reply with optional timeout
-    pub async fn wait_for_reply(self) -> Result<bytes::Bytes> {
-        if let Some(timeout) = self.timeout {
-            match tokio::time::timeout(timeout, self.receiver).await {
-                Ok(Ok(response)) => Ok(response),
-                Ok(Err(_)) => Err(GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Reply sender was dropped",
-                ))),
-                Err(_) => Err(GossipError::Timeout),
-            }
-        } else {
-            match self.receiver.await {
-                Ok(response) => Ok(response),
-                Err(_) => Err(GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Reply sender was dropped",
-                ))),
-            }
-        }
-    }
-
-    /// Wait for the reply with a custom timeout
-    pub async fn wait_for_reply_with_timeout(self, timeout: Duration) -> Result<bytes::Bytes> {
-        match tokio::time::timeout(timeout, self.receiver).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "Reply sender was dropped",
-            ))),
-            Err(_) => Err(GossipError::Timeout),
-        }
-    }
-
-    /// Get the original request length (useful for creating mock responses)
-    pub fn request_len(&self) -> usize {
-        self.request_len
-    }
-
-    /// Get the elapsed time since the request was made
-    pub fn elapsed(&self) -> Duration {
-        self.created_at.elapsed()
-    }
-
-    /// Check if this reply sender has timed out
-    pub fn is_timed_out(&self) -> bool {
-        if let Some(timeout) = self.timeout {
-            self.created_at.elapsed() > timeout
-        } else {
-            false
-        }
-    }
-
-    /// Create a mock reply for testing (simulates the original ask() behavior)
-    pub fn create_mock_reply(&self) -> bytes::Bytes {
-        bytes::Bytes::from(format!("RESPONSE:{}", self.request_len).into_bytes())
-    }
-}
-
-impl std::fmt::Debug for DelegatedReplySender {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DelegatedReplySender")
-            .field("request_len", &self.request_len)
-            .field("timeout", &self.timeout)
-            .field("elapsed", &self.elapsed())
-            .field("is_timed_out", &self.is_timed_out())
-            .finish()
-    }
-}
-
 impl ConnectionHandle {
+    #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+    pub fn from_parts_for_testing(
+        addr: SocketAddr,
+        stream_handle: Arc<LockFreeStreamHandle>,
+    ) -> Self {
+        Self {
+            addr,
+            stream_handle,
+            correlation: CorrelationTracker::new(),
+            peer_capabilities: None,
+        }
+    }
+
     fn peer_supports_streaming(&self) -> bool {
         self.peer_capabilities
             .as_ref()
@@ -2884,38 +3136,33 @@ impl ConnectionHandle {
             .await
     }
 
-    /// Send raw bytes without any framing - used by ReplyTo
-    #[cfg(feature = "legacy_tell_bytes")]
-    pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
-        self.stream_handle
-            .write_bytes_control(bytes::Bytes::copy_from_slice(data))
-            .await
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "send_raw_bytes() is disabled; use tell_bytes()/tell_typed() or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
-        let _ = data;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
     /// Send a response payload with framing, without copying the payload.
+    /// Automatically streams large responses (zero-copy transparent streaming).
     pub async fn send_response_bytes(
         &self,
         correlation_id: u16,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        let header = framing::write_ask_response_header(
-            crate::MessageType::Response,
-            correlation_id,
-            payload.len(),
-        );
+        let threshold = self.streaming_threshold();
 
-        self.stream_handle
-            .write_header_and_payload_control_inline(header, 16, payload)
-            .await
+        // Use streaming for large responses
+        if payload.len() > threshold {
+            // Stream the response with correlation_id
+            self.stream_handle
+                .stream_response_with_correlation(payload, correlation_id)
+                .await
+        } else {
+            // Small response - send directly
+            let header = framing::write_ask_response_header(
+                crate::MessageType::Response,
+                correlation_id,
+                payload.len(),
+            );
+
+            self.stream_handle
+                .write_ask_response_inline(header, payload)
+                .await
+        }
     }
 
     /// Send a response payload using a Buf without copying.
@@ -2965,61 +3212,13 @@ impl ConnectionHandle {
     /// Stream a large message directly - MAXIMUM PERFORMANCE
     pub async fn stream_large_message(
         &self,
-        msg: &[u8],
+        msg: bytes::Bytes,
         type_hash: u32,
         actor_id: u64,
     ) -> Result<()> {
         self.ensure_streaming()?;
         self.stream_handle
             .stream_large_message(msg, type_hash, actor_id)
-            .await
-    }
-
-    /// Stream a large ask message directly and wait for response (lock-free).
-    pub async fn ask_streaming(
-        &self,
-        msg: &[u8],
-        type_hash: u32,
-        actor_id: u64,
-        timeout: Duration,
-    ) -> Result<bytes::Bytes> {
-        self.ensure_streaming()?;
-        let correlation_id = self.correlation.allocate();
-        if let Err(e) = self
-            .stream_handle
-            .stream_large_message_with_correlation(msg, type_hash, actor_id, correlation_id)
-            .await
-        {
-            self.correlation.cancel(correlation_id);
-            return Err(e);
-        }
-
-        self.correlation
-            .wait_for_response(correlation_id, timeout)
-            .await
-    }
-
-    /// Stream a large ask message using owned Bytes (avoids payload copy).
-    pub async fn ask_streaming_bytes(
-        &self,
-        msg: bytes::Bytes,
-        type_hash: u32,
-        actor_id: u64,
-        timeout: Duration,
-    ) -> Result<bytes::Bytes> {
-        self.ensure_streaming()?;
-        let correlation_id = self.correlation.allocate();
-        if let Err(e) = self
-            .stream_handle
-            .stream_large_message_with_correlation_bytes(msg, type_hash, actor_id, correlation_id)
-            .await
-        {
-            self.correlation.cancel(correlation_id);
-            return Err(e);
-        }
-
-        self.correlation
-            .wait_for_response(correlation_id, timeout)
             .await
     }
 
@@ -3031,47 +3230,86 @@ impl ConnectionHandle {
         self.stream_handle.streaming_threshold()
     }
 
-    /// Raw tell() - LOCK-FREE write (used internally)
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
-        let mut message = bytes::BytesMut::with_capacity(4 + data.len());
-        message.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        message.extend_from_slice(data);
-
-        self.stream_handle
-            .write_bytes_control(message.freeze())
-            .await
-    }
-
-    /// Raw tell() - disabled without `legacy_tell_bytes`
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "tell_raw() is disabled; enable the 'legacy_tell_bytes' feature or switch to tell_bytes()/tell_typed()"
-    )]
-    pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
-        let _ = data;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
     /// Tell using owned bytes to avoid payload copies.
+    // CRITICAL_PATH: zero-copy tell() entry point; guard with coverage + debug asserts.
     pub async fn tell_bytes(&self, data: bytes::Bytes) -> Result<()> {
-        let mut header = [0u8; 16]; // Changed from 8 to 16 for alignment
-        header[..4].copy_from_slice(&(data.len() as u32).to_be_bytes());
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        crate::test_helpers::record_zero_copy_payload(data.clone());
+        crate::telemetry::gossip_zero_copy::record_outbound_frame(
+            "connection_handle::tell_bytes",
+            4 + data.len(),
+        );
 
+        // Legacy tell bytes keep the compact header for backwards compatibility.
+        let mut header = [0u8; 16];
+        header[..4].copy_from_slice(&(data.len() as u32).to_be_bytes());
         self.stream_handle
             .write_header_and_payload_control_inline(header, 4, data)
             .await
     }
 
+    fn actor_frame_header(
+        msg_type: MessageType,
+        correlation_id: u16,
+        actor_id: u64,
+        type_hash: u32,
+        payload_len: usize,
+    ) -> Result<[u8; framing::ACTOR_FRAME_HEADER_LEN]> {
+        if payload_len > u32::MAX as usize {
+            return Err(GossipError::MessageTooLarge {
+                size: payload_len,
+                max: u32::MAX as usize,
+            });
+        }
+
+        let total_size = framing::ACTOR_HEADER_LEN + payload_len;
+        let mut header = [0u8; framing::ACTOR_FRAME_HEADER_LEN];
+        header[..4].copy_from_slice(&(total_size as u32).to_be_bytes());
+        header[4] = msg_type as u8;
+        header[5..7].copy_from_slice(&correlation_id.to_be_bytes());
+        header[16..24].copy_from_slice(&actor_id.to_be_bytes());
+        header[24..28].copy_from_slice(&type_hash.to_be_bytes());
+        header[28..32].copy_from_slice(&(payload_len as u32).to_be_bytes());
+        Ok(header)
+    }
+
+    /// Tell a remote actor directly using the ActorTell frame layout.
+    pub async fn tell_actor(
+        &self,
+        actor_id: u64,
+        type_hash: u32,
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        tracing::debug!(
+            addr = %self.addr,
+            actor_id,
+            type_hash = format_args!("{:#x}", type_hash),
+            payload_len = payload.len(),
+            "ConnectionHandle::tell_actor"
+        );
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        crate::test_helpers::record_zero_copy_payload(payload.clone());
+
+        let header = Self::actor_frame_header(
+            MessageType::ActorTell,
+            0,
+            actor_id,
+            type_hash,
+            payload.len(),
+        )?;
+
+        crate::telemetry::gossip_zero_copy::record_outbound_frame(
+            "connection_handle::tell_actor",
+            framing::ACTOR_FRAME_HEADER_LEN + payload.len(),
+        );
+
+        self.stream_handle
+            .write_actor_frame_inline(header, payload)
+            .await
+    }
+
     /// Tell multiple messages using owned bytes (zero copy per entry).
+    // CRITICAL_PATH: ensures batching never clones payload content.
     pub async fn tell_bytes_batch(&self, messages: &[bytes::Bytes]) -> Result<()> {
         for msg in messages {
             self.tell_bytes(msg.clone()).await?;
@@ -3079,6 +3317,7 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
         Ok(())
     }
 
+    // CRITICAL_PATH: typed tell() path; preserves pooled buffer ownership.
     async fn send_typed_payload<T>(&self, payload: crate::typed::PooledPayload) -> Result<()>
     where
         T: crate::typed::WireEncode,
@@ -3093,12 +3332,17 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
             if typed_tell_capture_enabled() {
                 let mut capture = bytes::BytesMut::with_capacity(prefix_len as usize + payload_len);
                 if let Some(prefix) = prefix_padded {
-                    capture.extend_from_slice(&prefix[..prefix_len as usize]);
+                    capture.put_slice(&prefix[..prefix_len as usize]);
                 }
-                capture.extend_from_slice(payload.as_bytes());
+                capture.put_slice(payload.as_bytes());
                 crate::test_helpers::record_raw_payload(capture.freeze());
             }
         }
+
+        crate::telemetry::gossip_zero_copy::record_outbound_frame(
+            "connection_handle::send_typed_payload",
+            4 + payload_len + prefix_len as usize,
+        );
 
         self.stream_handle
             .write_pooled_control_inline(header, 4, prefix_padded, prefix_len, payload)
@@ -3106,6 +3350,7 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
     }
 
     /// Tell with typed payload (rkyv) and debug-only type hash verification.
+    // CRITICAL_PATH: typed zero-copy entry point (delegates to send_typed_payload()).
     pub async fn tell_typed<T>(&self, value: &T) -> Result<()>
     where
         T: crate::typed::WireEncode,
@@ -3135,196 +3380,9 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
     }
 
     /// Send a pre-formatted binary message (already has length prefix)
-    pub async fn send_binary_message(&self, message: &[u8]) -> Result<()> {
+    pub async fn send_binary_message(&self, message: bytes::Bytes) -> Result<()> {
         // Message already has length prefix, send as-is
-        self.stream_handle
-            .write_bytes_control(bytes::Bytes::copy_from_slice(message))
-            .await
-    }
-
-    /// Smart tell() - accepts TellMessage with automatic batch detection
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn tell<'a, T: Into<TellMessage<'a>>>(&self, message: T) -> Result<()> {
-        let tell_message = message.into();
-        tell_message.send_via(self).await
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "tell() is disabled; use tell_bytes()/tell_typed() or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn tell<'a, T: Into<TellMessage<'a>>>(&self, message: T) -> Result<()> {
-        let _ = message.into();
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Smart tell() - automatically uses batching for Vec<T>
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn tell_smart<T: AsRef<[u8]>>(&self, payload: &[T]) -> Result<()> {
-        if payload.len() == 1 {
-            self.tell(payload[0].as_ref()).await
-        } else {
-            let batch: Vec<&[u8]> = payload.iter().map(|item| item.as_ref()).collect();
-            self.tell_batch(&batch).await
-        }
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(note = "tell_smart() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
-    pub async fn tell_smart<T: AsRef<[u8]>>(&self, payload: &[T]) -> Result<()> {
-        let _ = payload;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Tell with automatic batching detection
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn tell_auto(&self, data: &[u8]) -> Result<()> {
-        self.tell(data).await
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(note = "tell_auto() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
-    pub async fn tell_auto(&self, data: &[u8]) -> Result<()> {
-        let _ = data;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Tell multiple messages with a single call
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn tell_many<T: AsRef<[u8]>>(&self, messages: &[T]) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        if messages.len() == 1 {
-            self.tell(messages[0].as_ref()).await
-        } else {
-            let batch: Vec<&[u8]> = messages.iter().map(|msg| msg.as_ref()).collect();
-            self.tell_batch(&batch).await
-        }
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(note = "tell_many() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
-    pub async fn tell_many<T: AsRef<[u8]>>(&self, messages: &[T]) -> Result<()> {
-        let _ = messages;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Send a TellMessage (single or batch) - same as tell() but explicit
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn send_tell_message(&self, message: TellMessage<'_>) -> Result<()> {
-        message.send_via(self).await
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "send_tell_message() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn send_tell_message(&self, _message: TellMessage<'_>) -> Result<()> {
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Universal send() - detects single vs multiple messages automatically
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn send_messages(&self, messages: &[&[u8]]) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        if messages.len() == 1 {
-            self.tell_raw(messages[0]).await
-        } else {
-            self.tell_batch(messages).await
-        }
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "send_messages() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn send_messages(&self, messages: &[&[u8]]) -> Result<()> {
-        let _ = messages;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Batch tell() for multiple messages - LOCK-FREE
-    #[cfg(feature = "legacy_tell_bytes")]
-    #[cfg_attr(
-        feature = "legacy_tell_bytes",
-        deprecated(
-            since = "0.1.0",
-            note = "Legacy tell() bytes path is deprecated. Use tell_typed()/tell_bytes() \
-or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporarily opt back in."
-        )
-    )]
-    pub async fn tell_batch(&self, messages: &[&[u8]]) -> Result<()> {
-        let total_size: usize = messages.iter().map(|m| 4 + m.len()).sum();
-        let mut batch_buffer = bytes::BytesMut::with_capacity(total_size);
-
-        for msg in messages {
-            batch_buffer.extend_from_slice(&(msg.len() as u32).to_be_bytes());
-            batch_buffer.extend_from_slice(msg);
-        }
-
-        self.stream_handle
-            .write_bytes_control(batch_buffer.freeze())
-            .await
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(note = "tell_batch() is disabled; use tell_bytes() or enable 'legacy_tell_bytes'")]
-    pub async fn tell_batch(&self, messages: &[&[u8]]) -> Result<()> {
-        let _ = messages;
-        Err(GossipError::LegacyTellApiDisabled)
+        self.stream_handle.write_bytes_control(message).await
     }
 
     /// Direct access to try_send for maximum performance testing
@@ -3336,25 +3394,81 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
         )))
     }
 
-    /// Send raw bytes through existing connection (zero-copy where possible)
-    #[cfg(feature = "legacy_tell_bytes")]
-    pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
-        self.tell_raw(data).await
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "send_raw() is disabled; use tell_bytes()/tell_typed() or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
-        let _ = data;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
     /// Ask using owned bytes to avoid payload copies. Returns response as Bytes.
     pub async fn ask(&self, request: bytes::Bytes) -> Result<bytes::Bytes> {
         self.ask_with_timeout(request, Duration::from_secs(30))
             .await
+    }
+
+    /// Direct actor ask() using zero-copy ActorAsk frame (internal/crate-private).
+    ///
+    /// # Note
+    /// This is marked as deprecated in favor of using the simpler `ask()` API.
+    /// The `ask()` method will route to this internally when needed by the kameo integration layer.
+    ///
+    /// This remains public for now for backwards compatibility with existing code,
+    /// but new code should use `ask()` instead.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use ask() instead - this will be made internal in a future release"
+    )]
+    pub async fn ask_actor(
+        &self,
+        actor_id: u64,
+        type_hash: u32,
+        payload: bytes::Bytes,
+        timeout: Duration,
+    ) -> Result<bytes::Bytes> {
+        tracing::debug!(
+            addr = %self.addr,
+            actor_id,
+            type_hash = format_args!("{:#x}", type_hash),
+            payload_len = payload.len(),
+            "ConnectionHandle::ask_actor"
+        );
+        trace!(
+            addr = %self.addr,
+            payload_len = payload.len(),
+            "ask_actor sending request"
+        );
+        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+        crate::test_helpers::record_zero_copy_payload(payload.clone());
+
+        let correlation_id = self.correlation.allocate();
+        let header = Self::actor_frame_header(
+            MessageType::ActorAsk,
+            correlation_id,
+            actor_id,
+            type_hash,
+            payload.len(),
+        )?;
+
+        crate::telemetry::gossip_zero_copy::record_outbound_frame(
+            "connection_handle::ask_actor",
+            framing::ACTOR_FRAME_HEADER_LEN + payload.len(),
+        );
+
+        if let Err(e) = self
+            .stream_handle
+            .write_actor_frame_inline(header, payload)
+            .await
+        {
+            self.correlation.cancel(correlation_id);
+            return Err(e);
+        }
+
+        let result = self
+            .correlation
+            .wait_for_response(correlation_id, timeout)
+            .await;
+
+        trace!(
+            addr = %self.addr,
+            correlation_id,
+            success = result.is_ok(),
+            "ask_actor wait completed"
+        );
+        result
     }
 
     /// Ask with typed request and return a zero-copy archived response.
@@ -3456,17 +3570,7 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
     ) -> Result<bytes::Bytes> {
         let correlation_id = self.correlation.allocate();
 
-        let header = framing::write_ask_response_header(
-            crate::MessageType::Ask,
-            correlation_id,
-            request.len(),
-        );
-
-        if let Err(e) = self
-            .stream_handle
-            .write_header_and_payload_ask_inline(header, 16, request)
-            .await
-        {
+        if let Err(e) = self.send_ask_frame(correlation_id, request).await {
             self.correlation.cancel(correlation_id);
             return Err(e);
         }
@@ -3476,22 +3580,36 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
             .await
     }
 
-    /// Ask method that returns a ReplyTo handle for delegated replies
-    pub async fn ask_with_reply_to(&self, request: &[u8]) -> Result<crate::ReplyTo> {
-        // Allocate correlation ID
-        let correlation_id = self.correlation.allocate();
-
+    async fn send_ask_frame(&self, correlation_id: u16, request: bytes::Bytes) -> Result<()> {
         let header = framing::write_ask_response_header(
             crate::MessageType::Ask,
             correlation_id,
             request.len(),
         );
-
-        if let Err(e) = self
-            .stream_handle
-            .write_header_and_payload_ask_inline(header, 16, bytes::Bytes::copy_from_slice(request))
+        self.stream_handle
+            .write_header_and_payload_ask_inline(header, 16, request)
             .await
-        {
+    }
+
+    async fn send_ask_frames(
+        &self,
+        requests: &[bytes::Bytes],
+        correlation_ids: &[u16],
+    ) -> Result<()> {
+        debug_assert_eq!(requests.len(), correlation_ids.len());
+        for (idx, request) in requests.iter().enumerate() {
+            self.send_ask_frame(correlation_ids[idx], request.clone())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Ask method that returns a ReplyTo handle for delegated replies
+    pub async fn ask_with_reply_to(&self, request: bytes::Bytes) -> Result<crate::ReplyTo> {
+        // Allocate correlation ID
+        let correlation_id = self.correlation.allocate();
+
+        if let Err(e) = self.send_ask_frame(correlation_id, request).await {
             self.correlation.cancel(correlation_id);
             return Err(e);
         }
@@ -3503,73 +3621,12 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
         })
     }
 
-    /// Ask method with delegated reply sender for asynchronous response handling
-    /// Returns a DelegatedReplySender that can be passed around to handle the response elsewhere
-    #[cfg(feature = "legacy_tell_bytes")]
-    pub async fn ask_with_reply_sender(&self, request: &[u8]) -> Result<DelegatedReplySender> {
-        // Create a oneshot channel for the response
-        let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel::<bytes::Bytes>();
-
-        // Send the request (in a real implementation, this would include correlation ID)
-        self.tell(request).await?;
-
-        // Return the delegated reply sender
-        Ok(DelegatedReplySender::new(
-            reply_sender,
-            reply_receiver,
-            request.len(),
-        ))
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "ask_with_reply_sender() is disabled; use ask()/ask_typed_* or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn ask_with_reply_sender(&self, request: &[u8]) -> Result<DelegatedReplySender> {
-        let _ = request;
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
-    /// Ask method with timeout and delegated reply
-    #[cfg(feature = "legacy_tell_bytes")]
-    pub async fn ask_with_timeout_and_reply(
-        &self,
-        request: &[u8],
-        timeout: Duration,
-    ) -> Result<DelegatedReplySender> {
-        // Create a oneshot channel for the response
-        let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel::<bytes::Bytes>();
-
-        // Send the request
-        self.tell(request).await?;
-
-        // Return the delegated reply sender with timeout
-        Ok(DelegatedReplySender::new_with_timeout(
-            reply_sender,
-            reply_receiver,
-            request.len(),
-            timeout,
-        ))
-    }
-
-    #[cfg(not(feature = "legacy_tell_bytes"))]
-    #[deprecated(
-        note = "ask_with_timeout_and_reply() is disabled; use ask()/ask_typed_* or enable 'legacy_tell_bytes'"
-    )]
-    pub async fn ask_with_timeout_and_reply(
-        &self,
-        request: &[u8],
-        timeout: Duration,
-    ) -> Result<DelegatedReplySender> {
-        let _ = (request, timeout);
-        Err(GossipError::LegacyTellApiDisabled)
-    }
-
     /// Batch ask method for multiple requests in a single network round-trip
-    /// Returns a vector of response futures that can be awaited independently
+    /// Returns a vector of response futures that can be awaited independently.
+    /// Requests must already own their payload via Bytes to guarantee zero-copy.
     pub async fn ask_batch(
         &self,
-        requests: &[&[u8]],
+        requests: &[bytes::Bytes],
     ) -> Result<Vec<tokio::sync::oneshot::Receiver<bytes::Bytes>>> {
         if requests.is_empty() {
             return Ok(Vec::new());
@@ -3578,34 +3635,16 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
         let mut receivers = Vec::with_capacity(requests.len());
         let mut pending = Vec::with_capacity(requests.len());
         let mut correlation_ids = Vec::with_capacity(requests.len());
-        let mut batch_message = Vec::new();
 
-        // Process each request
-        for request in requests {
-            // Create oneshot channel for this response
+        for _ in requests {
             let (tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
             receivers.push(rx);
-
-            // Allocate correlation ID
             let correlation_id = self.correlation.allocate();
-            correlation_ids.push(correlation_id);
             pending.push((correlation_id, tx));
-
-            // Build ask message: [type:1][correlation_id:2][pad:1] + payload
-            let header = framing::write_ask_response_header(
-                crate::MessageType::Ask,
-                correlation_id,
-                request.len(),
-            );
-            batch_message.extend_from_slice(&header);
-            batch_message.extend_from_slice(request);
+            correlation_ids.push(correlation_id);
         }
 
-        if let Err(e) = self
-            .stream_handle
-            .write_bytes_ask(bytes::Bytes::from(batch_message))
-            .await
-        {
+        if let Err(e) = self.send_ask_frames(requests, &correlation_ids).await {
             for correlation_id in correlation_ids {
                 self.correlation.cancel(correlation_id);
             }
@@ -3636,7 +3675,7 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
     /// Batch ask with timeout - returns Vec<Result<Vec<u8>>> with individual timeout handling
     pub async fn ask_batch_with_timeout(
         &self,
-        requests: &[&[u8]],
+        requests: &[bytes::Bytes],
         timeout: Duration,
     ) -> Result<Vec<Result<bytes::Bytes>>> {
         let receivers = self.ask_batch(requests).await?;
@@ -3666,48 +3705,28 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
     /// This version minimizes allocations for maximum throughput
     pub async fn ask_batch_optimized(
         &self,
-        requests: &[&[u8]],
+        requests: &[bytes::Bytes],
         response_buffer: &mut Vec<tokio::sync::oneshot::Receiver<bytes::Bytes>>,
     ) -> Result<()> {
         response_buffer.clear();
         response_buffer.reserve(requests.len());
 
-        // Pre-calculate total message size
-        let total_size: usize = requests
-            .iter()
-            .map(|req| framing::ASK_RESPONSE_FRAME_HEADER_LEN + req.len())
-            .sum();
+        if requests.is_empty() {
+            return Ok(());
+        }
 
-        let mut batch_message = bytes::BytesMut::with_capacity(total_size);
         let mut pending = Vec::with_capacity(requests.len());
         let mut correlation_ids = Vec::with_capacity(requests.len());
 
-        // Build all messages
-        for request in requests {
-            // Create oneshot channel for this response
+        for _ in requests {
             let (tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
             response_buffer.push(rx);
-
-            // Allocate correlation ID
             let correlation_id = self.correlation.allocate();
             correlation_ids.push(correlation_id);
             pending.push((correlation_id, tx));
-
-            // Build ask message
-            let header = framing::write_ask_response_header(
-                crate::MessageType::Ask,
-                correlation_id,
-                request.len(),
-            );
-            batch_message.extend_from_slice(&header);
-            batch_message.extend_from_slice(request);
         }
 
-        if let Err(e) = self
-            .stream_handle
-            .write_bytes_ask(batch_message.freeze())
-            .await
-        {
+        if let Err(e) = self.send_ask_frames(requests, &correlation_ids).await {
             for correlation_id in correlation_ids {
                 self.correlation.cancel(correlation_id);
             }
@@ -3811,8 +3830,8 @@ or enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to temporari
 
             let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&frame_header)
                 .map_err(crate::GossipError::Serialization)?;
-            total_payload.extend_from_slice(&header_bytes);
-            total_payload.extend_from_slice(&payload);
+            total_payload.put_slice(&header_bytes);
+            total_payload.put_slice(&payload);
         }
 
         // Use lock-free ring buffer for entire batch - NO MUTEX!
@@ -4155,31 +4174,9 @@ impl ConnectionPool {
         self.connections_by_addr.insert(addr, connection);
     }
 
-    /// Send data to a peer by ID
-    pub fn send_to_peer_id(&self, peer_id: &crate::PeerId, data: &[u8]) -> Result<()> {
-        debug!(
-            "CONNECTION POOL: send_to_peer_id called for peer '{}', pool has {} peer connections",
-            peer_id,
-            self.connections_by_peer.len()
-        );
-        if let Some(connection) = self.get_connection_by_peer_id(peer_id) {
-            if let Some(ref stream_handle) = connection.stream_handle {
-                debug!(
-                    "CONNECTION POOL: Sending {} bytes to peer '{}'",
-                    data.len(),
-                    peer_id
-                );
-                return stream_handle.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data));
-            } else {
-                warn!(peer_id = %peer_id, "Connection found but no stream handle");
-            }
-        } else {
-            warn!(peer_id = %peer_id, "No connection found for peer");
-        }
-        Err(crate::GossipError::Network(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("Connection not found for peer {}", peer_id),
-        )))
+    /// Send data to a peer by ID using zero-copy Bytes.
+    pub fn send_to_peer_id(&self, peer_id: &crate::PeerId, data: bytes::Bytes) -> Result<()> {
+        self.send_bytes_to_peer_id(peer_id, data)
     }
 
     /// Send bytes to a peer by its ID (zero-copy version)
@@ -4303,10 +4300,10 @@ impl ConnectionPool {
     }
 
     /// Send data through lock-free connection - NO BLOCKING
-    pub fn send_lock_free(&self, addr: SocketAddr, data: &[u8]) -> Result<()> {
+    pub fn send_lock_free(&self, addr: SocketAddr, data: bytes::Bytes) -> Result<()> {
         if let Some(connection) = self.get_lock_free_connection(addr) {
             if let Some(ref stream_handle) = connection.stream_handle {
-                return stream_handle.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data));
+                return stream_handle.write_bytes_nonblocking(data);
             } else {
                 warn!(addr = %addr, "Connection found but no stream handle");
             }
@@ -4379,11 +4376,11 @@ impl ConnectionPool {
     pub fn send_to_node(
         &self,
         node_addr: SocketAddr,
-        data: &[u8],
+        data: bytes::Bytes,
         _registry: &GossipRegistry,
     ) -> Result<()> {
         // First try direct lookup
-        if let Ok(()) = self.send_lock_free(node_addr, data) {
+        if let Ok(()) = self.send_lock_free(node_addr, data.clone()) {
             return Ok(());
         }
 
@@ -4546,8 +4543,8 @@ impl ConnectionPool {
     pub fn create_message_buffer(&mut self, data: &[u8]) -> Vec<u8> {
         let header = framing::write_gossip_frame_prefix(data.len());
         let mut buffer = self.get_buffer(header.len() + data.len());
-        buffer.extend_from_slice(&header);
-        buffer.extend_from_slice(data);
+        buffer.put_slice(&header);
+        buffer.put_slice(data);
         crate::telemetry::gossip_zero_copy::record_outbound_frame(
             "connection_pool::create_message_buffer",
             buffer.len(),
@@ -5029,27 +5026,25 @@ impl ConnectionPool {
             });
 
         if let Some(peer_id) = peer_id_opt {
-            // Use shared correlation tracker for this peer
             conn.correlation = Some(self.get_or_create_correlation_tracker(&peer_id));
-            debug!(
-                "CONNECTION POOL: Using shared correlation tracker for peer {:?} at {}",
-                peer_id, addr
-            );
+            self.addr_to_peer_id.insert(addr, peer_id);
         } else {
-            // No peer ID yet, create a new correlation tracker
-            // This will be replaced when we learn the peer ID from their FullSync message
             conn.correlation = Some(CorrelationTracker::new());
-            debug!(
-                "CONNECTION POOL: Created new correlation tracker for unknown peer at {}",
-                addr
-            );
         }
 
         let connection_arc = Arc::new(conn);
-
-        // Insert into lock-free map before spawning
         self.connections_by_addr
             .insert(addr, connection_arc.clone());
+
+        if let Some(peer_id) = self
+            .addr_to_peer_id
+            .get(&addr)
+            .map(|entry| entry.value().clone())
+        {
+            self.connections_by_peer
+                .insert(peer_id.clone(), connection_arc.clone());
+            self.peer_id_to_addr.insert(peer_id, addr);
+        }
         debug!("CONNECTION POOL: Added connection via get_connection to {} - pool now has {} connections",
               addr, self.connections_by_addr.len());
         // Double check it's really there
@@ -5080,8 +5075,8 @@ impl ConnectionPool {
                 Ok(data) => {
                     let header = framing::write_gossip_frame_prefix(data.len());
                     let mut msg_buffer = Vec::with_capacity(header.len() + data.len());
-                    msg_buffer.extend_from_slice(&header);
-                    msg_buffer.extend_from_slice(&data);
+                    msg_buffer.put_slice(&header);
+                    msg_buffer.put_slice(&data);
                     crate::telemetry::gossip_zero_copy::record_outbound_frame(
                         "connection_pool::initial_full_sync",
                         msg_buffer.len(),
@@ -5222,6 +5217,7 @@ impl ConnectionPool {
                                 addr,
                                 frame,
                                 correlation_id,
+                                Some(&reader_connection),
                             )
                             .await;
                         }
@@ -5422,7 +5418,7 @@ impl ConnectionPool {
             partial_msg_buf.reserve(READ_BUF_SIZE);
             match reader.read_buf(&mut partial_msg_buf).await {
                 Ok(0) => {
-                    info!(peer = %peer_addr, "Connection closed by peer");
+                    trace!(peer = %peer_addr, "Connection closed by peer");
                     break;
                 }
                 Ok(_n) => {
@@ -5459,7 +5455,7 @@ impl ConnectionPool {
                             let total_needed = 4 + len;
                             if partial_msg_buf.capacity() < total_needed {
                                 partial_msg_buf.reserve(total_needed - partial_msg_buf.len());
-                                info!(peer = %peer_addr, "📦 LARGE MESSAGE: Reserved {} bytes for message", total_needed);
+                                trace!(peer = %peer_addr, "📦 LARGE MESSAGE: Reserved {} bytes for message", total_needed);
                             }
                         }
 
@@ -5484,7 +5480,7 @@ impl ConnectionPool {
 
                             // Debug: Log first few bytes of every message
                             if msg_data.len() >= crate::framing::ASK_RESPONSE_HEADER_LEN {
-                                info!(peer = %peer_addr,
+                                trace!(peer = %peer_addr,
                                   "🔍 SERVER RECV: msg_len={}, first_bytes=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
                                   msg_data.len(),
                                   msg_data[0], msg_data[1], msg_data[2], msg_data[3],
@@ -5519,7 +5515,7 @@ impl ConnectionPool {
 
                                     match msg_type {
                                         crate::MessageType::Ask => {
-                                            info!(peer = %peer_addr, correlation_id = correlation_id, payload_len = payload.len(),
+                                            trace!(peer = %peer_addr, correlation_id = correlation_id, payload_len = payload.len(),
                                               "📨 ASK DEBUG: Received Ask message on bidirectional connection");
 
                                             // Verify alignment (panic in production, allow in tests)
@@ -5540,16 +5536,15 @@ impl ConnectionPool {
                                             }
 
                                             // ZERO-COPY: Access archived RegistryMessage without allocation
-                                            match rkyv::access::<
-                                                <crate::registry::RegistryMessage as rkyv::Archive>::Archived,
-                                                rkyv::rancor::Error,
+                                            match crate::rkyv_utils::access_archived::<
+                                                crate::registry::RegistryMessage,
                                             >(
                                                 payload.as_ref()
                                             ) {
                                                 Ok(archived_msg) => {
-                                                    info!(peer = %peer_addr, correlation_id = correlation_id,
-                                                      "✅ ZERO-COPY: Successfully accessed archived RegistryMessage");
-                                                    debug!(peer = %peer_addr, correlation_id = correlation_id, "Received Ask with RegistryMessage payload");
+                                                    trace!(peer = %peer_addr, correlation_id = correlation_id,
+                                              "✅ ZERO-COPY: Successfully accessed archived RegistryMessage");
+                                                    trace!(peer = %peer_addr, correlation_id = correlation_id, "Received Ask with RegistryMessage payload");
 
                                                     // Use zero-copy accessor trait to extract fields
                                                     use crate::registry::RegistryMessageArchivedAccess;
@@ -5557,22 +5552,37 @@ impl ConnectionPool {
                                                     let actor_id = archived_msg.actor_id();
                                                     let type_hash = archived_msg.type_hash();
                                                     let payload_slice = archived_msg.payload();
-                                                    let correlation_id_opt = archived_msg.correlation_id();
+                                                    let correlation_id_opt =
+                                                        archived_msg.correlation_id();
 
                                                     // Special handling for ActorMessage with correlation_id
-                                                    if let (Some(actor_id_str), Some(type_hash_val), Some(payload_bytes), Some(corr_id_opt)) =
-                                                       (actor_id, type_hash, payload_slice, correlation_id_opt)
-                                                    {
+                                                    if let (
+                                                        Some(actor_id_str),
+                                                        Some(type_hash_val),
+                                                        Some(payload_bytes),
+                                                        Some(corr_id_opt),
+                                                    ) = (
+                                                        actor_id,
+                                                        type_hash,
+                                                        payload_slice,
+                                                        correlation_id_opt,
+                                                    ) {
                                                         // Use Ask envelope's correlation_id if not set in message
-                                                        let corr_id = corr_id_opt.unwrap_or(correlation_id);
+                                                        let corr_id =
+                                                            corr_id_opt.unwrap_or(correlation_id);
 
-                                                        info!(peer = %peer_addr, actor_id = %actor_id_str, type_hash = %format!("{:08x}", type_hash_val),
+                                                        trace!(peer = %peer_addr, actor_id = %actor_id_str, type_hash = %format!("{:08x}", type_hash_val),
                                                               payload_len = payload_bytes.len(), correlation_id = corr_id,
                                                               "🎯 ZERO-COPY: Processing ActorMessage ask");
 
-                                                        if let Some(ref registry_weak) = registry_weak {
-                                                            if let Some(registry) = registry_weak.upgrade() {
-                                                                let registry_for_reply = registry.clone();
+                                                        if let Some(ref registry_weak) =
+                                                            registry_weak
+                                                        {
+                                                            if let Some(registry) =
+                                                                registry_weak.upgrade()
+                                                            {
+                                                                let registry_for_reply =
+                                                                    registry.clone();
                                                                 let send_peer_addr = peer_addr;
                                                                 let send_reply = move |reply_payload: bytes::Bytes, corr_id: u16| {
                                                                     let registry = registry_for_reply.clone();
@@ -5591,7 +5601,7 @@ impl ConnectionPool {
                                                                         if let Some(conn) = pool.connections_by_addr.get(&send_peer_addr).map(|c| c.value().clone()) {
                                                                             if let Some(ref stream_handle) = conn.stream_handle {
                                                                                 stream_handle
-                                                                                    .write_header_and_payload_control_inline(
+                                                                                    .write_header_and_payload_ask_inline(
                                                                                         header,
                                                                                         16,
                                                                                         reply_payload,
@@ -5726,10 +5736,8 @@ impl ConnectionPool {
                                                                     correlation_id,
                                                                     response_data.len(),
                                                                 );
-                                                                    msg.extend_from_slice(&header);
-                                                                    msg.extend_from_slice(
-                                                                        &response_data,
-                                                                    );
+                                                                    msg.put_slice(&header);
+                                                                    msg.put_slice(&response_data);
 
                                                                     // Send response back through stream handle
                                                                     if let Some(ref stream_handle) =
@@ -5765,9 +5773,14 @@ impl ConnectionPool {
                                                         // Actor fields start at offset 8 (skipping 8 bytes of reserved)
                                                         if payload.len() >= 24 {
                                                             let actor_id = u64::from_be_bytes([
-                                                                payload[8], payload[9], payload[10],
-                                                                payload[11], payload[12], payload[13],
-                                                                payload[14], payload[15],
+                                                                payload[8],
+                                                                payload[9],
+                                                                payload[10],
+                                                                payload[11],
+                                                                payload[12],
+                                                                payload[13],
+                                                                payload[14],
+                                                                payload[15],
                                                             ]);
                                                             let type_hash = u32::from_be_bytes([
                                                                 payload[16],
@@ -5977,7 +5990,7 @@ impl ConnectionPool {
 
                                                 if payload.len() >= 24 + payload_len {
                                                     let actor_payload =
-                                                        &payload[24..24 + payload_len];
+                                                        payload.slice(24..24 + payload_len);
 
                                                     #[cfg(any(
                                                         test,
@@ -5991,9 +6004,7 @@ impl ConnectionPool {
                                                         .is_ok()
                                                         {
                                                             crate::test_helpers::record_raw_payload(
-                                                                bytes::Bytes::copy_from_slice(
-                                                                    actor_payload,
-                                                                ),
+                                                                actor_payload.clone(),
                                                             );
                                                         }
                                                     }
@@ -6023,7 +6034,7 @@ impl ConnectionPool {
                                                                     .handle_actor_message_id(
                                                                         actor_id,
                                                                         type_hash,
-                                                                        actor_payload,
+                                                                        actor_payload.as_ref(),
                                                                         None, // No correlation for tell
                                                                     )
                                                                     .await
@@ -6079,7 +6090,7 @@ impl ConnectionPool {
 
                                                 if payload.len() >= 24 + payload_len {
                                                     let actor_payload =
-                                                        &payload[24..24 + payload_len];
+                                                        payload.slice(24..24 + payload_len);
 
                                                     if let Some(ref registry_weak) = registry_weak {
                                                         if let Some(registry) =
@@ -6089,7 +6100,7 @@ impl ConnectionPool {
                                                                 .handle_actor_message_id(
                                                                     actor_id,
                                                                     type_hash,
-                                                                    actor_payload,
+                                                                    actor_payload.as_ref(),
                                                                     Some(correlation_id),
                                                                 )
                                                                 .await
@@ -6253,9 +6264,48 @@ impl ConnectionPool {
         peer_addr: SocketAddr,
         frame: crate::handle::StreamingFrame,
         correlation_id: u16,
+        connection: Option<&Arc<LockFreeConnection>>,
     ) where
         R: tokio::io::AsyncReadExt + Unpin,
     {
+        // Check if this is a response stream (has pending ask)
+        let is_response_stream = if correlation_id != 0 {
+            if let Some(conn) = connection {
+                if let Some(correlation) = &conn.correlation {
+                    correlation.has_pending(correlation_id)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Response streaming path - route to correlation tracker
+        if is_response_stream {
+            if let Some(conn) = connection {
+                if let Some(correlation) = &conn.correlation {
+                    match frame {
+                        crate::handle::StreamingFrame::Start { .. } => {
+                            correlation.start_streaming(correlation_id);
+                        }
+                        crate::handle::StreamingFrame::Data { payload } => {
+                            if let crate::handle::StreamingData::Owned { chunk } = payload {
+                                correlation.add_streaming_chunk(correlation_id, chunk);
+                            }
+                        }
+                        crate::handle::StreamingFrame::End => {
+                            correlation.complete_streaming(correlation_id);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // Tell streaming path - existing implementation
         let correlation = if correlation_id == 0 {
             None
         } else {
@@ -6286,6 +6336,11 @@ impl ConnectionPool {
                             }
                         }
                     }
+                }
+                crate::handle::StreamingData::Owned { chunk: _ } => {
+                    // For tell streaming with owned chunks, we need to handle it
+                    // This shouldn't happen with current implementation but let's be safe
+                    warn!(peer = %peer_addr, "Received unexpected owned chunk in tell streaming");
                 }
             },
             crate::handle::StreamingFrame::End => match assembler.finish_with_end() {
@@ -7022,7 +7077,9 @@ pub(crate) fn handle_incoming_message(
                             let mut pool = registry.connection_pool.lock().await;
                             let buffer = pool.create_message_buffer(&serialized);
                             // Use send_lock_free to send directly without needing a connection handle
-                            if let Err(e) = pool.send_lock_free(sender_socket_addr, &buffer) {
+                            if let Err(e) =
+                                pool.send_lock_free(sender_socket_addr, bytes::Bytes::from(buffer))
+                            {
                                 warn!("Failed to send ImmediateAck: {}", e);
                             } else {
                                 info!("Sent ImmediateAck for actor '{}'", actor_name);
@@ -7337,7 +7394,7 @@ pub(crate) fn handle_incoming_message(
                             Err(e) => {
                                 warn!("Failed to send via peer ID {}: {}", sender_peer_id, e);
                                 // Fall back to socket address
-                                pool.send_lock_free(sender_socket_addr, &frozen_buffer)
+                                pool.send_lock_free(sender_socket_addr, frozen_buffer.clone())
                             }
                         };
 
@@ -7981,7 +8038,7 @@ pub(crate) fn handle_incoming_message(
                     let buffer = pool.create_message_buffer(&data);
 
                     // Use send_lock_free which doesn't create new connections
-                    if let Err(e) = pool.send_lock_free(sender_addr, &buffer) {
+                    if let Err(e) = pool.send_lock_free(sender_addr, bytes::Bytes::from(buffer)) {
                         warn!(peer = %sender_addr, error = %e, "Failed to send peer health report");
                     }
                 }
@@ -8312,6 +8369,9 @@ pub(crate) fn handle_incoming_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use tokio::io::duplex;
+    use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
 
@@ -8372,6 +8432,53 @@ mod tests {
         assert!(threshold < config.tcp_buffer_size());
         assert!(threshold > 1020 * 1024); // At least 1020KB
         assert_eq!(threshold, 1023 * 1024); // Exactly 1023KB
+    }
+
+    async fn test_stream_handle() -> (
+        LockFreeStreamHandle,
+        mpsc::UnboundedReceiver<StreamingCommand>,
+    ) {
+        let (client, _server) = duplex(1024);
+        let buffer_config = BufferConfig::new(512 * 1024).unwrap();
+        let (mut handle, writer_task) = LockFreeStreamHandle::new(
+            client,
+            "127.0.0.1:0".parse().unwrap(),
+            ChannelId::Global,
+            buffer_config,
+        );
+        writer_task.abort();
+        let (tx, rx) = mpsc::unbounded_channel();
+        handle.streaming_tx = tx;
+        (handle, rx)
+    }
+
+    #[tokio::test]
+    async fn write_vectored_nonblocking_preserves_bytes() {
+        let (handle, mut streaming_rx) = test_stream_handle().await;
+        let chunk_a = Bytes::from_static(b"alpha");
+        let chunk_b = Bytes::from_static(b"beta");
+        let ptrs = vec![chunk_a.as_ptr(), chunk_b.as_ptr()];
+        let chunks = vec![chunk_a.clone(), chunk_b.clone()];
+
+        handle
+            .write_vectored_nonblocking(&chunks)
+            .expect("vectored write should enqueue");
+
+        match streaming_rx.recv().await.expect("streaming command") {
+            StreamingCommand::OwnedChunks(enqueued) => {
+                assert_eq!(enqueued.len(), chunks.len());
+                for (idx, chunk) in enqueued.iter().enumerate() {
+                    assert_eq!(
+                        chunk.as_ptr(),
+                        ptrs[idx],
+                        "chunk {} pointer must match",
+                        idx
+                    );
+                    assert_eq!(chunk.len(), chunks[idx].len());
+                }
+            }
+            other => panic!("expected OwnedChunks, got {:?}", other),
+        }
     }
 
     #[test]
@@ -8590,6 +8697,81 @@ mod tests {
         let result = handle.send_data(vec![1, 2, 3]).await;
         // With fire-and-forget semantics, this should return Ok even with a closed writer
         assert!(result.is_ok());
+    }
+
+    async fn build_zero_copy_test_connection() -> ConnectionHandle {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                match server.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        });
+
+        let (stream_handle, _writer_task) = LockFreeStreamHandle::new(
+            client,
+            "127.0.0.1:0".parse().unwrap(),
+            ChannelId::Global,
+            BufferConfig::default(),
+        );
+
+        ConnectionHandle {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            stream_handle: Arc::new(stream_handle),
+            correlation: CorrelationTracker::new(),
+            peer_capabilities: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tell_bytes_preserves_payload_pointer() {
+        let _guard = crate::test_helpers::exclusive_zero_copy_capture();
+        let handle = build_zero_copy_test_connection().await;
+        let payload = Bytes::from_static(b"zero-copy-payload-test");
+        let ptr = payload.as_ptr() as usize;
+
+        handle
+            .tell_bytes(payload.clone())
+            .await
+            .expect("tell_bytes");
+
+        let records = crate::test_helpers::take_zero_copy_records();
+        assert!(
+            !records.is_empty(),
+            "expected at least one captured payload"
+        );
+        let record = &records[0];
+        assert_eq!(record.ptr, ptr, "payload pointer changed (copy detected)");
+        assert_eq!(record.len, payload.len());
+    }
+
+    #[tokio::test]
+    async fn tell_bytes_batch_preserves_each_pointer() {
+        let _guard = crate::test_helpers::exclusive_zero_copy_capture();
+        let handle = build_zero_copy_test_connection().await;
+        let msgs = vec![
+            Bytes::from_static(b"batch-zero-copy-1"),
+            Bytes::from_static(b"batch-zero-copy-2"),
+        ];
+        handle
+            .tell_bytes_batch(&msgs)
+            .await
+            .expect("tell_bytes_batch");
+
+        let records = crate::test_helpers::take_zero_copy_records();
+        crate::test_helpers::disable_zero_copy_capture();
+        for msg in &msgs {
+            let expected_ptr = msg.as_ptr() as usize;
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record.ptr == expected_ptr && record.len == msg.len()),
+                "batch payload pointer changed (copy detected)"
+            );
+        }
     }
 
     #[tokio::test]

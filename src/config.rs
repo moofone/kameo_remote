@@ -17,7 +17,7 @@ pub const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_DEAD_PEER_TIMEOUT_SECS: u64 = 900;
 
 /// Default max concurrent ask inflight
-pub const DEFAULT_ASK_INFLIGHT_LIMIT: usize = 100;
+pub const DEFAULT_ASK_INFLIGHT_LIMIT: usize = 1024;
 
 /// Default small cluster threshold - clusters with this many nodes or fewer use full sync
 /// Set to 0 to always use delta sync when possible

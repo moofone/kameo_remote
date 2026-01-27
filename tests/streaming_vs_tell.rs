@@ -114,7 +114,7 @@ async fn streaming_tell_and_ask_with_sample_payload() {
     // 1) Streaming tell (fire-and-forget) with the sample payload.
     stream_tell_with_retry(
         &conn,
-        sample_bytes.as_ref(),
+        sample_bytes.clone(),
         STREAMING_TYPE_HASH,
         STREAMING_ACTOR_ID,
     )
@@ -202,7 +202,7 @@ async fn streaming_vs_tell_throughput_sample_payload_1000() {
     let streaming_start = Instant::now();
     for _ in 0..ITERATIONS {
         conn.stream_large_message(
-            sample_bytes.as_ref(),
+            sample_bytes.clone(),
             STREAMING_TYPE_HASH,
             STREAMING_ACTOR_ID,
         )
@@ -230,7 +230,7 @@ async fn streaming_vs_tell_throughput_sample_payload_1000() {
     let initial_tell_count = handler.count_for(LEGACY_TELL_TYPE_HASH).await;
     let tell_start = Instant::now();
     for _ in 0..ITERATIONS {
-        conn.send_binary_message(tell_frame.as_ref())
+        conn.send_binary_message(tell_frame.clone())
             .await
             .expect("send non-streaming tell");
     }
@@ -325,7 +325,7 @@ async fn streaming_recovers_after_remote_reconnect() {
 
     stream_tell_with_retry(
         &conn,
-        sample_bytes.as_ref(),
+        sample_bytes.clone(),
         STREAMING_TYPE_HASH,
         STREAMING_ACTOR_ID,
     )
@@ -397,7 +397,7 @@ async fn streaming_recovers_after_remote_reconnect() {
 
     stream_tell_with_retry(
         &conn,
-        sample_bytes.as_ref(),
+        sample_bytes.clone(),
         STREAMING_TYPE_HASH,
         STREAMING_ACTOR_ID,
     )
@@ -433,14 +433,14 @@ fn build_actor_tell_frame(actor_id: u64, type_hash: u32, payload: &[u8]) -> Byte
 
 async fn stream_tell_with_retry(
     conn: &kameo_remote::connection_pool::ConnectionHandle,
-    payload: &[u8],
+    payload: Bytes,
     type_hash: u32,
     actor_id: u64,
 ) -> Result<(), GossipError> {
     let mut attempts = 0;
     loop {
         match conn
-            .stream_large_message(payload, type_hash, actor_id)
+            .stream_large_message(payload.clone(), type_hash, actor_id)
             .await
         {
             Ok(()) => return Ok(()),
@@ -463,7 +463,7 @@ async fn stream_ask_with_retry(
     let mut attempts = 0;
     loop {
         match conn
-            .ask_streaming_bytes(payload.clone(), type_hash, actor_id, timeout)
+            .ask_actor(actor_id, type_hash, payload.clone(), timeout)
             .await
         {
             Ok(bytes) => return Ok(bytes),

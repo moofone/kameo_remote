@@ -61,8 +61,7 @@ async fn test_batch_ask_performance() -> Result<()> {
     // Prepare requests - each request is just the integer as bytes
     let mut all_requests = Vec::with_capacity(NUM_REQUESTS);
     for i in 0..NUM_REQUESTS {
-        let request = (i as u32).to_be_bytes().to_vec();
-        all_requests.push(request);
+        all_requests.push(Bytes::from((i as u32).to_be_bytes().to_vec()));
     }
 
     info!(
@@ -77,7 +76,7 @@ async fn test_batch_ask_performance() -> Result<()> {
         let mut responses = Vec::new();
 
         for (i, request) in all_requests.iter().enumerate() {
-            match connection.ask(Bytes::copy_from_slice(request)).await {
+            match connection.ask(request.clone()).await {
                 Ok(response) => responses.push(response),
                 Err(e) => error!("Ask {} failed: {}", i, e),
             }
@@ -104,9 +103,9 @@ async fn test_batch_ask_performance() -> Result<()> {
             let batch_end = batch_start + BATCH_SIZE;
 
             // Prepare batch request slice
-            let batch_requests: Vec<&[u8]> = all_requests[batch_start..batch_end]
+            let batch_requests: Vec<Bytes> = all_requests[batch_start..batch_end]
                 .iter()
-                .map(|req| req.as_slice())
+                .cloned()
                 .collect();
 
             // Send batch
@@ -164,9 +163,9 @@ async fn test_batch_ask_performance() -> Result<()> {
             let batch_end = batch_start + BATCH_SIZE;
 
             // Prepare batch request slice
-            let batch_requests: Vec<&[u8]> = all_requests[batch_start..batch_end]
+            let batch_requests: Vec<Bytes> = all_requests[batch_start..batch_end]
                 .iter()
-                .map(|req| req.as_slice())
+                .cloned()
                 .collect();
 
             // Send batch with optimized API
@@ -218,8 +217,7 @@ async fn test_batch_ask_performance() -> Result<()> {
 
                 // Process in smaller batches within each task
                 for chunk in requests.chunks(BATCH_SIZE / 10) {
-                    let batch_requests: Vec<&[u8]> =
-                        chunk.iter().map(|req| req.as_slice()).collect();
+                    let batch_requests: Vec<Bytes> = chunk.iter().cloned().collect();
 
                     match connection_clone.ask_batch(&batch_requests).await {
                         Ok(receivers) => {
@@ -299,23 +297,28 @@ async fn test_batch_ask_with_timeout() -> Result<()> {
     let connection = client.get_connection(actual_server_addr).await?;
 
     // Test batch ask with timeout
-    let requests: Vec<Vec<u8>> = (0..10).map(|i| (i as u32).to_be_bytes().to_vec()).collect();
-
-    let request_refs: Vec<&[u8]> = requests.iter().map(|r| r.as_slice()).collect();
+    let requests: Vec<Bytes> = (0..10)
+        .map(|i| Bytes::from((i as u32).to_be_bytes().to_vec()))
+        .collect();
 
     let results = connection
-        .ask_batch_with_timeout(&request_refs, Duration::from_secs(1))
+        .ask_batch_with_timeout(&requests, Duration::from_secs(1))
         .await?;
 
     info!(
         "Batch ask with timeout completed: {} results",
         results.len()
     );
+    assert_eq!(
+        results.len(),
+        requests.len(),
+        "every request should produce a result entry"
+    );
 
     for (i, result) in results.iter().enumerate() {
         match result {
             Ok(response) => info!("Request {} got response of {} bytes", i, response.len()),
-            Err(e) => error!("Request {} failed: {}", i, e),
+            Err(e) => panic!("Request {} failed: {}", i, e),
         }
     }
 

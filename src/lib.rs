@@ -10,7 +10,7 @@ pub mod priority;
 pub mod registry;
 pub mod remote_actor_location;
 pub mod reply_to;
-mod rkyv_utils;
+pub mod rkyv_utils;
 pub mod stream_writer;
 pub mod streaming;
 pub mod telemetry;
@@ -18,15 +18,6 @@ pub mod telemetry;
 pub mod test_helpers;
 pub mod tls;
 pub mod typed;
-
-#[cfg(all(
-    feature = "legacy_tell_bytes",
-    not(feature = "legacy_tell_bytes_unlocked")
-))]
-compile_error!(
-    "The 'legacy_tell_bytes' feature is deprecated. \
-enable both 'legacy_tell_bytes' and 'legacy_tell_bytes_unlocked' to opt back in explicitly."
-);
 
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -41,15 +32,12 @@ use tracing::error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use config::GossipConfig;
-pub use connection_pool::{ChannelId, DelegatedReplySender, LockFreeStreamHandle, StreamFrameType};
+pub use connection_pool::{ChannelId, LockFreeStreamHandle, StreamFrameType};
 pub use handle::GossipRegistryHandle;
 pub use handle_builder::GossipRegistryBuilder;
 pub use priority::{ConsistencyLevel, RegistrationPriority};
 pub use remote_actor_location::RemoteActorLocation;
 pub use reply_to::{ReplyTo, TimeoutReplyTo};
-#[cfg(any(test, feature = "allow-non-zero-copy"))]
-#[allow(deprecated)]
-pub use typed::decode_typed;
 pub use typed::{encode_typed, TypedBatch, WireEncode, WireType};
 
 // =================== New Iroh-style types ===================
@@ -1206,7 +1194,7 @@ impl StreamHeader {
 /// Complete wire message for streaming protocol (header + data)
 ///
 /// This struct combines the stream header with data for serialization.
-/// For zero-copy deserialization, we rely on `rkyv::access` (see `rkyv_utils`)
+/// For zero-copy deserialization, we rely on `rkyv_utils::access_archived`
 /// for the header and handle the payload as a separate slice to avoid copying
 /// large data chunks.
 ///
@@ -1297,9 +1285,6 @@ pub enum GossipError {
 
     #[error("invalid stream frame: {0}")]
     InvalidStreamFrame(String),
-
-    #[error("legacy tell() API disabled (enable the 'legacy_tell_bytes' feature to re-enable)")]
-    LegacyTellApiDisabled,
 }
 
 pub type Result<T> = std::result::Result<T, GossipError>;

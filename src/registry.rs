@@ -234,7 +234,7 @@ pub enum RegistryMessage {
 /// Zero-copy wrapper around a serialized RegistryMessage payload.
 ///
 /// Holds the underlying bytes (typically reference-counted via `Bytes`) and provides
-/// validated archived access via `rkyv::access` without allocating intermediate structs.
+/// validated once on construction; archived access uses unchecked zero-alloc reads.
 #[derive(Clone, Debug)]
 pub struct RegistryMessageFrame {
     payload: RegistryFrameBacking,
@@ -287,10 +287,10 @@ impl RegistryMessageFrame {
 
     /// Borrow the archived RegistryMessage directly from the underlying bytes.
     pub fn archived(&self) -> Result<&<RegistryMessage as Archive>::Archived> {
-        rkyv::access::<<RegistryMessage as Archive>::Archived, rkyv::rancor::Error>(
-            self.payload.as_slice(),
-        )
-        .map_err(Into::into)
+        // Payloads are validated on construction, so unchecked access is safe here.
+        Ok(crate::rkyv_utils::access_archived_unchecked::<
+            RegistryMessage,
+        >(self.payload.as_slice()))
     }
 
     /// Borrow the raw serialized bytes (aligned, length not including frame prefix).
@@ -317,7 +317,7 @@ impl RegistryMessageFrame {
     }
 
     pub(crate) fn validate(payload: &[u8]) -> Result<()> {
-        rkyv::access::<<RegistryMessage as Archive>::Archived, rkyv::rancor::Error>(payload)
+        crate::rkyv_utils::access_archived::<RegistryMessage>(payload)
             .map(|_| ())
             .map_err(Into::into)
     }

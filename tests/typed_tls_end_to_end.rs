@@ -46,8 +46,13 @@ async fn test_typed_ask_over_tls_with_pooled_path() {
         .ask_typed_archived::<Ping, Ping>(&request)
         .await
         .unwrap();
+    let payload_ptr = response.as_bytes().as_ptr();
     let archived = response.archived().unwrap();
     assert_eq!(archived.id, request.id);
+    let owned = response.into_bytes();
+    let offset = if cfg!(debug_assertions) { 8 } else { 0 };
+    let body_ptr = unsafe { owned.as_ptr().add(offset) };
+    assert_eq!(payload_ptr, body_ptr);
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;

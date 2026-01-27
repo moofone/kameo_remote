@@ -108,3 +108,30 @@ Streaming large actor payloads now relies on the `streaming` capability negotiat
 - Unit tests in `src/streaming.rs` cover descriptor layout, encode/decode helpers, assembler invariants, and ordering/overflow behavior.
 - `tests/streaming_contract.rs` provides a wire-level contract test that snapshots the emitted frame bytes and validates assembler completion/error cases.
 - Run `./scripts/coverage.sh` after adding new streaming code paths to keep the sprint modules at 100% coverage.
+
+## Zero-Copy Tell APIs (0.2.0)
+
+- The `legacy_tell_bytes*` gates, `TellMessage`, and `tell_msg!` macro have been deleted. Only `ConnectionHandle::tell_bytes`, `tell_bytes_batch`, `tell_typed`, and streaming helpers remain.
+- These entry points are tagged as `// CRITICAL_PATH` and emit telemetry via `kameo_remote::telemetry::gossip_zero_copy::record_outbound_frame`, so `tests/gossip_zero_copy_observability.rs` can assert that every tell stays zero-copy.
+- **Migration tip:** replace `conn.tell(TellMessage::batch(vec![...]))` with `conn.tell_bytes_batch(&[bytes.clone(), ...])` or `conn.tell_typed(&value)` depending on whether you have raw bytes or typed payloads.
+- Batch ask helpers (`ask_batch*`) and delegation entry points (`ask_with_reply_to`, `send_binary_message`) now require owned `Bytes`. Build your request buffers upfront—`let requests: Vec<Bytes> = payloads.iter().cloned().collect();`—and pass slices of `Bytes` into the connection pool to avoid implicit copies.
+
+```rust
+use bytes::Bytes;
+use kameo_remote::connection_pool::ConnectionHandle;
+
+async fn send_price_update(conn: &ConnectionHandle, price_blob: &[u8]) -> kameo_remote::Result<()> {
+    // Raw Bytes path (no copies)
+    conn.tell_bytes(Bytes::copy_from_slice(price_blob)).await
+}
+
+async fn send_typed_update<T: kameo_remote::typed::WireEncode>(
+    conn: &ConnectionHandle,
+    value: &T,
+) -> kameo_remote::Result<()> {
+    conn.tell_typed(value).await
+}
+```
+
+- Need batch semantics? Build a `Vec<Bytes>` once, pass it to `tell_bytes_batch`, and rely on the zero-copy tests (`connection_pool::tests::tell_bytes_batch_preserves_each_pointer`) to prove no extra allocations occur.
+- When validating changes, run `cargo test tests::tell_bytes_increments_zero_copy_telemetry -- --nocapture` or execute the throughput suite (`cargo test --test streaming_vs_tell -- --nocapture`) to capture telemetry and performance artifacts for Sprint 2.

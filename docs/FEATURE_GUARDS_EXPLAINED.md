@@ -197,6 +197,19 @@ Phase 3 of `spec/GOSSIP_ZERO_COPY.md` promotes the guard concept into our toolin
 
 These steps ensure the guard documentation matches our enforcement tooling—if the guard is bypassed, the validation suite turns red immediately.
 
+## Zero-Copy Decode Only (2026-01-26)
+
+- The former `allow-non-zero-copy` feature flag and the `decode_typed` / `deserialize_from_bytes` helpers have been removed.
+- All typed payload consumers **must** use `decode_typed_archived` or `decode_typed_zero_copy`, which enforce type-hash validation (in debug builds) while keeping payloads zero-copy.
+- Validation scripts (see `scripts/full_validation.sh`) now point to `sprints/LEGACY_FUNCTION_CLEANUP/sprint_3.md`; they fail if any CRITICAL_PATH decode helpers lose coverage or regress to copy-heavy patterns.
+
+## Zero-Copy Tell Only (2026-01-26)
+
+- Crate version `0.2.0` removes the `legacy_tell_bytes` / `_unlocked` feature gates, the `TellMessage` enum, the `tell_msg!` macro, and every legacy `tell_*`/`ask_*` helper. Cargo will now fail to build if downstream crates reference those APIs.
+- The only supported send helpers are `ConnectionHandle::tell_bytes`, `tell_bytes_batch`, `tell_typed`, and the streaming variants (`stream_large_message*`). Each path is tagged with `// CRITICAL_PATH` and emits zero-copy telemetry via `kameo_remote::telemetry::gossip_zero_copy::record_outbound_frame`.
+- Integration tests (`tests/gossip_zero_copy_observability.rs`) now include `tell_bytes_increments_zero_copy_telemetry`, which proves the telemetry counters advance without enabling any legacy features.
+- Operators and QA can call `gossip_zero_copy::snapshot()` to validate `outbound_frames` increases after running `tell_bytes` workloads. Pair this with `tests/throughput_benchmarks.rs` or `tests/streaming_vs_tell.rs` to capture benchmark evidence before promoting changes.
+
 ## Key Takeaways
 
 1. **Compile-Time Safety**: Guards prevent incorrect code from compiling

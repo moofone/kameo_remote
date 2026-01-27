@@ -490,6 +490,39 @@ mod tests {
         assert!(iter.next().is_some());
         assert!(iter.next().is_none());
     }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn decode_typed_archived_rejects_hash_mismatch() {
+        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
+        struct OtherMsg {
+            data: u32,
+        }
+
+        wire_type!(OtherMsg, "typed::OtherMsg");
+
+        let payload = encode_typed(&TestMsg { value: 9 }).unwrap();
+        match decode_typed_archived::<OtherMsg>(payload) {
+            Err(GossipError::InvalidConfig(msg)) => {
+                assert!(msg.contains("typed payload hash mismatch"));
+            }
+            Ok(_) => panic!("expected hash mismatch error"),
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_typed_archived_preserves_backing_slice() {
+        let payload = encode_typed(&TestMsg { value: 77 }).unwrap();
+        let offset = if cfg!(debug_assertions) { 8 } else { 0 };
+        let expected_ptr = unsafe { payload.as_ptr().add(offset) };
+
+        let archived = decode_typed_archived::<TestMsg>(payload.clone()).unwrap();
+        assert_eq!(archived.as_bytes().as_ptr(), expected_ptr);
+
+        let archived_view = archived.archived().unwrap();
+        assert_eq!(archived_view.value, 77);
+    }
 }
 
 /// Zero-copy wrapper for archived payloads that keeps the underlying bytes alive.
@@ -527,64 +560,11 @@ where
 {
     /// Access the archived payload with validation.
     pub fn archived(&self) -> Result<&<T as rkyv::Archive>::Archived> {
-        Ok(rkyv::access::<
-            <T as rkyv::Archive>::Archived,
-            rkyv::rancor::Error,
-        >(self.as_bytes())?)
+        Ok(crate::rkyv_utils::access_archived::<T>(self.as_bytes())?)
     }
 }
 
-/// Decode a typed message into an owned value.
-///
-/// In debug builds, verifies and strips the type hash prefix.
-///
-/// # Deprecated
-/// This allocates. Prefer `decode_typed_archived` or `decode_typed_zero_copy`.
-#[cfg(any(test, feature = "allow-non-zero-copy"))]
-#[deprecated(note = "Non-zero-copy; use decode_typed_archived or decode_typed_zero_copy.")]
-#[allow(deprecated)]
-pub fn decode_typed<T>(payload: &[u8]) -> Result<T>
-where
-    T: WireType + rkyv::Archive,
-    for<'a> T::Archived: rkyv::bytecheck::CheckBytes<
-            rkyv::rancor::Strategy<
-                rkyv::validation::Validator<
-                    rkyv::validation::archive::ArchiveValidator<'a>,
-                    rkyv::validation::shared::SharedValidator,
-                >,
-                rkyv::rancor::Error,
-            >,
-        > + rkyv::Deserialize<T, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
-{
-    #[cfg(debug_assertions)]
-    {
-        if payload.len() < 8 {
-            return Err(GossipError::InvalidConfig(format!(
-                "typed payload too short for type hash ({})",
-                T::TYPE_NAME
-            )));
-        }
-        let mut hash_bytes = [0u8; 8];
-        hash_bytes.copy_from_slice(&payload[..8]);
-        let hash = u64::from_be_bytes(hash_bytes);
-        if hash != T::TYPE_HASH {
-            return Err(GossipError::InvalidConfig(format!(
-                "typed payload hash mismatch for {}: expected {:016x}, got {:016x}",
-                T::TYPE_NAME,
-                T::TYPE_HASH,
-                hash
-            )));
-        }
-        let body = &payload[8..];
-        Ok(crate::rkyv_utils::deserialize_from_bytes::<T>(body)?)
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        Ok(crate::rkyv_utils::deserialize_from_bytes::<T>(payload)?)
-    }
-}
-
+// CRITICAL_PATH: zero-copy typed decode guard (must stay allocation-free).
 /// Decode a typed message into an archived view (zero-copy).
 ///
 /// In debug builds, verifies and strips the type hash prefix without copying.
@@ -638,6 +618,7 @@ where
     }
 }
 
+// CRITICAL_PATH: zero-copy typed decode guard (borrowed view).
 /// Decode a typed message using zero-copy deserialization - MOST EFFICIENT
 ///
 /// This is the RECOMMENDED function for hot paths. It returns a direct reference
@@ -645,6 +626,7 @@ where
 /// to the lifetime of the input bytes.
 ///
 /// **Performance**: 0 bytes allocated
+/// **Safety**: Caller must ensure the payload has been validated before use.
 /// **Use case**: Hot paths, high-frequency message processing
 ///
 /// # Example
@@ -686,18 +668,12 @@ where
             )));
         }
         let body = &payload[8..];
-        Ok(rkyv::access::<
-            <T as rkyv::Archive>::Archived,
-            rkyv::rancor::Error,
-        >(body)?)
+        Ok(crate::rkyv_utils::access_archived_unchecked::<T>(body))
     }
 
     #[cfg(not(debug_assertions))]
     {
-        Ok(rkyv::access::<
-            <T as rkyv::Archive>::Archived,
-            rkyv::rancor::Error,
-        >(payload)?)
+        Ok(crate::rkyv_utils::access_archived_unchecked::<T>(payload))
     }
 }
 

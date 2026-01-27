@@ -15,10 +15,10 @@ pub struct ReplyTo {
 
 impl ReplyTo {
     /// Send reply back to the original requester
-    pub async fn reply(self, response: &[u8]) -> Result<()> {
+    pub async fn reply(self, response: Bytes) -> Result<()> {
         let result = self
             .connection
-            .send_response_bytes(self.correlation_id, Bytes::copy_from_slice(response))
+            .send_response_bytes(self.correlation_id, response)
             .await;
 
         match &result {
@@ -71,10 +71,10 @@ impl ReplyTo {
             >,
         >,
     {
-        let response =
-            rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(GossipError::Serialization)?;
-        self.reply_bytes(Bytes::copy_from_slice(response.as_ref()))
-            .await
+        let response = rkyv::to_bytes::<rkyv::rancor::Error>(value)
+            .map_err(GossipError::Serialization)?
+            .into_boxed_slice();
+        self.reply_bytes(Bytes::from(response)).await
     }
 
     /// Create a reply handle with timeout
@@ -94,7 +94,7 @@ pub struct TimeoutReplyTo {
 
 impl TimeoutReplyTo {
     /// Reply if not timed out
-    pub async fn reply(self, response: &[u8]) -> Result<()> {
+    pub async fn reply(self, response: Bytes) -> Result<()> {
         if Instant::now() > self.deadline {
             return Err(GossipError::Timeout);
         }

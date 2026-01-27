@@ -141,8 +141,8 @@ async fn main() -> Result<()> {
     const BATCH_SIZE: usize = 100;
 
     // Prepare all requests
-    let all_requests: Vec<Vec<u8>> = (0..NUM_REQUESTS)
-        .map(|i| (i as u32).to_be_bytes().to_vec())
+    let all_requests: Vec<Bytes> = (0..NUM_REQUESTS)
+        .map(|i| Bytes::from((i as u32).to_be_bytes().to_vec()))
         .collect();
 
     // Test 1: Individual asks (baseline)
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
 
         for (i, request) in all_requests.iter().enumerate().take(NUM_REQUESTS.min(100)) {
             // Limit individual test to 100 for speed
-            match connection.ask(Bytes::copy_from_slice(request)).await {
+            match connection.ask(request.clone()).await {
                 Ok(response) => {
                     if response.len() >= 4 {
                         let value = u32::from_be_bytes([
@@ -195,9 +195,9 @@ async fn main() -> Result<()> {
             let batch_start = batch_idx * BATCH_SIZE;
             let batch_end = batch_start + BATCH_SIZE;
 
-            let batch_requests: Vec<&[u8]> = all_requests[batch_start..batch_end]
+            let batch_requests: Vec<Bytes> = all_requests[batch_start..batch_end]
                 .iter()
-                .map(|req| req.as_slice())
+                .cloned()
                 .collect();
 
             match connection.ask_batch(&batch_requests).await {
@@ -264,8 +264,7 @@ async fn main() -> Result<()> {
 
                 // Process in smaller batches
                 for (chunk_idx, chunk) in task_requests.chunks(50).enumerate() {
-                    let batch_requests: Vec<&[u8]> =
-                        chunk.iter().map(|req| req.as_slice()).collect();
+                    let batch_requests: Vec<Bytes> = chunk.iter().cloned().collect();
 
                     match connection_clone.ask_batch(&batch_requests).await {
                         Ok(receivers) => {

@@ -9,7 +9,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     time::{interval, Instant},
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::{
     connection_pool::handle_incoming_message,
@@ -1072,6 +1072,11 @@ where
                 response_connection.as_ref(),
             )
             .await;
+            trace!(
+                peer = %peer_addr,
+                correlation_id,
+                "incoming response delivered (initial read)"
+            );
         }
         Ok(MessageReadResult::Actor {
             msg_type,
@@ -1090,14 +1095,28 @@ where
             if let Some(handler) = registry.load_actor_message_handler() {
                 let mut id_buf = itoa::Buffer::new();
                 let actor_id_str = id_buf.format(actor_id);
-                let correlation = if msg_type == crate::MessageType::ActorAsk as u8 {
-                    Some(correlation_id)
-                } else {
-                    None
-                };
-                let _ = handler
+                let is_ask = msg_type == crate::MessageType::ActorAsk as u8;
+                let correlation = if is_ask { Some(correlation_id) } else { None };
+                match handler
                     .handle_actor_message(&actor_id_str, type_hash, payload.as_slice(), correlation)
-                    .await;
+                    .await
+                {
+                    Ok(Some(reply_payload)) if is_ask => {
+                        if let Some(corr_id) = correlation {
+                            send_streaming_response(&registry, peer_addr, corr_id, reply_payload)
+                                .await;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(
+                            peer = %peer_addr,
+                            error = %e,
+                            actor_id = %actor_id_str,
+                            "Actor handler error on incoming TLS connection",
+                        );
+                    }
+                }
             }
         }
         Ok(MessageReadResult::Streaming {
@@ -1180,6 +1199,11 @@ where
                     response_connection.as_ref(),
                 )
                 .await;
+                trace!(
+                    peer = %peer_addr,
+                    correlation_id,
+                    "incoming response delivered"
+                );
             }
             Ok(MessageReadResult::Actor {
                 msg_type,
@@ -1201,19 +1225,47 @@ where
                 if let Some(handler) = registry.load_actor_message_handler() {
                     let mut id_buf = itoa::Buffer::new();
                     let actor_id_str = id_buf.format(actor_id);
-                    let correlation = if msg_type == crate::MessageType::ActorAsk as u8 {
-                        Some(correlation_id)
-                    } else {
-                        None
-                    };
-                    let _ = handler
+                    let is_ask = msg_type == crate::MessageType::ActorAsk as u8;
+                    let correlation = if is_ask { Some(correlation_id) } else { None };
+                    match handler
                         .handle_actor_message(
                             &actor_id_str,
                             type_hash,
                             payload.as_slice(),
                             correlation,
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(Some(reply_payload)) if is_ask => {
+                            if let Some(corr_id) = correlation {
+                                if let Some(connection) = response_connection.as_ref() {
+                                    send_streaming_response_via_connection(
+                                        connection,
+                                        corr_id,
+                                        reply_payload,
+                                    )
+                                    .await;
+                                } else {
+                                    send_streaming_response(
+                                        &registry,
+                                        peer_addr,
+                                        corr_id,
+                                        reply_payload,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(
+                                peer = %peer_addr,
+                                error = %e,
+                                actor_id = %actor_id_str,
+                                "Actor handler error on outgoing reader",
+                            );
+                        }
+                    }
                 }
             }
             Ok(MessageReadResult::Streaming {
@@ -1289,6 +1341,7 @@ pub(crate) enum StreamingFrame {
 #[derive(Debug, Clone)]
 pub(crate) enum StreamingData {
     Direct { chunk_len: usize },
+    Owned { chunk: bytes::Bytes },
 }
 
 #[derive(Clone, Debug)]
@@ -1402,6 +1455,39 @@ pub(crate) async fn handle_raw_ask_request(
     }
 }
 
+async fn send_streaming_response_via_connection(
+    connection: &Arc<crate::connection_pool::LockFreeConnection>,
+    correlation_id: u16,
+    response: bytes::Bytes,
+) {
+    if let Some(ref stream_handle) = connection.stream_handle {
+        let header = crate::framing::write_ask_response_header(
+            crate::MessageType::Response,
+            correlation_id,
+            response.len(),
+        );
+        if let Err(e) = stream_handle
+            .write_header_and_payload_ask_inline(
+                header,
+                crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN as u8,
+                response,
+            )
+            .await
+        {
+            warn!(
+                peer = %connection.addr,
+                error = %e,
+                "Failed to send ask response via connection"
+            );
+        }
+    } else {
+        warn!(
+            peer = %connection.addr,
+            "Connection missing stream handle for ask response"
+        );
+    }
+}
+
 async fn send_streaming_response(
     registry: &Arc<GossipRegistry>,
     peer_addr: SocketAddr,
@@ -1417,27 +1503,7 @@ async fn send_streaming_response(
     };
 
     if let Some(conn) = conn {
-        if let Some(ref stream_handle) = conn.stream_handle {
-            let len = response.len();
-            let header = crate::framing::write_ask_response_header(
-                crate::MessageType::Response,
-                correlation_id,
-                len,
-            );
-
-            if let Err(e) = stream_handle
-                .write_header_and_payload_control_inline(
-                    header,
-                    crate::framing::ASK_RESPONSE_FRAME_HEADER_LEN as u8,
-                    response,
-                )
-                .await
-            {
-                warn!(peer = %peer_addr, error = %e, "Failed to send streamed ask response");
-            }
-        } else {
-            warn!(peer = %peer_addr, "No stream handle for streamed ask response");
-        }
+        send_streaming_response_via_connection(&conn, correlation_id, response).await;
     } else {
         warn!(peer = %peer_addr, "No connection found for streamed ask response");
     }
@@ -1517,6 +1583,11 @@ async fn handle_streaming_frame<R>(
                         }
                     }
                 }
+            }
+            StreamingData::Owned { chunk: _ } => {
+                // For response streaming, chunks are already in memory
+                // This shouldn't happen in tell streaming path
+                warn!(peer = %peer_addr, "Received unexpected owned chunk in tell streaming");
             }
         },
         StreamingFrame::End => match assembler.finish_with_end() {
@@ -1745,6 +1816,11 @@ where
     {
         let correlation_id = u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
         let payload = msg_data.into_slice_from(crate::framing::ASK_RESPONSE_HEADER_LEN);
+        tracing::debug!(
+            correlation_id,
+            payload_len = payload.len(),
+            "read_message_from_tls_reader decoded AskRaw frame"
+        );
 
         match decode_registry_message(payload) {
             Ok(frame) => {
@@ -1772,6 +1848,11 @@ where
     {
         let correlation_id = u16::from_be_bytes([msg_data.as_slice()[1], msg_data.as_slice()[2]]);
         let payload = msg_data.into_slice_from(crate::framing::ASK_RESPONSE_HEADER_LEN);
+        tracing::debug!(
+            correlation_id,
+            payload_len = payload.len(),
+            "read_message_from_tls_reader decoded Response frame"
+        );
         Ok(MessageReadResult::Response {
             correlation_id,
             payload: payload.into_bytes(),
@@ -1837,6 +1918,15 @@ where
                                 bytes.as_ptr() as usize
                             );
                         }
+
+                        tracing::debug!(
+                            msg_type = msg_type_byte,
+                            correlation_id,
+                            actor_id,
+                            type_hash = format_args!("{:#x}", type_hash),
+                            payload_len,
+                            "read_message_from_tls_reader decoded actor frame"
+                        );
 
                         return Ok(MessageReadResult::Actor {
                             msg_type: msg_type_byte,

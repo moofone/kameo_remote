@@ -1,6 +1,7 @@
 #[cfg(debug_assertions)]
 mod tests {
-    use kameo_remote::typed::decode_typed_zero_copy;
+    use bytes::Bytes;
+    use kameo_remote::typed::{decode_typed_archived, decode_typed_zero_copy};
     use kameo_remote::{encode_typed, wire_type};
 
     #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
@@ -37,5 +38,18 @@ mod tests {
             err_str.contains("hash mismatch"),
             "expected hash mismatch error, got: {err_str}"
         );
+    }
+
+    #[test]
+    fn decode_typed_archived_shares_buffer() {
+        let msg = Ping { id: 99 };
+        let payload = encode_typed(&msg).expect("encode_typed should succeed");
+        let bytes = Bytes::from(payload);
+        let offset = if cfg!(debug_assertions) { 8 } else { 0 };
+        let expected_ptr = unsafe { bytes.as_ptr().add(offset) };
+
+        let archived = decode_typed_archived::<Ping>(bytes.clone()).expect("archived decode");
+        assert_eq!(archived.as_bytes().as_ptr(), expected_ptr);
+        assert_eq!(archived.archived().unwrap().id.to_native(), msg.id);
     }
 }

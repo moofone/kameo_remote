@@ -146,8 +146,8 @@ async fn test_ask_response_with_correlation() {
         let mut futures = Vec::new();
         
         for i in 0..10 {
-            let request = format!("Test {}", i).into_bytes();
-            let reply_to = conn.ask_with_reply_to(&request).await.unwrap();
+            let request = Bytes::from(format!("Test {}", i).into_bytes());
+            let reply_to = conn.ask_with_reply_to(request).await.unwrap();
             futures.push((i, reply_to));
         }
         
@@ -262,8 +262,9 @@ async fn test_ask_performance() {
     {
         let pool = registry_a.connection_pool.lock().await;
         let conn = pool.connections_by_addr.values().next().unwrap();
+        let warmup = Bytes::from_static(b"warmup");
         for _ in 0..100 {
-            let _ = conn.ask_with_reply_to(b"warmup").await;
+            let _ = conn.ask_with_reply_to(warmup.clone()).await;
         }
     }
     
@@ -282,11 +283,11 @@ async fn test_ask_performance() {
     for i in 0..num_requests {
         let conn_clone = conn.clone();
         let handle = tokio::spawn(async move {
-            let request = format!("req{}", i % 100).into_bytes();
-            let reply_to = conn_clone.ask_with_reply_to(&request).await.unwrap();
+            let request = Bytes::from(format!("req{}", i % 100).into_bytes());
+            let reply_to = conn_clone.ask_with_reply_to(request).await.unwrap();
             
             // Simulate immediate reply
-            reply_to.reply(b"ok").await.unwrap();
+            reply_to.reply(Bytes::from_static(b"ok")).await.unwrap();
         });
         handles.push(handle);
         

@@ -2,7 +2,8 @@
 // Ensures archived access paths allocate 0 bytes.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::convert::TryFrom;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -20,18 +21,57 @@ use tokio::runtime::Builder;
 struct AllocTracker {
     system: System,
     allocations: AtomicUsize,
-    total_bytes: AtomicUsize,
+    bytes_current: AtomicI64,
+    bytes_peak: AtomicI64,
+}
+
+impl AllocTracker {
+    fn update_peak(&self, current: i64) {
+        let mut peak = self.bytes_peak.load(Ordering::SeqCst);
+        while current > peak {
+            match self.bytes_peak.compare_exchange(
+                peak,
+                current,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => peak = actual,
+            }
+        }
+    }
+
+    fn adjust_bytes(&self, delta: i64) -> i64 {
+        loop {
+            let current = self.bytes_current.load(Ordering::SeqCst);
+            let next_unclamped = current
+                .checked_add(delta)
+                .expect("allocation tracking overflow");
+            let next = next_unclamped.max(0);
+            if self
+                .bytes_current
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return next;
+            }
+        }
+    }
 }
 
 unsafe impl GlobalAlloc for AllocTracker {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = self.system.alloc(layout);
         self.allocations.fetch_add(1, Ordering::SeqCst);
-        self.total_bytes.fetch_add(layout.size(), Ordering::SeqCst);
-        self.system.alloc(layout)
+        let size = i64::try_from(layout.size()).expect("allocation size exceeds i64::MAX");
+        let current = self.adjust_bytes(size);
+        self.update_peak(current);
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.total_bytes.fetch_sub(layout.size(), Ordering::SeqCst);
+        let size = i64::try_from(layout.size()).expect("allocation size exceeds i64::MAX");
+        self.adjust_bytes(-size);
         self.system.dealloc(ptr, layout)
     }
 }
@@ -40,23 +80,27 @@ unsafe impl GlobalAlloc for AllocTracker {
 static GLOBAL: AllocTracker = AllocTracker {
     system: System,
     allocations: AtomicUsize::new(0),
-    total_bytes: AtomicUsize::new(0),
+    bytes_current: AtomicI64::new(0),
+    bytes_peak: AtomicI64::new(0),
 };
 
 fn reset_allocation_tracking() {
     GLOBAL.allocations.store(0, Ordering::SeqCst);
-    GLOBAL.total_bytes.store(0, Ordering::SeqCst);
+    GLOBAL.bytes_current.store(0, Ordering::SeqCst);
+    GLOBAL.bytes_peak.store(0, Ordering::SeqCst);
 }
 
 struct AllocationMetrics {
     allocations: usize,
-    total_bytes: usize,
+    bytes_current: usize,
+    bytes_peak: usize,
 }
 
 fn get_allocation_metrics() -> AllocationMetrics {
     AllocationMetrics {
         allocations: GLOBAL.allocations.load(Ordering::SeqCst),
-        total_bytes: GLOBAL.total_bytes.load(Ordering::SeqCst),
+        bytes_current: GLOBAL.bytes_current.load(Ordering::SeqCst).max(0) as usize,
+        bytes_peak: GLOBAL.bytes_peak.load(Ordering::SeqCst).max(0) as usize,
     }
 }
 
@@ -71,8 +115,8 @@ where
     let metrics = get_allocation_metrics();
 
     eprintln!(
-        "Allocations: {} ({} bytes) | Time: {:?}",
-        metrics.allocations, metrics.total_bytes, duration
+        "Allocations: {} (peak {} bytes, current {} bytes) | Time: {:?}",
+        metrics.allocations, metrics.bytes_peak, metrics.bytes_current, duration
     );
 
     metrics
@@ -81,7 +125,7 @@ where
 #[test]
 fn zero_copy_registry_message_body_allocations() {
     println!("\n=== ZERO-COPY: RegistryMessage Body Access ===");
-    println!("Current code path: rkyv::access::<Archived<RegistryMessage>>()");
+    println!("Current code path: access_archived() once, then access_archived_unchecked()");
 
     // Create a typical ActorMessage payload (1KB)
     let payload = vec![42u8; 1024];
@@ -97,27 +141,23 @@ fn zero_copy_registry_message_body_allocations() {
     let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
 
     // Warm-up to avoid counting one-time setup work.
-    let _ = rkyv::access::<<RegistryMessage as rkyv::Archive>::Archived, rkyv::rancor::Error>(
-        serialized.as_ref(),
-    )
-    .unwrap();
+    let _ =
+        kameo_remote::rkyv_utils::access_archived::<RegistryMessage>(serialized.as_ref()).unwrap();
 
     let metrics = measure_allocations(|| {
         for _ in 0..100 {
-            let _archived = rkyv::access::<
-                <RegistryMessage as rkyv::Archive>::Archived,
-                rkyv::rancor::Error,
-            >(serialized.as_ref())
-            .unwrap();
+            let _archived = kameo_remote::rkyv_utils::access_archived_unchecked::<RegistryMessage>(
+                serialized.as_ref(),
+            );
         }
     });
 
-    println!("ZERO-COPY (rkyv::access):");
+    println!("ZERO-COPY (access_archived_unchecked):");
     println!(
         "  → {} allocations per 100 archived accesses",
         metrics.allocations
     );
-    println!("  → Total bytes: {}", metrics.total_bytes);
+    println!("  → Peak bytes: {}", metrics.bytes_peak);
 
     assert!(
         metrics.allocations <= 16,
@@ -143,27 +183,23 @@ fn zero_copy_distributed_actor_messages() {
     let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
 
     // Warm-up to avoid counting one-time setup work.
-    let _ = rkyv::access::<<RegistryMessage as rkyv::Archive>::Archived, rkyv::rancor::Error>(
-        serialized.as_ref(),
-    )
-    .unwrap();
+    let _ =
+        kameo_remote::rkyv_utils::access_archived::<RegistryMessage>(serialized.as_ref()).unwrap();
 
     let metrics = measure_allocations(|| {
         for _ in 0..100 {
-            let _archived = rkyv::access::<
-                <RegistryMessage as rkyv::Archive>::Archived,
-                rkyv::rancor::Error,
-            >(serialized.as_ref())
-            .unwrap();
+            let _archived = kameo_remote::rkyv_utils::access_archived_unchecked::<RegistryMessage>(
+                serialized.as_ref(),
+            );
         }
     });
 
-    println!("ZERO-COPY (rkyv::access):");
+    println!("ZERO-COPY (access_archived_unchecked):");
     println!(
         "  → {} allocations per 100 archived accesses",
         metrics.allocations
     );
-    println!("  → Total bytes: {}", metrics.total_bytes);
+    println!("  → Peak bytes: {}", metrics.bytes_peak);
 
     assert!(
         metrics.allocations <= 16,
@@ -236,7 +272,7 @@ fn zero_copy_streaming_completion_allocations() {
 
     println!(
         "ZERO-COPY (streaming ingest): {} allocations, {} bytes",
-        metrics.allocations, metrics.total_bytes
+        metrics.allocations, metrics.bytes_peak
     );
 
     assert!(
@@ -259,7 +295,7 @@ fn baseline_summary() {
     println!();
 
     println!("EXPECTED BEHAVIOR:");
-    println!("  rkyv::access::<Archived<RegistryMessage>>() returns &Archived<RegistryMessage>");
+    println!("  access_archived_unchecked::<RegistryMessage>() returns &Archived<RegistryMessage>");
     println!("  → Zero-copy reference into serialized buffer");
     println!();
 }
