@@ -260,7 +260,13 @@ impl GossipRegistryHandle {
         // Connection monitoring is now done in the gossip timer
         let monitor_handle = None;
 
-        info!(bind_addr = %actual_bind_addr, "TLS-enabled gossip registry started");
+        // Log startup with DNS gossip mode status
+        let dns_mode = config.advertise_dns.as_deref().unwrap_or("disabled");
+        info!(
+            bind_addr = %actual_bind_addr,
+            advertise_dns = dns_mode,
+            "TLS-enabled gossip registry started"
+        );
 
         Ok(Self {
             registry,
@@ -404,6 +410,32 @@ impl GossipRegistryHandle {
             .await
             .get_connection_to_peer(peer_id)
             .await
+    }
+
+    /// Set the DNS name for a peer. When a peer has a DNS name configured,
+    /// the gossip system will re-resolve the DNS to get the current IP address
+    /// when attempting to reconnect after a connection failure.
+    ///
+    /// This is essential for Kubernetes deployments where pods may restart
+    /// and get new IP addresses, but the Service DNS name remains stable.
+    ///
+    /// # Arguments
+    /// * `peer_addr` - The current socket address of the peer
+    /// * `dns_name` - The DNS name to use for re-resolution (e.g., "data-feeder-kameo:9400")
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After connecting to a peer, set its DNS name for automatic re-resolution
+    /// handle.set_peer_dns_name(resolved_addr, "data-feeder-kameo:9400".to_string()).await;
+    /// ```
+    pub async fn set_peer_dns_name(&self, peer_addr: std::net::SocketAddr, dns_name: String) {
+        self.registry.set_peer_dns_name(peer_addr, dns_name).await;
+    }
+
+    /// Manually trigger DNS re-resolution for a peer.
+    /// Returns the new address if the IP changed, None if unchanged or failed.
+    pub async fn refresh_peer_dns(&self, peer_addr: std::net::SocketAddr) -> Option<std::net::SocketAddr> {
+        self.registry.refresh_peer_dns(peer_addr).await
     }
 
     /// Bootstrap peer connections non-blocking (Phase 4)
@@ -1765,21 +1797,35 @@ async fn send_gossip_message_zero_copy(
     mut task: GossipTask,
     registry: Arc<GossipRegistry>,
 ) -> Result<()> {
-    // Check if this is a retry attempt
-    let is_retry = {
+    // Check if this is a retry attempt and if DNS refresh is needed
+    let (is_retry, has_dns) = {
         let gossip_state = registry.gossip_state.lock().await;
-        gossip_state
-            .peers
-            .get(&task.peer_addr)
-            .map(|p| p.failures > 0)
-            .unwrap_or(false)
+        let peer_info = gossip_state.peers.get(&task.peer_addr);
+        (
+            peer_info.map(|p| p.failures > 0).unwrap_or(false),
+            peer_info.map(|p| p.dns_name.is_some()).unwrap_or(false),
+        )
     };
 
     if is_retry {
         info!(
             peer = %task.peer_addr,
+            has_dns = has_dns,
             "🔄 GOSSIP RETRY: Attempting to reconnect to previously failed peer"
         );
+
+        // If the peer has a DNS name, try to re-resolve it before connecting
+        // This handles Kubernetes pod restarts where the IP changes
+        if has_dns {
+            if let Some(new_addr) = registry.refresh_peer_dns(task.peer_addr).await {
+                info!(
+                    old_addr = %task.peer_addr,
+                    new_addr = %new_addr,
+                    "🔄 DNS refresh: Using new IP address for peer"
+                );
+                task.peer_addr = new_addr;
+            }
+        }
     }
 
     // Get connection with minimal lock contention

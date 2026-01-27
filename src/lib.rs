@@ -729,6 +729,7 @@ impl Peer {
                     address: *addr,
                     peer_address: None,
                     node_id,                    // Set the NodeId for TLS verification
+                    dns_name: None,             // Will be set via set_dns_name() if needed
                     failures: 0,                // Start with 0 failures
                     last_attempt: current_time, // Set last_attempt to now
                     last_success: 0,

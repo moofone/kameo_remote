@@ -27,6 +27,7 @@ fn peer_info(addr: &str, last_attempt: u64, last_success: u64) -> PeerInfoGossip
         failures: 0,
         last_attempt,
         last_success,
+        dns_name: None,
     }
 }
 

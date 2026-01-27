@@ -2164,13 +2164,13 @@ macro_rules! tell_msg {
 pub struct ConnectionPool {
     /// PRIMARY: Mapping Peer ID -> LockFreeConnection
     /// This is the main storage - we identify connections by peer ID, not address
-    connections_by_peer: dashmap::DashMap<crate::PeerId, Arc<LockFreeConnection>>,
+    pub connections_by_peer: dashmap::DashMap<crate::PeerId, Arc<LockFreeConnection>>,
     /// SECONDARY: Mapping SocketAddr -> Peer ID (for incoming connection identification)
-    addr_to_peer_id: dashmap::DashMap<SocketAddr, crate::PeerId>,
+    pub addr_to_peer_id: dashmap::DashMap<SocketAddr, crate::PeerId>,
     /// Configuration: Peer ID -> Expected SocketAddr (where to connect)
     pub peer_id_to_addr: dashmap::DashMap<crate::PeerId, SocketAddr>,
     /// Address-based connection index for fast lookup by SocketAddr
-    connections_by_addr: dashmap::DashMap<SocketAddr, Arc<LockFreeConnection>>,
+    pub connections_by_addr: dashmap::DashMap<SocketAddr, Arc<LockFreeConnection>>,
     /// Shared correlation trackers by peer ID - ensures ask/response works across bidirectional connections
     correlation_trackers: dashmap::DashMap<crate::PeerId, Arc<CorrelationTracker>>,
     max_connections: usize,
@@ -5632,6 +5632,7 @@ pub(crate) fn handle_incoming_message(
                                 address: sender_socket_addr,
                                 peer_address: None,
                                 node_id: None,
+                                dns_name: None,
                                 failures: 0,
                                 last_attempt: current_time,
                                 last_success: current_time,
@@ -6109,6 +6110,7 @@ pub(crate) fn handle_incoming_message(
                                 address: sender_socket_addr,
                                 peer_address: Some(_peer_addr), // Remember the actual connection address
                                 node_id: None,
+                                dns_name: None,
                                 failures: 0,
                                 last_attempt: current_time,
                                 last_success: current_time,

@@ -62,7 +62,7 @@ impl ActorMessageHandler for ConsoleActorHandler {
     fn handle_actor_message(
         &self,
         actor_id: &str,
-        type_hash: u32,
+        _type_hash: u32,
         payload: &[u8],
         correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_> {

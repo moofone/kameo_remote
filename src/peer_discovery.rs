@@ -630,6 +630,7 @@ mod tests {
             failures: 0,
             last_attempt: 0,
             last_success: 0,
+            dns_name: None,
         }
     }
 

@@ -250,6 +250,7 @@ async fn test_peer_list_ttl_cleanup() -> Result<(), Box<dyn std::error::Error>> 
         failures: 0,
         last_attempt: now.saturating_sub(5),
         last_success: now.saturating_sub(5),
+        dns_name: None,
     };
 
     node.registry
@@ -384,6 +385,7 @@ async fn test_resource_exhaustion_protection() -> Result<(), Box<dyn std::error:
             failures: 0,
             last_attempt: now,
             last_success: now,
+            dns_name: None,
         });
     }
 
@@ -604,6 +606,7 @@ async fn test_ssrf_bogon_filtering() -> Result<(), Box<dyn std::error::Error>> {
             failures: 0,
             last_attempt: 0,
             last_success: 0,
+            dns_name: None,
         },
         PeerInfoGossip {
             address: "[fe80::1]:9000".to_string(),
@@ -612,6 +615,7 @@ async fn test_ssrf_bogon_filtering() -> Result<(), Box<dyn std::error::Error>> {
             failures: 0,
             last_attempt: 0,
             last_success: 0,
+            dns_name: None,
         },
     ];
 

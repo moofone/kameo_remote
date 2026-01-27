@@ -115,6 +115,10 @@ pub struct GossipConfig {
     /// Number of connected peers required before recording mesh_formation_time_ms
     /// Set to 0 to disable metric tracking.
     pub mesh_formation_target: usize,
+    /// DNS name to advertise in gossip (e.g., "data-feeder.default.svc.cluster.local:9000")
+    /// When set, this DNS name is included in gossip messages so peers can re-resolve
+    /// the address if the underlying IP changes (e.g., Kubernetes pod restarts)
+    pub advertise_dns: Option<String>,
 }
 
 impl Default for GossipConfig {
@@ -167,6 +171,9 @@ impl Default for GossipConfig {
             stale_ttl: Duration::from_secs(24 * 60 * 60), // 24 hours
             known_peers_capacity: 10_000,
             mesh_formation_target: 2,
+            // Read advertise_dns from environment for Kubernetes-style deployments
+            // Example: KAMEO_ADVERTISE_DNS=data-feeder.default.svc.cluster.local:9400
+            advertise_dns: std::env::var("KAMEO_ADVERTISE_DNS").ok(),
         }
     }
 }
