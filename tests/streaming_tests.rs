@@ -442,3 +442,128 @@ fn test_message_type_streaming_response_variants() {
 
     info!("✅ MessageType streaming variants test passed");
 }
+
+/// Test streaming tell (correlation_id = 0) - fire-and-forget, no response expected
+///
+/// This test verifies that:
+/// 1. Streaming tells with correlation_id = 0 are correctly routed to the handler
+/// 2. The handler receives `None` for correlation_id (not `Some(0)`)
+/// 3. No response is sent back on the wire (handler returns None, no send_streaming_response called)
+#[tokio::test]
+async fn test_streaming_tell_no_response() {
+    use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    init_tracing();
+
+    // Shared state to track handler invocations
+    struct TellTestHandler {
+        message_received: AtomicBool,
+        correlation_was_none: AtomicBool,
+        payload_size: AtomicU32,
+    }
+
+    impl ActorMessageHandler for TellTestHandler {
+        fn handle_actor_message(
+            &self,
+            _actor_id: &str,
+            _type_hash: u32,
+            payload: &[u8],
+            correlation_id: Option<u16>,
+        ) -> ActorMessageFuture<'_> {
+            self.message_received.store(true, Ordering::SeqCst);
+            self.correlation_was_none.store(correlation_id.is_none(), Ordering::SeqCst);
+            self.payload_size.store(payload.len() as u32, Ordering::SeqCst);
+
+            info!(
+                "📨 TellTestHandler received {} bytes, correlation_id={:?}",
+                payload.len(),
+                correlation_id
+            );
+
+            // For tells, we return None (no response)
+            Box::pin(async move { Ok(None) })
+        }
+    }
+
+    let addr_a: SocketAddr = "127.0.0.1:7941".parse().unwrap();
+    let addr_b: SocketAddr = "127.0.0.1:7942".parse().unwrap();
+
+    let key_pair_a = KeyPair::new_for_testing("tell_node_a");
+    let key_pair_b = KeyPair::new_for_testing("tell_node_b");
+
+    let peer_id_b = key_pair_b.peer_id();
+
+    let config = GossipConfig {
+        gossip_interval: Duration::from_secs(300),
+        ..Default::default()
+    };
+
+    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+        .await
+        .unwrap();
+
+    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+        .await
+        .unwrap();
+
+    // Set up the test handler on node B
+    let handler = Arc::new(TellTestHandler {
+        message_received: AtomicBool::new(false),
+        correlation_was_none: AtomicBool::new(false),
+        payload_size: AtomicU32::new(0),
+    });
+    handle_b
+        .registry
+        .set_actor_message_handler(handler.clone())
+        .await;
+
+    // Connect nodes
+    let peer_b = handle_a.add_peer(&peer_id_b).await;
+    peer_b.connect(&addr_b).await.unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    info!("Test: Streaming tell (correlation_id=0) - fire-and-forget");
+
+    let conn = handle_a.get_connection(addr_b).await.unwrap();
+
+    // Create a large payload (>1MB to trigger streaming)
+    let payload_size = 1_500_000; // 1.5MB
+    let payload = create_test_payload(payload_size);
+
+    // Send as a streaming tell (correlation_id = 0)
+    // This uses stream_large_message which sends with correlation_id = 0
+    let test_type_hash: u32 = 0x7E11_7E57; // "TELL_TEST" in hex-ish
+    let test_actor_id: u64 = 12345;
+
+    info!("📤 Sending {} byte streaming tell...", payload_size);
+    conn.stream_large_message(&payload, test_type_hash, test_actor_id)
+        .await
+        .expect("stream_large_message should succeed");
+
+    // Wait for the message to be processed
+    sleep(Duration::from_millis(500)).await;
+
+    // Verify the handler was called correctly
+    assert!(
+        handler.message_received.load(Ordering::SeqCst),
+        "Handler should have received the streaming tell"
+    );
+    assert!(
+        handler.correlation_was_none.load(Ordering::SeqCst),
+        "Handler should have received None for correlation_id (tell, not ask)"
+    );
+    assert_eq!(
+        handler.payload_size.load(Ordering::SeqCst) as usize,
+        payload_size,
+        "Handler should have received the full payload"
+    );
+
+    info!("✅ Streaming tell test passed:");
+    info!("   - Handler received message: true");
+    info!("   - correlation_id was None: true (fire-and-forget)");
+    info!("   - No response sent (tell semantics)");
+
+    handle_a.shutdown().await;
+    handle_b.shutdown().await;
+}

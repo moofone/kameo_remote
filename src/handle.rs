@@ -63,6 +63,7 @@ struct InProgressStream {
     total_size: u64,
     type_hash: u32,
     actor_id: u64,
+    correlation_id: u16,
     chunks: BTreeMap<u32, Bytes>, // chunk_index -> chunk_data
     received_size: usize,
     /// Timestamp when stream started (for stale cleanup)
@@ -77,7 +78,7 @@ impl StreamingState {
         }
     }
 
-    fn start_stream(&mut self, header: crate::StreamHeader) -> Result<()> {
+    fn start_stream_with_correlation(&mut self, header: crate::StreamHeader, correlation_id: u16) -> Result<()> {
         if self.active_streams.len() >= self.max_concurrent_streams {
             return Err(GossipError::Network(std::io::Error::new(
                 std::io::ErrorKind::ResourceBusy,
@@ -90,6 +91,7 @@ impl StreamingState {
             total_size: header.total_size,
             type_hash: header.type_hash,
             actor_id: header.actor_id,
+            correlation_id,
             chunks: BTreeMap::new(),
             received_size: 0,
             started_at: std::time::Instant::now(),
@@ -99,11 +101,11 @@ impl StreamingState {
         Ok(())
     }
 
-    fn add_chunk(
+    fn add_chunk_with_correlation(
         &mut self,
         header: crate::StreamHeader,
         chunk_data: Bytes,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<(Vec<u8>, u16)>> {
         let stream = self
             .active_streams
             .get_mut(&header.stream_id)
@@ -120,24 +122,26 @@ impl StreamingState {
 
         // Check if we have all chunks (when total matches expected size)
         if stream.received_size >= stream.total_size as usize {
-            self.assemble_complete_message(header.stream_id)
+            self.assemble_complete_message_with_correlation(header.stream_id)
         } else {
             Ok(None)
         }
     }
 
-    fn finalize_stream(&mut self, stream_id: u64) -> Result<Option<Vec<u8>>> {
+    fn finalize_stream_with_correlation(&mut self, stream_id: u64) -> Result<Option<(Vec<u8>, u16)>> {
         // StreamEnd received - assemble the message
-        self.assemble_complete_message(stream_id)
+        self.assemble_complete_message_with_correlation(stream_id)
     }
 
-    fn assemble_complete_message(&mut self, stream_id: u64) -> Result<Option<Vec<u8>>> {
+    fn assemble_complete_message_with_correlation(&mut self, stream_id: u64) -> Result<Option<(Vec<u8>, u16)>> {
         let stream = self.active_streams.remove(&stream_id).ok_or_else(|| {
             GossipError::Network(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Cannot finalize unknown stream_id={}", stream_id),
             ))
         })?;
+
+        let correlation_id = stream.correlation_id;
 
         // Assemble chunks in order
         let mut complete_data = BytesMut::with_capacity(stream.total_size as usize);
@@ -146,14 +150,15 @@ impl StreamingState {
         }
 
         info!(
-            "✅ STREAMING: Assembled complete message for stream_id={} ({} bytes for actor={}, type_hash=0x{:x})",
+            "✅ STREAMING: Assembled complete message for stream_id={} ({} bytes for actor={}, type_hash=0x{:x}, correlation_id={})",
             stream.stream_id,
             complete_data.len(),
             stream.actor_id,
-            stream.type_hash
+            stream.type_hash,
+            correlation_id
         );
 
-        Ok(Some(complete_data.to_vec()))
+        Ok(Some((complete_data.to_vec(), correlation_id)))
     }
 
     /// Clean up stale streams that have been incomplete for too long.
@@ -1131,6 +1136,7 @@ where
         }
         Ok(MessageReadResult::Streaming {
             msg_type,
+            correlation_id,
             stream_header,
             chunk_data,
         }) => {
@@ -1139,7 +1145,7 @@ where
                 msg_type if msg_type == crate::MessageType::StreamStart as u8
                     || msg_type == crate::MessageType::StreamResponseStart as u8 =>
                 {
-                    if let Err(e) = streaming_state.start_stream(stream_header) {
+                    if let Err(e) = streaming_state.start_stream_with_correlation(stream_header, correlation_id) {
                         warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
                     }
                 }
@@ -1147,23 +1153,31 @@ where
                     || msg_type == crate::MessageType::StreamResponseData as u8 =>
                 {
                     // Data chunk - this should not be the first message typically, but handle it
-                    if let Err(e) = streaming_state.start_stream(stream_header) {
+                    if let Err(e) = streaming_state.start_stream_with_correlation(stream_header, correlation_id) {
                         debug!(error = %e, "Auto-starting stream for data chunk: stream_id={}", stream_header.stream_id);
                     }
-                    if let Ok(Some(complete_data)) =
-                        streaming_state.add_chunk(stream_header, chunk_data)
+                    if let Ok(Some((complete_data, corr_id))) =
+                        streaming_state.add_chunk_with_correlation(stream_header, chunk_data)
                     {
                         // Complete message assembled - route to actor
+                        // corr_id == 0 means tell (fire-and-forget), non-zero means ask (expects response)
+                        let correlation_opt = if corr_id == 0 { None } else { Some(corr_id) };
                         if let Some(handler) = &*registry.actor_message_handler.lock().await {
                             let actor_id_str = stream_header.actor_id.to_string();
-                            let _ = handler
+                            if let Ok(Some(response)) = handler
                                 .handle_actor_message(
                                     &actor_id_str,
                                     stream_header.type_hash,
                                     &complete_data,
-                                    None,
+                                    correlation_opt,
                                 )
-                                .await;
+                                .await
+                            {
+                                // Only send response for asks (non-zero correlation_id)
+                                if corr_id != 0 {
+                                    send_streaming_response(&registry, peer_addr, corr_id, response).await;
+                                }
+                            }
                         }
                     }
                 }
@@ -1269,6 +1283,7 @@ where
             }
             Ok(MessageReadResult::Streaming {
                 msg_type,
+                correlation_id,
                 stream_header,
                 chunk_data,
             }) => {
@@ -1277,47 +1292,63 @@ where
                     msg_type if msg_type == crate::MessageType::StreamStart as u8
                         || msg_type == crate::MessageType::StreamResponseStart as u8 =>
                     {
-                        if let Err(e) = streaming_state.start_stream(stream_header) {
+                        if let Err(e) = streaming_state.start_stream_with_correlation(stream_header, correlation_id) {
                             warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
                         }
                     }
                     msg_type if msg_type == crate::MessageType::StreamData as u8
                         || msg_type == crate::MessageType::StreamResponseData as u8 =>
                     {
-                        if let Ok(Some(complete_data)) =
-                            streaming_state.add_chunk(stream_header, chunk_data)
+                        if let Ok(Some((complete_data, corr_id))) =
+                            streaming_state.add_chunk_with_correlation(stream_header, chunk_data)
                         {
                             // Complete message assembled - route to actor
+                            // corr_id == 0 means tell (fire-and-forget), non-zero means ask (expects response)
+                            let correlation_opt = if corr_id == 0 { None } else { Some(corr_id) };
                             if let Some(handler) = &*registry.actor_message_handler.lock().await {
                                 let actor_id_str = stream_header.actor_id.to_string();
-                                let _ = handler
+                                if let Ok(Some(response)) = handler
                                     .handle_actor_message(
                                         &actor_id_str,
                                         stream_header.type_hash,
                                         &complete_data,
-                                        None,
+                                        correlation_opt,
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    // Only send response for asks (non-zero correlation_id)
+                                    if corr_id != 0 {
+                                        send_streaming_response(&registry, peer_addr, corr_id, response).await;
+                                    }
+                                }
                             }
                         }
                     }
                     msg_type if msg_type == crate::MessageType::StreamEnd as u8
                         || msg_type == crate::MessageType::StreamResponseEnd as u8 =>
                     {
-                        if let Ok(Some(complete_data)) =
-                            streaming_state.finalize_stream(stream_header.stream_id)
+                        if let Ok(Some((complete_data, corr_id))) =
+                            streaming_state.finalize_stream_with_correlation(stream_header.stream_id)
                         {
                             // Complete message assembled - route to actor
+                            // corr_id == 0 means tell (fire-and-forget), non-zero means ask (expects response)
+                            let correlation_opt = if corr_id == 0 { None } else { Some(corr_id) };
                             if let Some(handler) = &*registry.actor_message_handler.lock().await {
                                 let actor_id_str = stream_header.actor_id.to_string();
-                                let _ = handler
+                                if let Ok(Some(response)) = handler
                                     .handle_actor_message(
                                         &actor_id_str,
                                         stream_header.type_hash,
                                         &complete_data,
-                                        None,
+                                        correlation_opt,
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    // Only send response for asks (non-zero correlation_id)
+                                    if corr_id != 0 {
+                                        send_streaming_response(&registry, peer_addr, corr_id, response).await;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1371,6 +1402,7 @@ pub(crate) enum MessageReadResult {
     },
     Streaming {
         msg_type: u8,
+        correlation_id: u16,
         stream_header: crate::StreamHeader,
         chunk_data: bytes::Bytes,
     },
@@ -1430,6 +1462,41 @@ pub(crate) async fn handle_raw_ask_request(
             correlation_id = correlation_id,
             "Received raw Ask request - not supported"
         );
+    }
+}
+
+/// Send a response back to the peer for a streaming ask request.
+/// This is called after handle_actor_message returns with a response.
+/// Uses send_response_auto_bytes to preserve zero-copy streaming for large responses.
+pub(crate) async fn send_streaming_response(
+    registry: &Arc<GossipRegistry>,
+    peer_addr: SocketAddr,
+    correlation_id: u16,
+    response: Vec<u8>,
+) {
+    let conn = {
+        let pool = registry.connection_pool.lock().await;
+        pool.get_connection_by_addr(&peer_addr)
+    };
+
+    if let Some(conn) = conn {
+        if let Some(ref stream_handle) = conn.stream_handle {
+            // Use send_response_auto_bytes which automatically handles:
+            // - Small responses: direct control buffer write
+            // - Large responses: zero-copy streaming via stream_response_bytes
+            if let Err(e) = stream_handle
+                .send_response_auto_bytes(correlation_id, bytes::Bytes::from(response))
+                .await
+            {
+                warn!(peer = %peer_addr, error = %e, correlation_id = correlation_id, "Failed to send streaming response");
+            } else {
+                debug!(peer = %peer_addr, correlation_id = correlation_id, "Sent streaming response");
+            }
+        } else {
+            warn!(peer = %peer_addr, correlation_id = correlation_id, "No stream handle for streaming response");
+        }
+    } else {
+        warn!(peer = %peer_addr, correlation_id = correlation_id, "No connection found for streaming response");
     }
 }
 
@@ -1641,6 +1708,10 @@ where
                             return Ok(MessageReadResult::Raw(msg_data));
                         }
 
+                        // Extract correlation_id (bytes 1-2 after msg_type)
+                        let correlation_id =
+                            u16::from_be_bytes([msg_data[1], msg_data[2]]);
+
                         // Parse the stream header (36 bytes starting at offset 12)
                         let header_bytes = &msg_data[crate::framing::STREAM_HEADER_PREFIX_LEN
                             ..crate::framing::STREAM_HEADER_PREFIX_LEN
@@ -1665,6 +1736,7 @@ where
 
                         return Ok(MessageReadResult::Streaming {
                             msg_type: first_byte,
+                            correlation_id,
                             stream_header,
                             chunk_data,
                         });
