@@ -2570,15 +2570,8 @@ impl CorrelationTracker {
             if !slot_ref.in_use.swap(true, Ordering::AcqRel) {
                 let mut response = slot_ref.response.lock();
                 *response = None;
-                debug!(
-                    "CorrelationTracker: Allocated correlation_id {} in slot {}",
-                    id, slot
-                );
                 return id;
             }
-
-            // Slot is occupied, try next ID
-            debug!("CorrelationTracker: Slot {} occupied, trying next ID", slot);
         }
     }
 
