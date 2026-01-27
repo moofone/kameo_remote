@@ -123,18 +123,19 @@ else
 fi
 echo "" | tee -a "${LOG_FILE}"
 
-# Step 5.5: Response streaming edge case tests
-log_section "Step 6.5: Response streaming edge case tests"
-RESPONSE_STREAMING_TESTS=(
-    "test_response_streaming_2mb"
-    "test_small_response_no_streaming"
-    "test_response_exactly_at_threshold"
-    "test_response_just_above_threshold"
-    "test_response_just_below_threshold"
-    "test_multiple_concurrent_streaming_responses"
+# Step 5.5: Streaming request/response edge case tests
+log_section "Step 6.5: Streaming request/response edge case tests"
+STREAMING_TESTS=(
+    "test_streaming_request_large_payload"
+    "test_streaming_request_zero_copy"
+    "test_streaming_response_auto"
+    "test_small_payload_uses_ring_buffer"
+    "test_streaming_threshold_boundary"
+    "test_concurrent_streaming_requests"
+    "test_message_type_streaming_response_variants"
 )
-for test_name in "${RESPONSE_STREAMING_TESTS[@]}"; do
-    if cargo test --test response_streaming "${test_name}" -- --nocapture 2>&1 | tee -a "${LOG_FILE}"; then
+for test_name in "${STREAMING_TESTS[@]}"; do
+    if cargo test --test streaming_tests "${test_name}" -- --nocapture 2>&1 | tee -a "${LOG_FILE}"; then
         echo "✅ ${test_name} passed" | tee -a "${LOG_FILE}"
     else
         echo "❌ ${test_name} failed" | tee -a "${LOG_FILE}"
