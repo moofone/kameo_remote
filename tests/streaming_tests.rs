@@ -37,6 +37,7 @@ fn create_test_payload(size: usize) -> Vec<u8> {
 }
 
 /// Verify a test payload matches expected pattern
+#[allow(dead_code)]
 fn verify_payload(payload: &[u8], expected_size: usize) -> bool {
     if payload.len() != expected_size {
         return false;
