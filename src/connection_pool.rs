@@ -1,4 +1,4 @@
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use futures::FutureExt;
 use std::fmt::Debug;
 use std::future::Future;
@@ -2007,6 +2007,163 @@ impl LockFreeStreamHandle {
         Ok(())
     }
 
+    /// Stream a response back to the caller, using streaming protocol for large payloads.
+    /// This is used when a response exceeds the streaming threshold.
+    ///
+    /// # Arguments
+    /// * `payload` - The response payload bytes
+    /// * `correlation_id` - The correlation ID from the original request (for response matching)
+    pub async fn stream_response(&self, payload: &[u8], correlation_id: u16) -> Result<()> {
+        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
+
+        const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+
+        // Acquire streaming mode atomically
+        while self
+            .streaming_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // Ensure we release streaming mode on exit
+        let _guard = StreamingGuard {
+            flag: self.streaming_active.clone(),
+        };
+
+        // Generate unique stream ID for this response stream
+        let stream_id = current_timestamp_nanos();
+
+        // Helper to serialize stream response message with correlation ID
+        fn serialize_stream_response_message(
+            msg_type: MessageType,
+            header: &StreamHeader,
+            correlation_id: u16,
+        ) -> Vec<u8> {
+            // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36]
+            let inner_size = 12 + StreamHeader::SERIALIZED_SIZE;
+            let mut message = Vec::with_capacity(4 + inner_size);
+
+            // Length prefix
+            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
+
+            // Header with correlation ID for response matching
+            message.push(msg_type as u8);
+            message.extend_from_slice(&correlation_id.to_be_bytes());
+            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes
+            message.extend_from_slice(&header.to_bytes());
+            message
+        }
+
+        // Use StreamResponseStart to indicate this is a streaming response
+        // Note: We reuse StreamStart/Data/End with correlation_id to distinguish from requests
+        let start_header = StreamHeader {
+            stream_id,
+            total_size: payload.len() as u64,
+            chunk_size: 0,
+            chunk_index: 0,
+            type_hash: 0, // Not needed for responses
+            actor_id: 0,  // Not needed for responses
+        };
+
+        let start_msg =
+            serialize_stream_response_message(MessageType::StreamStart, &start_header, correlation_id);
+        self.streaming_tx
+            .send(StreamingCommand::WriteBytes(start_msg.into()))
+            .map_err(|_| GossipError::Shutdown)?;
+
+        // Stream response chunks
+        for (idx, chunk) in payload.chunks(CHUNK_SIZE).enumerate() {
+            let data_header = StreamHeader {
+                stream_id,
+                total_size: payload.len() as u64,
+                chunk_size: chunk.len() as u32,
+                chunk_index: idx as u32,
+                type_hash: 0,
+                actor_id: 0,
+            };
+
+            // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36][chunk_data:N]
+            let inner_size = 12 + StreamHeader::SERIALIZED_SIZE + chunk.len();
+            let mut chunk_msg = Vec::with_capacity(4 + inner_size);
+
+            // Length prefix
+            chunk_msg.extend_from_slice(&(inner_size as u32).to_be_bytes());
+
+            // Header with correlation ID
+            chunk_msg.push(MessageType::StreamData as u8);
+            chunk_msg.extend_from_slice(&correlation_id.to_be_bytes());
+            chunk_msg.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes
+            chunk_msg.extend_from_slice(&data_header.to_bytes());
+
+            // Chunk data
+            chunk_msg.extend_from_slice(chunk);
+
+            self.streaming_tx
+                .send(StreamingCommand::WriteBytes(chunk_msg.into()))
+                .map_err(|_| GossipError::Shutdown)?;
+
+            // Yield periodically to prevent blocking
+            if idx % 10 == 0 {
+                self.streaming_tx
+                    .send(StreamingCommand::Flush)
+                    .map_err(|_| GossipError::Shutdown)?;
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Send StreamEnd with correlation ID
+        let end_msg =
+            serialize_stream_response_message(MessageType::StreamEnd, &start_header, correlation_id);
+        self.streaming_tx
+            .send(StreamingCommand::WriteBytes(end_msg.into()))
+            .map_err(|_| GossipError::Shutdown)?;
+        self.streaming_tx
+            .send(StreamingCommand::Flush)
+            .map_err(|_| GossipError::Shutdown)?;
+
+        debug!(
+            "✅ STREAMING RESPONSE: Successfully streamed {} bytes in {} chunks (correlation_id: {})",
+            payload.len(),
+            payload.len().div_ceil(CHUNK_SIZE),
+            correlation_id
+        );
+
+        Ok(())
+    }
+
+    /// Send a response, automatically using streaming for large payloads.
+    /// This is the recommended method for sending responses as it handles
+    /// both small (ring buffer) and large (streaming) responses transparently.
+    ///
+    /// # Arguments
+    /// * `payload` - The response payload bytes
+    /// * `correlation_id` - The correlation ID from the original request
+    ///
+    /// # Returns
+    /// Ok(()) on success, or an error if sending failed
+    pub async fn send_response_auto(&self, payload: &[u8], correlation_id: u16) -> Result<()> {
+        let threshold = self.streaming_threshold();
+
+        if payload.len() > threshold {
+            // Large response: use streaming protocol
+            self.stream_response(payload, correlation_id).await
+        } else {
+            // Small response: use regular ring buffer path
+            let header = framing::write_ask_response_header(
+                crate::MessageType::Response,
+                correlation_id,
+                payload.len(),
+            );
+            self.write_header_and_payload_control(
+                bytes::Bytes::copy_from_slice(&header),
+                bytes::Bytes::copy_from_slice(payload),
+            )
+            .await
+        }
+    }
+
     /// Zero-copy vectored write for header + payload in single operation
     /// This eliminates copying payload data into frame buffer - optimal for streaming
     pub fn write_bytes_vectored(&self, header: bytes::Bytes, payload: bytes::Bytes) -> Result<()> {
@@ -2483,6 +2640,21 @@ impl ConnectionHandle {
 
         self.stream_handle
             .write_header_and_payload_control_inline(header, 8, payload)
+            .await
+    }
+
+    /// Send a response with automatic streaming for large payloads.
+    ///
+    /// This method automatically uses streaming for responses that exceed
+    /// the streaming threshold, preventing ring buffer overflow for large replies.
+    /// For small responses, it uses the efficient ring buffer path.
+    ///
+    /// # Arguments
+    /// * `correlation_id` - The correlation ID from the original request
+    /// * `payload` - The response payload bytes
+    pub async fn send_response_auto(&self, correlation_id: u16, payload: &[u8]) -> Result<()> {
+        self.stream_handle
+            .send_response_auto(payload, correlation_id)
             .await
     }
 
@@ -3038,6 +3210,184 @@ impl ConnectionHandle {
             "✅ STREAMING ASK: Streamed {} bytes in {} chunks, waiting for response",
             payload.len(),
             payload.len().div_ceil(CHUNK_SIZE)
+        );
+
+        // Wait for response
+        self.correlation
+            .wait_for_response(correlation_id, timeout)
+            .await
+    }
+
+    /// Zero-copy streaming ask that takes Bytes directly.
+    ///
+    /// This version avoids copying the payload data by using Bytes::slice()
+    /// to create views into the original buffer for each chunk. Only the
+    /// small headers (52 bytes each) are copied.
+    ///
+    /// Use this when you already have a Bytes buffer to avoid an extra copy.
+    ///
+    /// # Arguments
+    /// * `payload` - The message payload as Bytes (will be sliced, not copied)
+    /// * `type_hash` - The type hash for the message
+    /// * `actor_id` - The target actor ID
+    /// * `timeout` - How long to wait for a response
+    ///
+    /// # Returns
+    /// The response bytes from the actor
+    pub async fn ask_streaming_bytes(
+        &self,
+        payload: bytes::Bytes,
+        type_hash: u32,
+        actor_id: u64,
+        timeout: Duration,
+    ) -> Result<bytes::Bytes> {
+        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
+
+        const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+
+        // Allocate correlation ID for the response
+        let correlation_id = self.correlation.allocate();
+
+        // Acquire streaming mode atomically
+        while self
+            .stream_handle
+            .streaming_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // Ensure we release streaming mode on exit
+        let _guard = StreamingGuard {
+            flag: self.stream_handle.streaming_active.clone(),
+        };
+
+        // Generate unique stream ID
+        let stream_id = current_timestamp_nanos();
+
+        // Helper to build stream header bytes (52 bytes total for header-only messages)
+        fn build_stream_header_bytes(
+            msg_type: MessageType,
+            header: &StreamHeader,
+            correlation_id: u16,
+        ) -> bytes::Bytes {
+            // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36]
+            let inner_size = 12 + StreamHeader::SERIALIZED_SIZE;
+            let mut message = bytes::BytesMut::with_capacity(4 + inner_size);
+
+            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
+            message.put_u8(msg_type as u8);
+            message.extend_from_slice(&correlation_id.to_be_bytes());
+            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes
+            message.extend_from_slice(&header.to_bytes());
+            message.freeze()
+        }
+
+        // Helper to build chunk header bytes (for use with vectored write)
+        fn build_chunk_header_bytes(
+            header: &StreamHeader,
+            correlation_id: u16,
+            chunk_len: usize,
+        ) -> bytes::Bytes {
+            // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36]
+            // (chunk data follows separately via vectored write)
+            let inner_size = 12 + StreamHeader::SERIALIZED_SIZE + chunk_len;
+            let mut message = bytes::BytesMut::with_capacity(4 + 12 + StreamHeader::SERIALIZED_SIZE);
+
+            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
+            message.put_u8(MessageType::StreamData as u8);
+            message.extend_from_slice(&correlation_id.to_be_bytes());
+            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes
+            message.extend_from_slice(&header.to_bytes());
+            message.freeze()
+        }
+
+        let total_size = payload.len();
+
+        // Send StreamStart header
+        let start_header = StreamHeader {
+            stream_id,
+            total_size: total_size as u64,
+            chunk_size: 0,
+            chunk_index: 0,
+            type_hash,
+            actor_id,
+        };
+
+        let start_msg = build_stream_header_bytes(MessageType::StreamStart, &start_header, correlation_id);
+        if self
+            .stream_handle
+            .streaming_tx
+            .send(StreamingCommand::WriteBytes(start_msg))
+            .is_err()
+        {
+            self.correlation.cancel(correlation_id);
+            return Err(GossipError::Shutdown);
+        }
+
+        // Stream chunks using zero-copy slicing
+        let mut offset = 0;
+        let mut chunk_index = 0;
+
+        while offset < total_size {
+            let chunk_end = std::cmp::min(offset + CHUNK_SIZE, total_size);
+            let chunk_len = chunk_end - offset;
+
+            // Zero-copy slice of the original Bytes buffer
+            let chunk_data = payload.slice(offset..chunk_end);
+
+            let data_header = StreamHeader {
+                stream_id,
+                total_size: total_size as u64,
+                chunk_size: chunk_len as u32,
+                chunk_index,
+                type_hash,
+                actor_id,
+            };
+
+            // Build header (52 bytes - small, ok to copy)
+            let header_bytes = build_chunk_header_bytes(&data_header, correlation_id, chunk_len);
+
+            // Send header + chunk data via OwnedChunks for vectored I/O
+            // This avoids copying the chunk data into the header buffer
+            if self
+                .stream_handle
+                .streaming_tx
+                .send(StreamingCommand::OwnedChunks(vec![header_bytes, chunk_data]))
+                .is_err()
+            {
+                self.correlation.cancel(correlation_id);
+                return Err(GossipError::Shutdown);
+            }
+
+            // Yield periodically to prevent blocking
+            if chunk_index % 10 == 0 {
+                let _ = self.stream_handle.streaming_tx.send(StreamingCommand::Flush);
+                tokio::task::yield_now().await;
+            }
+
+            offset = chunk_end;
+            chunk_index += 1;
+        }
+
+        // Send StreamEnd
+        let end_msg = build_stream_header_bytes(MessageType::StreamEnd, &start_header, correlation_id);
+        if self
+            .stream_handle
+            .streaming_tx
+            .send(StreamingCommand::WriteBytes(end_msg))
+            .is_err()
+        {
+            self.correlation.cancel(correlation_id);
+            return Err(GossipError::Shutdown);
+        }
+        let _ = self.stream_handle.streaming_tx.send(StreamingCommand::Flush);
+
+        debug!(
+            "✅ STREAMING ASK (zero-copy): Streamed {} bytes in {} chunks, waiting for response",
+            total_size,
+            chunk_index
         );
 
         // Wait for response
@@ -5441,31 +5791,18 @@ impl ConnectionPool {
                                                                 .await
                                                             {
                                                                 Ok(Some(reply_payload)) => {
-                                                                    let header =
-                                                                    framing::write_ask_response_header(
-                                                                        crate::MessageType::Response,
-                                                                        correlation_id,
-                                                                        reply_payload.len(),
-                                                                    );
-                                                                    let payload =
-                                                                        bytes::Bytes::from(
-                                                                            reply_payload,
-                                                                        );
-
+                                                                    // Use send_response_auto which handles streaming for large responses
                                                                     if let Some(ref handle) =
                                                                         response_handle
                                                                     {
                                                                         if let Err(e) = handle
-                                                                        .write_header_and_payload_control(
-                                                                            bytes::Bytes::copy_from_slice(&header),
-                                                                            payload.clone(),
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        warn!(peer = %peer_addr, error = %e, "Failed to send ActorAsk response");
-                                                                    } else {
-                                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, "Sent ActorAsk response");
-                                                                    }
+                                                                            .send_response_auto(&reply_payload, correlation_id)
+                                                                            .await
+                                                                        {
+                                                                            warn!(peer = %peer_addr, error = %e, "Failed to send ActorAsk response");
+                                                                        } else {
+                                                                            debug!(peer = %peer_addr, correlation_id = correlation_id, reply_len = reply_payload.len(), "Sent ActorAsk response");
+                                                                        }
                                                                     } else {
                                                                         let pool = registry
                                                                             .connection_pool
@@ -5484,16 +5821,13 @@ impl ConnectionPool {
                                                                                 conn.stream_handle
                                                                             {
                                                                                 if let Err(e) = stream_handle
-                                                                                .write_header_and_payload_control(
-                                                                                    bytes::Bytes::copy_from_slice(&header),
-                                                                                    payload.clone(),
-                                                                                )
-                                                                                .await
-                                                                            {
-                                                                                warn!(peer = %peer_addr, error = %e, "Failed to send ActorAsk response");
-                                                                            } else {
-                                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, "Sent ActorAsk response through connection pool");
-                                                                            }
+                                                                                    .send_response_auto(&reply_payload, correlation_id)
+                                                                                    .await
+                                                                                {
+                                                                                    warn!(peer = %peer_addr, error = %e, "Failed to send ActorAsk response");
+                                                                                } else {
+                                                                                    debug!(peer = %peer_addr, correlation_id = correlation_id, reply_len = reply_payload.len(), "Sent ActorAsk response through connection pool");
+                                                                                }
                                                                             } else {
                                                                                 warn!(peer = %peer_addr, "Connection has no stream handle");
                                                                             }
@@ -5618,7 +5952,7 @@ impl ConnectionPool {
                                                     info!(peer = %peer_addr, stream_id = header.stream_id,
                                                       "📤 StreamEnd: Completing streaming transfer");
 
-                                                    // Complete stream assembly and deliver to actor
+                                                    // Complete stream assembly and deliver appropriately
                                                     if let Some(ref registry_weak) = registry_weak {
                                                         if let Some(registry) =
                                                             registry_weak.upgrade()
@@ -5629,71 +5963,104 @@ impl ConnectionPool {
                                                                 )
                                                                 .await
                                                             {
-                                                                // Deliver to actor with correlation_id for ask_streaming
-                                                                if let Some(ref handler) =
-                                                                    &*registry
-                                                                        .actor_message_handler
-                                                                        .lock()
-                                                                        .await
-                                                                {
-                                                                    match handler
-                                                                        .handle_actor_message(
-                                                                            &result.header
-                                                                                .actor_id
-                                                                                .to_string(),
-                                                                            result.header.type_hash,
-                                                                            &result.data,
-                                                                            result.correlation_id,
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        Ok(Some(reply_payload)) => {
-                                                                            // For ask_streaming: send response back
-                                                                            if let Some(corr_id) = result.correlation_id {
-                                                                                info!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                      correlation_id = corr_id, reply_len = reply_payload.len(),
-                                                                                      "✅ Successfully delivered streamed message, sending response");
+                                                                // Check if this is a streaming RESPONSE (actor_id == 0)
+                                                                // vs a streaming REQUEST (actor_id != 0)
+                                                                if result.header.actor_id == 0 {
+                                                                    // This is a streaming RESPONSE - deliver to correlation tracker
+                                                                    if let Some(corr_id) = result.correlation_id {
+                                                                        info!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                              correlation_id = corr_id, data_len = result.data.len(),
+                                                                              "📥 Received streaming response, delivering to correlation tracker");
 
-                                                                                let response_header = framing::write_ask_response_header(
-                                                                                    crate::MessageType::Response,
-                                                                                    corr_id,
-                                                                                    reply_payload.len(),
-                                                                                );
-                                                                                let response_payload = bytes::Bytes::from(reply_payload);
-
-                                                                                // Send response back via connection pool
-                                                                                let pool = registry.connection_pool.lock().await;
-                                                                                if let Some(conn) = pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone()) {
-                                                                                    if let Some(ref stream_handle) = conn.stream_handle {
-                                                                                        if let Err(e) = stream_handle
-                                                                                            .write_header_and_payload_control(
-                                                                                                bytes::Bytes::copy_from_slice(&response_header),
-                                                                                                response_payload,
-                                                                                            )
-                                                                                            .await
-                                                                                        {
-                                                                                            warn!(peer = %peer_addr, error = %e, "Failed to send streaming ask reply");
-                                                                                        } else {
-                                                                                            debug!(peer = %peer_addr, correlation_id = corr_id, "Sent streaming ask reply");
-                                                                                        }
-                                                                                    } else {
-                                                                                        warn!(peer = %peer_addr, "Connection has no stream handle for reply");
-                                                                                    }
+                                                                        let pool = registry.connection_pool.lock().await;
+                                                                        // Look up peer ID for this address
+                                                                        if let Some(peer_id) = pool
+                                                                            .addr_to_peer_id
+                                                                            .get(&peer_addr)
+                                                                            .map(|e| e.clone())
+                                                                        {
+                                                                            // Use shared correlation tracker
+                                                                            if let Some(correlation) =
+                                                                                pool.correlation_trackers.get(&peer_id)
+                                                                            {
+                                                                                if correlation.has_pending(corr_id) {
+                                                                                    correlation.complete(
+                                                                                        corr_id,
+                                                                                        bytes::Bytes::from(result.data),
+                                                                                    );
+                                                                                    debug!(peer = %peer_addr, correlation_id = corr_id,
+                                                                                           "✅ Streaming response delivered to correlation tracker");
                                                                                 } else {
-                                                                                    warn!(peer = %peer_addr, "No connection found to send streaming ask reply");
+                                                                                    warn!(peer = %peer_addr, correlation_id = corr_id,
+                                                                                          "No pending correlation for streaming response");
                                                                                 }
                                                                             } else {
-                                                                                info!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                      "✅ Successfully delivered streamed message (tell-style, no response needed)")
+                                                                                warn!(peer = %peer_addr, "No correlation tracker for streaming response");
                                                                             }
+                                                                        } else {
+                                                                            warn!(peer = %peer_addr, "No peer ID mapping for streaming response");
                                                                         }
-                                                                        Ok(None) => {
-                                                                            info!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                  "✅ Successfully delivered streamed message (no reply from actor)")
-                                                                        }
-                                                                        Err(e) => {
-                                                                            error!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                    error = %e, "❌ Failed to deliver streamed message")
+                                                                    } else {
+                                                                        warn!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                              "Streaming response has no correlation ID");
+                                                                    }
+                                                                } else {
+                                                                    // This is a streaming REQUEST - deliver to actor handler
+                                                                    if let Some(ref handler) =
+                                                                        &*registry
+                                                                            .actor_message_handler
+                                                                            .lock()
+                                                                            .await
+                                                                    {
+                                                                        match handler
+                                                                            .handle_actor_message(
+                                                                                &result.header
+                                                                                    .actor_id
+                                                                                    .to_string(),
+                                                                                result.header.type_hash,
+                                                                                &result.data,
+                                                                                result.correlation_id,
+                                                                            )
+                                                                            .await
+                                                                        {
+                                                                            Ok(Some(reply_payload)) => {
+                                                                                // For ask_streaming: send response back using auto-streaming
+                                                                                if let Some(corr_id) = result.correlation_id {
+                                                                                    info!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                                          correlation_id = corr_id, reply_len = reply_payload.len(),
+                                                                                          "✅ Successfully delivered streamed message, sending response");
+
+                                                                                    // Send response back via connection pool (auto-streams if large)
+                                                                                    let pool = registry.connection_pool.lock().await;
+                                                                                    if let Some(conn) = pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone()) {
+                                                                                        if let Some(ref stream_handle) = conn.stream_handle {
+                                                                                            if let Err(e) = stream_handle
+                                                                                                .send_response_auto(&reply_payload, corr_id)
+                                                                                                .await
+                                                                                            {
+                                                                                                warn!(peer = %peer_addr, error = %e, "Failed to send streaming ask reply");
+                                                                                            } else {
+                                                                                                debug!(peer = %peer_addr, correlation_id = corr_id, reply_len = reply_payload.len(), "Sent streaming ask reply");
+                                                                                            }
+                                                                                        } else {
+                                                                                            warn!(peer = %peer_addr, "Connection has no stream handle for reply");
+                                                                                        }
+                                                                                    } else {
+                                                                                        warn!(peer = %peer_addr, "No connection found to send streaming ask reply");
+                                                                                    }
+                                                                                } else {
+                                                                                    info!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                                          "✅ Successfully delivered streamed message (tell-style, no response needed)")
+                                                                                }
+                                                                            }
+                                                                            Ok(None) => {
+                                                                                info!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                                      "✅ Successfully delivered streamed message (no reply from actor)")
+                                                                            }
+                                                                            Err(e) => {
+                                                                                error!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                                        error = %e, "❌ Failed to deliver streamed message")
+                                                                            }
                                                                         }
                                                                     }
                                                                 }

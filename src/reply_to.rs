@@ -36,6 +36,35 @@ impl ReplyTo {
             .await
     }
 
+    /// Reply with automatic streaming for large responses.
+    ///
+    /// This method automatically uses streaming for responses that exceed
+    /// the connection's streaming threshold, preventing ring buffer overflow
+    /// for large replies. For small responses, it uses the efficient ring buffer path.
+    ///
+    /// Use this method when the response might be large (e.g., query results,
+    /// large state snapshots, or any response that could exceed 1MB).
+    pub async fn reply_auto(self, response: &[u8]) -> Result<()> {
+        let result = self
+            .connection
+            .send_response_auto(self.correlation_id, response)
+            .await;
+
+        match &result {
+            Ok(_) => tracing::info!(
+                "ReplyTo::reply_auto: successfully sent response ({} bytes)",
+                response.len()
+            ),
+            Err(e) => tracing::error!(
+                "ReplyTo::reply_auto: failed to send response ({} bytes): {}",
+                response.len(),
+                e
+            ),
+        }
+
+        result
+    }
+
     /// Reply with a typed payload (rkyv) and debug-only type hash verification.
     pub async fn reply_typed<T>(self, value: &T) -> Result<()>
     where
@@ -90,6 +119,15 @@ impl TimeoutReplyTo {
             return Err(GossipError::Timeout);
         }
         self.inner.reply(response).await
+    }
+
+    /// Reply with auto-streaming if not timed out.
+    /// Uses streaming for large responses (> threshold).
+    pub async fn reply_auto(self, response: &[u8]) -> Result<()> {
+        if Instant::now() > self.deadline {
+            return Err(GossipError::Timeout);
+        }
+        self.inner.reply_auto(response).await
     }
 
     /// Reply with a serializable type if not timed out

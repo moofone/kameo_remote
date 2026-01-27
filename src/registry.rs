@@ -948,7 +948,7 @@ impl GossipRegistry {
         // DNS round-robin fix: If current address is still in DNS results, keep it
         // This avoids unnecessary churn when DNS returns multiple addresses
         // Compare full SocketAddr (IP + port) to handle port changes
-        if resolved_addrs.iter().any(|addr| *addr == peer_addr) {
+        if resolved_addrs.contains(&peer_addr) {
             debug!(
                 addr = %peer_addr,
                 dns_name = %dns_name,
