@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
 use sha2::{Digest, Sha256};
@@ -1534,11 +1534,11 @@ impl LockFreeStreamHandle {
 
         let available = self.control_permits.available_permits();
         if count.is_multiple_of(1000) || available == 0 {
-            eprintln!(
-                "🎫 [PERMIT] #{} acquiring control permit (available: {}/{})",
+            trace!(
                 count,
                 available,
-                self.buffer_config.ring_buffer_slots() / 4 // roughly the reserved amount
+                max = self.buffer_config.ring_buffer_slots() / 4,
+                "🎫 [PERMIT] acquiring control permit"
             );
         }
 
@@ -2570,15 +2570,15 @@ impl CorrelationTracker {
             if !slot_ref.in_use.swap(true, Ordering::AcqRel) {
                 let mut response = slot_ref.response.lock();
                 *response = None;
-                debug!(
+                trace!(
                     "CorrelationTracker: Allocated correlation_id {} in slot {}",
                     id, slot
                 );
                 return id;
             }
 
-            // Slot is occupied, try next ID
-            debug!("CorrelationTracker: Slot {} occupied, trying next ID", slot);
+            // Slot is occupied, try next ID (trace level - fires frequently under load)
+            trace!("CorrelationTracker: Slot {} occupied, trying next ID", slot);
         }
     }
 
@@ -6490,8 +6490,6 @@ pub(crate) fn handle_incoming_message(
                                                 let propagation_time_ms = network_time_ms; // Same as network time for now
                                                 let processing_only_time_ms = 0.0; // No additional processing time beyond network
 
-                                                eprintln!("🔍 FAST_PATH: Processing immediate priority actor: {} propagation_time_ms={:.3}ms", name, propagation_time_ms);
-
                                                 info!(
                                                     actor_name = %name,
                                                     priority = ?location.priority,
@@ -6675,11 +6673,6 @@ pub(crate) fn handle_incoming_message(
                                             network_processing_time_nanos as f64 / 1_000_000.0;
                                         let propagation_time_ms = network_processing_time_ms; // Same as network time for now
                                         let processing_only_time_ms = 0.0; // No additional processing time beyond network
-
-                                        // Debug: Break down where the time is spent
-                                        eprintln!("🔍 TIMING_BREAKDOWN: sent={}, received={}, delta={}ns ({}ms)",
-                                     delta.precise_timing_nanos, received_timestamp,
-                                     network_processing_time_nanos, network_processing_time_ms);
 
                                         info!(
                                             actor_name = %name,
