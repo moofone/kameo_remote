@@ -1895,7 +1895,7 @@ impl LockFreeStreamHandle {
         type_hash: u32,
         actor_id: u64,
     ) -> Result<()> {
-        use crate::{current_timestamp, MessageType, StreamHeader};
+        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
 
         const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
 
@@ -1913,8 +1913,8 @@ impl LockFreeStreamHandle {
             flag: self.streaming_active.clone(),
         };
 
-        // Generate unique stream ID
-        let stream_id = current_timestamp();
+        // Generate unique stream ID using nanoseconds to avoid collisions
+        let stream_id = current_timestamp_nanos();
 
         // Helper to serialize message with type and header
         fn serialize_stream_message(msg_type: MessageType, header: &StreamHeader) -> Vec<u8> {
@@ -2907,7 +2907,7 @@ impl ConnectionHandle {
         actor_id: u64,
         timeout: Duration,
     ) -> Result<bytes::Bytes> {
-        use crate::{current_timestamp, MessageType, StreamHeader};
+        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
 
         const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
 
@@ -2929,8 +2929,9 @@ impl ConnectionHandle {
             flag: self.stream_handle.streaming_active.clone(),
         };
 
-        // Generate unique stream ID
-        let stream_id = current_timestamp();
+        // Generate unique stream ID using nanoseconds to avoid collisions
+        // between concurrent streams from different peers
+        let stream_id = current_timestamp_nanos();
 
         // Helper to serialize stream message with correlation ID for ask
         fn serialize_stream_ask_message(
@@ -5533,17 +5534,30 @@ impl ConnectionPool {
                                                 if let Some(header) =
                                                     crate::StreamHeader::from_bytes(&payload[RESERVED_BYTES..])
                                                 {
+                                                    // Extract correlation_id for ask_streaming responses
+                                                    // correlation_id of 0 means no response needed (tell-style streaming)
+                                                    let stream_correlation_id = if correlation_id != 0 {
+                                                        Some(correlation_id)
+                                                    } else {
+                                                        None
+                                                    };
+
                                                     info!(peer = %peer_addr, stream_id = header.stream_id, total_size = header.total_size,
                                                       type_hash = %format!("{:08x}", header.type_hash), actor_id = header.actor_id,
+                                                      ?stream_correlation_id,
                                                       "📥 StreamStart: Beginning streaming transfer");
 
-                                                    // Initialize stream assembly
+                                                    // Initialize stream assembly with correlation tracking
                                                     if let Some(ref registry_weak) = registry_weak {
                                                         if let Some(registry) =
                                                             registry_weak.upgrade()
                                                         {
                                                             registry
-                                                                .start_stream_assembly(header)
+                                                                .start_stream_assembly(
+                                                                    header,
+                                                                    stream_correlation_id,
+                                                                    Some(peer_addr),
+                                                                )
                                                                 .await;
                                                         }
                                                     }
@@ -5609,13 +5623,13 @@ impl ConnectionPool {
                                                         if let Some(registry) =
                                                             registry_weak.upgrade()
                                                         {
-                                                            if let Some(complete_msg) = registry
+                                                            if let Some(result) = registry
                                                                 .complete_stream_assembly(
                                                                     header.stream_id,
                                                                 )
                                                                 .await
                                                             {
-                                                                // Deliver to actor
+                                                                // Deliver to actor with correlation_id for ask_streaming
                                                                 if let Some(ref handler) =
                                                                     &*registry
                                                                         .actor_message_handler
@@ -5624,18 +5638,58 @@ impl ConnectionPool {
                                                                 {
                                                                     match handler
                                                                         .handle_actor_message(
-                                                                            &header
+                                                                            &result.header
                                                                                 .actor_id
                                                                                 .to_string(),
-                                                                            header.type_hash,
-                                                                            &complete_msg,
-                                                                            None,
+                                                                            result.header.type_hash,
+                                                                            &result.data,
+                                                                            result.correlation_id,
                                                                         )
                                                                         .await
                                                                     {
-                                                                        Ok(_) => {
+                                                                        Ok(Some(reply_payload)) => {
+                                                                            // For ask_streaming: send response back
+                                                                            if let Some(corr_id) = result.correlation_id {
+                                                                                info!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                                      correlation_id = corr_id, reply_len = reply_payload.len(),
+                                                                                      "✅ Successfully delivered streamed message, sending response");
+
+                                                                                let response_header = framing::write_ask_response_header(
+                                                                                    crate::MessageType::Response,
+                                                                                    corr_id,
+                                                                                    reply_payload.len(),
+                                                                                );
+                                                                                let response_payload = bytes::Bytes::from(reply_payload);
+
+                                                                                // Send response back via connection pool
+                                                                                let pool = registry.connection_pool.lock().await;
+                                                                                if let Some(conn) = pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone()) {
+                                                                                    if let Some(ref stream_handle) = conn.stream_handle {
+                                                                                        if let Err(e) = stream_handle
+                                                                                            .write_header_and_payload_control(
+                                                                                                bytes::Bytes::copy_from_slice(&response_header),
+                                                                                                response_payload,
+                                                                                            )
+                                                                                            .await
+                                                                                        {
+                                                                                            warn!(peer = %peer_addr, error = %e, "Failed to send streaming ask reply");
+                                                                                        } else {
+                                                                                            debug!(peer = %peer_addr, correlation_id = corr_id, "Sent streaming ask reply");
+                                                                                        }
+                                                                                    } else {
+                                                                                        warn!(peer = %peer_addr, "Connection has no stream handle for reply");
+                                                                                    }
+                                                                                } else {
+                                                                                    warn!(peer = %peer_addr, "No connection found to send streaming ask reply");
+                                                                                }
+                                                                            } else {
+                                                                                info!(peer = %peer_addr, stream_id = header.stream_id,
+                                                                                      "✅ Successfully delivered streamed message (tell-style, no response needed)")
+                                                                            }
+                                                                        }
+                                                                        Ok(None) => {
                                                                             info!(peer = %peer_addr, stream_id = header.stream_id,
-                                                                                  "✅ Successfully delivered streamed message to actor")
+                                                                                  "✅ Successfully delivered streamed message (no reply from actor)")
                                                                         }
                                                                         Err(e) => {
                                                                             error!(peer = %peer_addr, stream_id = header.stream_id,

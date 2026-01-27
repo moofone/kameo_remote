@@ -477,6 +477,10 @@ pub struct StreamAssembly {
     pub received_bytes: usize,
     /// Timestamp when stream assembly started (for stale cleanup)
     pub started_at: std::time::Instant,
+    /// Correlation ID for ask_streaming (to send response back)
+    pub correlation_id: Option<u16>,
+    /// Peer address to send response to (for ask_streaming)
+    pub peer_addr: Option<std::net::SocketAddr>,
 }
 
 impl StreamAssembly {
@@ -500,6 +504,19 @@ impl StreamAssembly {
 
         true
     }
+}
+
+/// Result of completing a stream assembly
+#[derive(Debug)]
+pub struct StreamAssemblyResult {
+    /// The assembled complete message
+    pub data: Vec<u8>,
+    /// Correlation ID for ask_streaming responses
+    pub correlation_id: Option<u16>,
+    /// Peer address to send response to
+    pub peer_addr: Option<std::net::SocketAddr>,
+    /// Original stream header
+    pub header: crate::StreamHeader,
 }
 
 impl GossipRegistry {
@@ -3663,7 +3680,17 @@ impl GossipRegistry {
     }
 
     /// Start assembling a streamed message
-    pub async fn start_stream_assembly(&self, header: crate::StreamHeader) {
+    ///
+    /// # Arguments
+    /// * `header` - Stream header with metadata
+    /// * `correlation_id` - Optional correlation ID for ask_streaming responses
+    /// * `peer_addr` - Optional peer address to send response to
+    pub async fn start_stream_assembly(
+        &self,
+        header: crate::StreamHeader,
+        correlation_id: Option<u16>,
+        peer_addr: Option<std::net::SocketAddr>,
+    ) {
         let mut assemblies = self.stream_assemblies.lock().await;
         assemblies.insert(
             header.stream_id,
@@ -3672,9 +3699,16 @@ impl GossipRegistry {
                 chunks: std::collections::BTreeMap::new(),
                 received_bytes: 0,
                 started_at: std::time::Instant::now(),
+                correlation_id,
+                peer_addr,
             },
         );
-        debug!(stream_id = header.stream_id, "Started stream assembly");
+        debug!(
+            stream_id = header.stream_id,
+            ?correlation_id,
+            ?peer_addr,
+            "Started stream assembly"
+        );
     }
 
     /// Add a chunk to stream assembly
@@ -3697,8 +3731,8 @@ impl GossipRegistry {
         }
     }
 
-    /// Complete stream assembly and return the complete message
-    pub async fn complete_stream_assembly(&self, stream_id: u64) -> Option<Vec<u8>> {
+    /// Complete stream assembly and return the complete message with metadata
+    pub async fn complete_stream_assembly(&self, stream_id: u64) -> Option<StreamAssemblyResult> {
         let mut assemblies = self.stream_assemblies.lock().await;
         if let Some(assembly) = assemblies.remove(&stream_id) {
             // Verify we have all chunks with proper gap detection
@@ -3751,10 +3785,16 @@ impl GossipRegistry {
             info!(
                 stream_id = stream_id,
                 total_size = complete.len(),
+                correlation_id = ?assembly.correlation_id,
                 "Completed stream assembly"
             );
 
-            Some(complete)
+            Some(StreamAssemblyResult {
+                data: complete,
+                correlation_id: assembly.correlation_id,
+                peer_addr: assembly.peer_addr,
+                header: assembly.header,
+            })
         } else {
             warn!(
                 stream_id = stream_id,
