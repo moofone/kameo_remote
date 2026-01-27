@@ -1,9 +1,9 @@
 //! Tests for streaming request/response functionality
 //!
 //! These tests verify:
-//! - Streaming requests (ask_streaming) for large payloads
+//! - Streaming requests (ask_streaming_bytes) for large payloads
 //! - Streaming responses for large replies
-//! - Zero-copy streaming (ask_streaming_bytes)
+//! - Zero-copy streaming via Bytes ownership
 //! - StreamResponseStart/Data/End message types
 //! - Auto-streaming via ReplyTo::reply() for large responses
 
@@ -87,11 +87,11 @@ async fn test_streaming_request_large_payload() {
 
     // Create 2MB payload (over the 1MB streaming threshold)
     let payload_size = 2 * 1024 * 1024;
-    let payload = create_test_payload(payload_size);
+    let payload = Bytes::from(create_test_payload(payload_size));
 
-    // Use ask_streaming for large payload
+    // Use ask_streaming_bytes for large payload
     let response = conn
-        .ask_streaming(&payload, 0, 0, Duration::from_secs(30))
+        .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(30))
         .await
         .unwrap();
 
@@ -320,9 +320,9 @@ async fn test_streaming_threshold_boundary() {
     info!("✅ Payload at threshold ({} bytes) succeeded", threshold);
 
     // Test payload just over threshold (should use streaming)
-    let payload_over_threshold = create_test_payload(threshold + 1);
+    let payload_over_threshold = Bytes::from(create_test_payload(threshold + 1));
     let response = conn
-        .ask_streaming(&payload_over_threshold, 0, 0, Duration::from_secs(30))
+        .ask_streaming_bytes(payload_over_threshold.clone(), 0, 0, Duration::from_secs(30))
         .await
         .unwrap();
     assert!(!response.is_empty(), "Response over threshold should work");
@@ -376,10 +376,10 @@ async fn test_concurrent_streaming_requests() {
         let results = results.clone();
         let handle = tokio::spawn(async move {
             let payload_size = 1024 * 1024 + i * 100_000; // Varying sizes over 1MB
-            let payload = create_test_payload(payload_size);
+            let payload = Bytes::from(create_test_payload(payload_size));
 
             let response = conn
-                .ask_streaming(&payload, 0, 0, Duration::from_secs(60))
+                .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(60))
                 .await;
 
             let mut results = results.lock().await;
