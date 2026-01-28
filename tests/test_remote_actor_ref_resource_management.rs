@@ -31,7 +31,7 @@ async fn test_remote_actor_ref_detects_shutdown() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7931".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -39,7 +39,7 @@ async fn test_remote_actor_ref_detects_shutdown() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7932".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -48,7 +48,7 @@ async fn test_remote_actor_ref_detects_shutdown() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7932".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -57,7 +57,7 @@ async fn test_remote_actor_ref_detects_shutdown() {
     handle_b
         .register_urgent(
             "test_service".to_string(),
-            "127.0.0.1:8931".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -112,7 +112,7 @@ async fn test_concurrent_remote_actor_ref_usage() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7933".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -120,7 +120,7 @@ async fn test_concurrent_remote_actor_ref_usage() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7934".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -129,7 +129,7 @@ async fn test_concurrent_remote_actor_ref_usage() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7934".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -138,7 +138,7 @@ async fn test_concurrent_remote_actor_ref_usage() {
     handle_b
         .register_urgent(
             "concurrent_service".to_string(),
-            "127.0.0.1:8932".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -188,7 +188,7 @@ async fn test_weak_registry_ref_prevents_cycles() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7950".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -196,7 +196,7 @@ async fn test_weak_registry_ref_prevents_cycles() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7951".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -205,7 +205,7 @@ async fn test_weak_registry_ref_prevents_cycles() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7951".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -214,7 +214,7 @@ async fn test_weak_registry_ref_prevents_cycles() {
     handle_b
         .register_urgent(
             "weak_test_service".to_string(),
-            "127.0.0.1:8940".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -262,7 +262,7 @@ async fn test_remote_actor_ref_clone_independence() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7936".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -270,7 +270,7 @@ async fn test_remote_actor_ref_clone_independence() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7937".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -279,7 +279,7 @@ async fn test_remote_actor_ref_clone_independence() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7937".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -288,7 +288,7 @@ async fn test_remote_actor_ref_clone_independence() {
     handle_b
         .register_urgent(
             "clone_service".to_string(),
-            "127.0.0.1:8934".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -332,7 +332,7 @@ async fn test_remote_actor_ref_location_metadata() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7938".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -340,7 +340,7 @@ async fn test_remote_actor_ref_location_metadata() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7939".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -349,13 +349,13 @@ async fn test_remote_actor_ref_location_metadata() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7939".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor with metadata
-    let actor_addr: SocketAddr = "127.0.0.1:8935".parse().unwrap();
+    let actor_addr: SocketAddr = handle_b.registry.bind_addr;
     handle_b
         .register_urgent(
             "metadata_service".to_string(),
@@ -401,7 +401,7 @@ async fn test_connection_reuse_across_lookups() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7940".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -409,7 +409,7 @@ async fn test_connection_reuse_across_lookups() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7941".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -418,7 +418,7 @@ async fn test_connection_reuse_across_lookups() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7941".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -427,7 +427,7 @@ async fn test_connection_reuse_across_lookups() {
     handle_b
         .register_urgent(
             "reuse_service".to_string(),
-            "127.0.0.1:8936".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -472,7 +472,7 @@ async fn test_remote_actor_ref_debug_output() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7942".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -480,7 +480,7 @@ async fn test_remote_actor_ref_debug_output() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7943".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -489,7 +489,7 @@ async fn test_remote_actor_ref_debug_output() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7943".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -498,7 +498,7 @@ async fn test_remote_actor_ref_debug_output() {
     handle_b
         .register_urgent(
             "debug_service".to_string(),
-            "127.0.0.1:8937".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -542,7 +542,7 @@ async fn test_remote_actor_ref_with_timeout() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7944".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -550,7 +550,7 @@ async fn test_remote_actor_ref_with_timeout() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7945".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -559,7 +559,7 @@ async fn test_remote_actor_ref_with_timeout() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7945".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -568,7 +568,7 @@ async fn test_remote_actor_ref_with_timeout() {
     handle_b
         .register_urgent(
             "timeout_service".to_string(),
-            "127.0.0.1:8938".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -580,7 +580,7 @@ async fn test_remote_actor_ref_with_timeout() {
 
     // Test ask with timeout
     let result = remote_actor
-        .ask_with_timeout(b"ping", Duration::from_millis(100))
+        .ask_with_timeout(bytes::Bytes::from_static(b"ping"), Duration::from_millis(100))
         .await;
 
     assert!(result.is_ok(), "ask_with_timeout should succeed");
@@ -606,7 +606,7 @@ async fn test_multiple_remote_actor_refs_same_actor() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7946".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -614,7 +614,7 @@ async fn test_multiple_remote_actor_refs_same_actor() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7947".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -623,7 +623,7 @@ async fn test_multiple_remote_actor_refs_same_actor() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7947".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -632,7 +632,7 @@ async fn test_multiple_remote_actor_refs_same_actor() {
     handle_b
         .register_urgent(
             "multi_ref_service".to_string(),
-            "127.0.0.1:8939".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await

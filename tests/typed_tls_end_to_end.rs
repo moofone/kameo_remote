@@ -38,7 +38,7 @@ async fn test_typed_ask_over_tls_with_pooled_path() {
 
     sleep(Duration::from_millis(200)).await;
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
     let request = Ping { id: 42 };
     let response: Ping = conn.ask_typed(&request).await.unwrap();
     assert_eq!(response, request);
@@ -81,7 +81,7 @@ async fn test_typed_tell_over_tls_with_pooled_path() {
     sleep(Duration::from_millis(200)).await;
     kameo_remote::test_helpers::drain_raw_payloads();
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
     let request = Ping { id: 7 };
     conn.tell_typed(&request).await.unwrap();
 

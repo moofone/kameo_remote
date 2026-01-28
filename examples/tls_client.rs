@@ -192,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         // Actually try to connect to the server - this should fail!
-        let connection_result = registry.registry.get_connection(server_addr).await;
+        let connection_result = registry.lookup_address(server_addr).await.map(|r| r);
 
         match connection_result {
             Ok(_) => {

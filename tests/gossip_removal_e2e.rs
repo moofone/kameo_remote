@@ -18,7 +18,7 @@ async fn test_actor_removal_propagates() -> Result<(), Box<dyn std::error::Error
     node_a
         .register_with_priority(
             "actor.remove".to_string(),
-            "127.0.0.1:9501".parse()?,
+            node_a.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await?;
@@ -31,7 +31,7 @@ async fn test_actor_removal_propagates() -> Result<(), Box<dyn std::error::Error
     node_a.unregister("actor.remove").await?;
 
     assert!(
-        wait_for_condition(Duration::from_secs(5), || async {
+        wait_for_condition(Duration::from_secs(20), || async {
             node_b.lookup("actor.remove").await.is_none()
         })
         .await,

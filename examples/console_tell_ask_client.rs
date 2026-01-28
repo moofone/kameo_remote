@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         .await;
 
     // Establish TLS connection to the server.
-    let conn = registry.get_connection(server_addr).await?;
+    let conn = registry.lookup_address(server_addr).await?;
 
     println!("✅ Connected to {}", server_addr);
     println!("Sending tell + ask via ActorMessage...\n");
@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
         &tell_msg,
         Vec::new(),
     )?);
-    conn.tell_bytes(tell_bytes.clone()).await?;
+    conn.tell(&tell_bytes).await?;
     println!("✅ Tell sent");
 
     // Ask (request-response)
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
         &ask_msg,
         Vec::new(),
     )?);
-    let response = conn.ask_bytes(ask_bytes.clone()).await?;
+    let response = conn.ask(&ask_bytes).await?;
 
     println!("✅ Ask response: {:?}", String::from_utf8_lossy(&response));
 
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
         let tell_start = Instant::now();
         for _ in 0..tell_count {
             let start = Instant::now();
-            conn.tell_bytes(tell_bytes.clone()).await?;
+            conn.tell(&tell_bytes).await?;
             tell_latencies.push(start.elapsed());
         }
         let tell_total = tell_start.elapsed();
@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
             let payload = ask_payload.clone();
             in_flight.push(Box::pin(async move {
                 let start = Instant::now();
-                let _ = conn_clone.ask_bytes(payload).await?;
+                let _ = conn_clone.ask(&payload).await?;
                 Ok::<Duration, anyhow::Error>(start.elapsed())
             }));
             remaining -= 1;
@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
                 let payload = ask_payload.clone();
                 in_flight.push(Box::pin(async move {
                     let start = Instant::now();
-                    let _ = conn_clone.ask_bytes(payload).await?;
+                    let _ = conn_clone.ask(&payload).await?;
                     Ok::<Duration, anyhow::Error>(start.elapsed())
                 }));
                 remaining -= 1;

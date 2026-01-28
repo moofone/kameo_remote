@@ -56,21 +56,19 @@ async fn test_mutual_authentication() {
 
     // Manually trigger immediate connection for robustness
     {
-        let mut pool = registry_b.registry.connection_pool.lock().await;
-        pool.get_connection_with_node_id(addr_a, Some(node_id_a))
-            .await
-            .expect("Failed to connect B to A manually");
+    registry_b.lookup_peer(&node_id_a.to_peer_id())
+        .await
+        .expect("Failed to connect B to A manually");
     }
     {
-        let mut pool = registry_a.registry.connection_pool.lock().await;
-        pool.get_connection_with_node_id(addr_b, Some(node_id_b))
-            .await
-            .expect("Failed to connect A to B manually");
+    registry_a.lookup_peer(&node_id_b.to_peer_id())
+        .await
+        .expect("Failed to connect A to B manually");
     }
 
     // Register an actor on A
     registry_a
-        .register("test_actor".to_string(), "127.0.0.1:8000".parse().unwrap())
+        .register("test_actor".to_string(), addr_a)
         .await
         .expect("Failed to register actor");
 
@@ -165,7 +163,7 @@ async fn test_impersonation_prevention() {
     registry_imposter
         .register(
             "secret_actor".to_string(),
-            "127.0.0.1:9000".parse().unwrap(),
+            addr_imposter,
         )
         .await
         .expect("Failed to register actor");
@@ -242,12 +240,12 @@ async fn test_bidirectional_tls_communication() {
 
     // Register actors on both sides
     registry_a
-        .register("actor_a".to_string(), "127.0.0.1:10001".parse().unwrap())
+        .register("actor_a".to_string(), addr_a)
         .await
         .expect("Failed to register actor A");
 
     registry_b
-        .register("actor_b".to_string(), "127.0.0.1:10002".parse().unwrap())
+        .register("actor_b".to_string(), addr_b)
         .await
         .expect("Failed to register actor B");
 
@@ -325,15 +323,15 @@ async fn test_multi_node_tls_chain() {
 
     // Register actors on each node
     registry_a
-        .register("actor_a".to_string(), "127.0.0.1:11001".parse().unwrap())
+        .register("actor_a".to_string(), registry_a.registry.bind_addr)
         .await
         .unwrap();
     registry_b
-        .register("actor_b".to_string(), "127.0.0.1:11002".parse().unwrap())
+        .register("actor_b".to_string(), registry_b.registry.bind_addr)
         .await
         .unwrap();
     registry_c
-        .register("actor_c".to_string(), "127.0.0.1:11003".parse().unwrap())
+        .register("actor_c".to_string(), registry_c.registry.bind_addr)
         .await
         .unwrap();
 
@@ -421,7 +419,7 @@ async fn test_tls_reconnection() {
     registry_a
         .register(
             "persistent_actor".to_string(),
-            "127.0.0.1:12000".parse().unwrap(),
+            addr_a,
         )
         .await
         .unwrap();
@@ -464,10 +462,9 @@ async fn test_tls_reconnection() {
 
     // Manually trigger immediate connection to new address for robustness
     {
-        let mut pool = registry_a.registry.connection_pool.lock().await;
-        pool.get_connection_with_node_id(addr_b_new, Some(node_id_b))
-            .await
-            .expect("Failed to connect A to new B address manually");
+    registry_a.lookup_peer(&node_id_b.to_peer_id())
+        .await
+        .expect("Failed to connect A to new B address manually");
     }
 
     // Wait for reconnection and gossip propagation
@@ -571,7 +568,7 @@ async fn test_instant_gossip_with_long_interval() {
 
     // Register an actor on A BEFORE B starts
     registry_a
-        .register("early_actor".to_string(), "127.0.0.1:13000".parse().unwrap())
+        .register("early_actor".to_string(), addr_a)
         .await
         .expect("Failed to register actor on A");
 
@@ -595,10 +592,9 @@ async fn test_instant_gossip_with_long_interval() {
 
     // Manually trigger immediate connection since add_peer is passive and gossip interval is 20s
     {
-        let mut pool = registry_b.registry.connection_pool.lock().await;
-        pool.get_connection_with_node_id(addr_a, Some(node_id_a))
-            .await
-            .expect("Failed to connect B to A");
+    registry_b.lookup_peer(&node_id_a.to_peer_id())
+        .await
+        .expect("Failed to connect B to A");
     }
 
     // Connect A to B for bidirectional communication

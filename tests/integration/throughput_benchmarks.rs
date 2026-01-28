@@ -123,7 +123,7 @@ async fn test_direct_connection_throughput() {
     sleep(Duration::from_millis(50)).await; // Let server start
     
     // REUSE existing connection from pool instead of creating new one
-    let connection_handle = sender_handle.get_connection(actor_location.address).await.unwrap();
+    let connection_handle = sender_handle.lookup_address(actor_location.address).await.unwrap();
     println!("🔗 Reusing existing connection from pool to: {}", connection_handle.addr);
     
     // Generate test data
@@ -238,7 +238,7 @@ async fn test_tell_throughput() {
     sleep(Duration::from_millis(50)).await;
     
     // REUSE existing connection from pool
-    let connection_handle = sender_handle.get_connection(actor_location.address).await.unwrap();
+    let connection_handle = sender_handle.lookup_address(actor_location.address).await.unwrap();
     println!("🔗 Reusing existing connection for tell() to: {}", connection_handle.addr);
     
     // Generate test message
@@ -332,7 +332,7 @@ async fn test_ask_throughput() {
     println!("✅ Found ask actor at: {}", actor_location.address);
     
     // REUSE existing connection from pool
-    let connection_handle = sender_handle.get_connection(actor_location.address).await.unwrap();
+    let connection_handle = sender_handle.lookup_address(actor_location.address).await.unwrap();
     println!("🔗 Reusing existing connection for ask() to: {}", connection_handle.addr);
     
     // Generate test request

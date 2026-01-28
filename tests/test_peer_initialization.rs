@@ -91,23 +91,24 @@ async fn test_peer_initialization_with_names() {
     sleep(Duration::from_millis(200)).await;
 
     // Register actors
+    // Register actors using real bind addresses
     handle1
-        .register("service1".to_string(), "127.0.0.1:46001".parse().unwrap())
+        .register("service1".to_string(), handle1.registry.bind_addr)
         .await
         .unwrap();
     handle2
-        .register("service2".to_string(), "127.0.0.1:46002".parse().unwrap())
+        .register("service2".to_string(), handle2.registry.bind_addr)
         .await
         .unwrap();
     handle3
-        .register("service3".to_string(), "127.0.0.1:46003".parse().unwrap())
+        .register("service3".to_string(), handle3.registry.bind_addr)
         .await
         .unwrap();
 
-    // Wait for gossip (with 100ms interval, wait 2 seconds for multiple rounds)
-    sleep(Duration::from_secs(2)).await;
+    // Wait for gossip (minimal initial sleep)
+    sleep(Duration::from_millis(500)).await;
 
-    // Test discovery from all nodes
+    // Test discovery from all nodes with retry
     println!("\n🔍 Testing full mesh discovery:");
 
     // Each node should discover all other services
@@ -118,10 +119,19 @@ async fn test_peer_initialization_with_names() {
     ] {
         println!("\nFrom {}:", node_name);
         for service in ["service1", "service2", "service3"] {
-            let result = handle.lookup(service).await;
-            println!("  lookup('{}') = {:?}", service, result.is_some());
+            // Robust wait for discovery
+            let mut found = false;
+            for _ in 0..20 { // Try for 2 seconds (20 * 100ms)
+                if handle.lookup(service).await.is_some() {
+                    found = true;
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+
+            println!("  lookup('{}') = {}", service, found);
             assert!(
-                result.is_some(),
+                found,
                 "{} should discover {}",
                 node_name,
                 service
