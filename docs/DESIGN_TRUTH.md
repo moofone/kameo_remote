@@ -57,3 +57,4 @@ remote_actor.tell(message).await?;
 - **Validation Script**: `scripts/full_validation.sh` is the gatekeeper.
 - **Rule**: Must have **100% pass** on `scripts/full_validation.sh` before any commit.
 - **New Tests**: Any newly added functionalities or bug fixes must include corresponding tests that are added to the regression suite (and thus executed by `full_validation.sh`).
+- **Compiler** Zero warnings and errors.

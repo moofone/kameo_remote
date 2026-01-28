@@ -57,7 +57,7 @@ async fn test_basic_ask_correlation() {
     {
         info!("Test 1: Testing ask() with processed response");
         info!("Getting connection from {} to {}", addr_a, addr_b);
-        let conn = handle_a.get_connection(addr_b).await.unwrap();
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
         info!("Got connection handle");
 
         // Test ECHO command
@@ -109,7 +109,7 @@ async fn test_basic_ask_correlation() {
     // Test 2: Verify correlation IDs work with multiple concurrent asks
     {
         info!("Test 2: Testing multiple concurrent asks");
-        let conn = handle_a.get_connection(addr_b).await.unwrap();
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
         // Send multiple asks concurrently with different commands
         let mut futures = Vec::new();
@@ -156,7 +156,7 @@ async fn test_basic_ask_correlation() {
     // This would be used when an actor needs to pass the ReplyTo to another actor
     {
         info!("Test 3: Testing ask_with_reply_to for delegation scenarios");
-        let conn = handle_a.get_connection(addr_b).await.unwrap();
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
         // Create a channel to simulate actor delegation
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, kameo_remote::ReplyTo)>(10);
@@ -241,7 +241,7 @@ async fn test_ask_high_throughput() {
     sleep(Duration::from_millis(500)).await;
 
     // Get connection
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     let num_requests = 1000;
     let start = std::time::Instant::now();

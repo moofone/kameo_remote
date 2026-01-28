@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     io,
     net::SocketAddr,
     sync::Arc,
@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use dashmap::DashMap;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 
 use rand::seq::SliceRandom;
@@ -444,6 +445,9 @@ pub struct GossipRegistry {
     // Optional TLS configuration for encrypted connections
     pub tls_config: Option<Arc<crate::tls::TlsConfig>>,
 
+    /// Atomic shutdown flag for lock-free checking in hot paths
+    pub shutdown: Arc<AtomicBool>,
+
     // Separated lockable state
     pub actor_state: Arc<RwLock<ActorState>>,
     pub gossip_state: Arc<Mutex<GossipState>>,
@@ -546,6 +550,7 @@ impl GossipRegistry {
             start_time: current_timestamp(),
             start_instant: crate::current_instant(),
             tls_config: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
             actor_state: Arc::new(RwLock::new(ActorState {
                 local_actors: HashMap::new(),
                 known_actors: HashMap::new(),
@@ -821,61 +826,96 @@ impl GossipRegistry {
     ) {
         debug!(peer = %peer_addr, self_addr = %self.bind_addr, has_node_id = node_id.is_some(), "add_peer_with_node_id called");
         if peer_addr != self.bind_addr {
-            let mut gossip_state = self.gossip_state.lock().await;
+            {
+                let mut gossip_state = self.gossip_state.lock().await;
 
-            // Check if we already have this peer
-            if let Some(existing_peer) = gossip_state.peers.get_mut(&peer_addr) {
-                // Update NodeId if provided and not already set
-                if node_id.is_some() && existing_peer.node_id.is_none() {
-                    existing_peer.node_id = node_id;
-                    debug!(peer = %peer_addr, "updated existing peer with NodeId");
+                // Check if we already have this peer
+                if let Some(existing_peer) = gossip_state.peers.get_mut(&peer_addr) {
+                    // Update NodeId if provided and not already set
+                    if node_id.is_some() && existing_peer.node_id.is_none() {
+                        existing_peer.node_id = node_id;
+                        debug!(peer = %peer_addr, "updated existing peer with NodeId");
+                    } else {
+                        debug!(peer = %peer_addr, "peer already tracked");
+                    }
                 } else {
-                    debug!(peer = %peer_addr, "peer already tracked");
+                    // New peer
+                    // Check if we have a dns_name from known_peers (discovered via gossip)
+                    // Do this before the entry check to avoid borrow conflicts
+                    let dns_name = gossip_state
+                        .known_peers
+                        .peek(&peer_addr)
+                        .and_then(|p| p.dns_name.clone());
+
+                    let current_time = current_timestamp();
+                    gossip_state.peers.insert(
+                        peer_addr,
+                        PeerInfo {
+                            address: peer_addr,
+                            peer_address: None,
+                            node_id,
+                            dns_name,
+                            failures: 0,
+                            last_attempt: current_time,
+                            last_success: current_time,
+                            last_sequence: 0,
+                            last_sent_sequence: 0,
+                            consecutive_deltas: 0,
+                            last_failure_time: None,
+                        },
+                    );
+
+                    if let Some(node_id) = node_id {
+                        self.peer_capability_addr_to_node.insert(peer_addr, node_id);
+                        if let Some(entry) = self.peer_capabilities.get(&peer_addr) {
+                            self.peer_capabilities_by_node
+                                .insert(node_id, entry.value().clone());
+                        }
+                    }
+                    debug!(
+                        peer = %peer_addr,
+                        peers_count = gossip_state.peers.len(),
+                        has_node_id = node_id.is_some(),
+                        "📌 Added new peer (listening address)"
+                    );
                 }
-                return;
-            }
+            } // Lock dropped
 
-            // Check if we have a dns_name from known_peers (discovered via gossip)
-            // Do this before the entry check to avoid borrow conflicts
-            let dns_name = gossip_state
-                .known_peers
-                .peek(&peer_addr)
-                .and_then(|p| p.dns_name.clone());
+            // Safely update connection pool if we have a NodeId
+            // This is critical for TLS connections to work (get_connection_to_peer needs this mapping)
+            if let Some(id) = node_id {
+                let peer_id = id.to_peer_id();
+                
+                let mut conn_to_abort = None;
 
-            if let Entry::Vacant(e) = gossip_state.peers.entry(peer_addr) {
-                let current_time = current_timestamp();
-                e.insert(PeerInfo {
-                    address: peer_addr,
-                    peer_address: None,
-                    node_id,
-                    dns_name,
-                    failures: 0,
-                    last_attempt: current_time,
-                    last_success: current_time,
-                    last_sequence: 0,
-                    last_sent_sequence: 0,
-                    consecutive_deltas: 0,
-                    last_failure_time: None,
-                });
-                if let Some(node_id) = node_id {
-                    self.peer_capability_addr_to_node.insert(peer_addr, node_id);
-                    if let Some(entry) = self.peer_capabilities.get(&peer_addr) {
-                        self.peer_capabilities_by_node
-                            .insert(node_id, entry.value().clone());
+                // Check if we need to close an existing connection to a different address
+                {
+                    let pool = self.connection_pool.lock().await;
+                    if let Some(old_addr) = pool.peer_id_to_addr.get(&peer_id).map(|e| *e.value()) {
+                        if old_addr != peer_addr {
+                            info!(
+                                peer_id = %peer_id,
+                                old_addr = %old_addr,
+                                new_addr = %peer_addr,
+                                "Closing old connection for peer due to address change"
+                            );
+                            
+                            // Remove connection and abort tasks
+                            if let Some((_, conn)) = pool.connections_by_peer.remove(&peer_id) {
+                                pool.connections_by_addr.remove(&conn.addr);
+                                conn_to_abort = Some(conn);
+                            }
+                            pool.addr_to_peer_id.remove(&old_addr);
+                        }
                     }
                 }
-                debug!(
-                    peer = %peer_addr,
-                    peers_count = gossip_state.peers.len(),
-                    has_node_id = node_id.is_some(),
-                    "📌 Added new peer (listening address)"
-                );
+                
+                // Abort tasks outside the lock to avoid potential deadlocks
+                if let Some(conn) = conn_to_abort {
+                    conn.abort_tasks();
+                }
 
-                // Pre-warm connection for immediate gossip (non-blocking)
-                // if self.config.immediate_propagation_enabled {
-                //     // Note: We'll create the connection lazily when first needed
-                //     debug!(peer = %peer_addr, "will create persistent connection on first use");
-                // }
+                self.configure_peer(peer_id, peer_addr).await;
             }
         } else {
             info!(peer = %peer_addr, "not adding peer - same as self");
@@ -887,6 +927,7 @@ impl GossipRegistry {
         let pool = self.connection_pool.lock().await;
         info!(peer_id = %peer_id, addr = %connect_addr, "Configured peer");
         pool.peer_id_to_addr.insert(peer_id.clone(), connect_addr);
+        pool.addr_to_peer_id.insert(connect_addr, peer_id.clone());
         pool.reindex_connection_addr(&peer_id, connect_addr);
     }
 
@@ -2753,6 +2794,9 @@ impl GossipRegistry {
             gossip_state.shutdown = true;
         }
 
+        // Set atomic shutdown flag
+        self.shutdown.store(true, Ordering::Release);
+
         // Close all connections in the pool
         {
             let mut connection_pool = self.connection_pool.lock().await;
@@ -2779,7 +2823,7 @@ impl GossipRegistry {
     }
 
     /// Get a connection handle for direct communication (for performance testing)
-    pub async fn get_connection(
+    pub(crate) async fn get_connection(
         &self,
         addr: SocketAddr,
     ) -> Result<crate::connection_pool::ConnectionHandle> {
@@ -2788,7 +2832,8 @@ impl GossipRegistry {
 
     /// Get a connection handle directly from the pool without mutex lock
     /// Only works for already established connections
-    pub fn get_connection_direct(
+    #[allow(dead_code)]
+    pub(crate) fn get_connection_direct(
         &self,
         addr: SocketAddr,
     ) -> Option<crate::connection_pool::ConnectionHandle> {
@@ -4248,7 +4293,7 @@ impl GossipRegistry {
         }
 
         // Update peer_discovery
-        let should_track_mesh_time =
+        let should_track_mesh_time = 
             self.config.mesh_formation_target > 0 && gossip_state.mesh_formation_time_ms.is_none();
 
         if let Some(ref mut discovery) = gossip_state.peer_discovery {

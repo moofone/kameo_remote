@@ -90,38 +90,38 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     // Register actors on each node
     println!("\n📋 Registering actors on each node...");
 
-    // Node1 registers chat_service
+    // Node1 registers chat_service using its real bind address
     node1
         .register_urgent(
             "chat_service".to_string(),
-            "127.0.0.1:39001".parse().unwrap(),
+            node1.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
         .unwrap();
-    println!("   ✅ Node1: registered 'chat_service' at 127.0.0.1:39001");
+    println!("   ✅ Node1: registered 'chat_service' at {}", node1.registry.bind_addr);
 
     // Node2 registers auth_service
     node2
         .register_urgent(
             "auth_service".to_string(),
-            "127.0.0.1:39002".parse().unwrap(),
+            node2.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
         .unwrap();
-    println!("   ✅ Node2: registered 'auth_service' at 127.0.0.1:39002");
+    println!("   ✅ Node2: registered 'auth_service' at {}", node2.registry.bind_addr);
 
     // Node3 registers storage_service
     node3
         .register_urgent(
             "storage_service".to_string(),
-            "127.0.0.1:39003".parse().unwrap(),
+            node3.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
         .unwrap();
-    println!("   ✅ Node3: registered 'storage_service' at 127.0.0.1:39003");
+    println!("   ✅ Node3: registered 'storage_service' at {}", node3.registry.bind_addr);
 
     // Wait for gossip propagation
     println!("\n⏳ Waiting for gossip propagation...");

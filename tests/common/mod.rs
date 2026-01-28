@@ -49,6 +49,14 @@ pub async fn connect_bidirectional(
     let peer_a = b.add_peer(&peer_id_a).await;
     peer_a.connect(&addr_a).await?;
 
+    // Wait for peers to be fully registered in gossip state
+    // This is necessary because add_peer is now async/spawned to avoid deadlocks
+    let connected = wait_for_condition(Duration::from_secs(10), || async {
+        a.registry.get_stats().await.active_peers >= 1 && b.registry.get_stats().await.active_peers >= 1
+    })
+    .await;
+    assert!(connected, "Peers failed to connect in bidirectional setup");
+
     Ok(())
 }
 

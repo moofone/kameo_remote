@@ -1,5 +1,5 @@
 use kameo_remote::{GossipConfig, GossipRegistryHandle, RegistrationPriority, SecretKey};
-use std::net::SocketAddr;
+
 use std::sync::Once;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -28,8 +28,12 @@ async fn connect_pair(a: &GossipRegistryHandle, b: &GossipRegistryHandle) {
     let addr_a = a.registry.bind_addr;
     let addr_b = b.registry.bind_addr;
 
-    a.registry.add_peer(addr_b).await;
-    b.registry.add_peer(addr_a).await;
+    a.registry
+        .add_peer_with_node_id(addr_b, Some(b.registry.peer_id.to_node_id()))
+        .await;
+    b.registry
+        .add_peer_with_node_id(addr_a, Some(a.registry.peer_id.to_node_id()))
+        .await;
 
     a.bootstrap_non_blocking(vec![addr_b]).await;
     b.bootstrap_non_blocking(vec![addr_a]).await;
@@ -76,7 +80,7 @@ async fn test_full_sync_for_small_cluster() -> Result<(), Box<dyn std::error::Er
     connect_pair(&node_a, &node_b).await;
 
     node_a
-        .register("actor.fullsync".to_string(), "127.0.0.1:9001".parse()?)
+        .register("actor.fullsync".to_string(), node_a.registry.bind_addr)
         .await?;
 
     assert!(
@@ -109,7 +113,7 @@ async fn test_delta_gossip_after_initial_full_sync() -> Result<(), Box<dyn std::
     connect_pair(&node_a, &node_b).await;
 
     node_a
-        .register("actor.delta.1".to_string(), "127.0.0.1:9101".parse()?)
+        .register("actor.delta.1".to_string(), node_a.registry.bind_addr)
         .await?;
     assert!(
         wait_for_actor(&node_b, "actor.delta.1", Duration::from_secs(2)).await,
@@ -119,7 +123,7 @@ async fn test_delta_gossip_after_initial_full_sync() -> Result<(), Box<dyn std::
     let stats_before = node_b.stats().await;
 
     node_a
-        .register("actor.delta.2".to_string(), "127.0.0.1:9102".parse()?)
+        .register("actor.delta.2".to_string(), node_a.registry.bind_addr)
         .await?;
     assert!(
         wait_for_actor(&node_b, "actor.delta.2", Duration::from_secs(2)).await,
@@ -159,7 +163,7 @@ async fn test_immediate_propagation_for_urgent_registration(
     node_a
         .register_with_priority(
             "actor.immediate".to_string(),
-            "127.0.0.1:9201".parse::<SocketAddr>()?,
+            node_a.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await?;
