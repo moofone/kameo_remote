@@ -4961,6 +4961,9 @@ impl ConnectionPool {
 
             // Initialize streaming state
             let mut streaming_state = crate::protocol::StreamingState::new();
+
+            // Persistent read buffer for zero-copy
+            let mut read_buffer = bytes::BytesMut::with_capacity(1024 * 1024);
             
             // Cleanup interval for stale streams (every 30 seconds)
             let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -4968,7 +4971,7 @@ impl ConnectionPool {
 
             loop {
                 let msg_result = tokio::select! {
-                    result = crate::handle::read_message_from_tls_reader(&mut reader, max_message_size) => result,
+                    result = crate::handle::read_message_from_tls_reader(&mut reader, &mut read_buffer, max_message_size) => result,
                     _ = cleanup_interval.tick() => {
                         streaming_state.cleanup_stale();
                         continue;
