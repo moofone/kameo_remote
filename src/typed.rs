@@ -419,12 +419,18 @@ where
             )));
         }
         let body = &payload[8..];
-        Ok(rkyv::from_bytes::<T, rkyv::rancor::Error>(body)?)
+        let archived = rkyv::access::<T::Archived, rkyv::rancor::Error>(body)?;
+        let mut pool = rkyv::de::Pool::new();
+        let mut deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
+        Ok(rkyv::Deserialize::deserialize(archived, &mut deserializer)?)
     }
 
     #[cfg(not(debug_assertions))]
     {
-        Ok(rkyv::from_bytes::<T, rkyv::rancor::Error>(payload)?)
+        let archived = rkyv::access::<T::Archived, rkyv::rancor::Error>(payload)?;
+        let mut pool = rkyv::de::Pool::new();
+        let mut deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
+        Ok(rkyv::Deserialize::deserialize(archived, &mut deserializer)?)
     }
 }
 

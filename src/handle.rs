@@ -1,11 +1,11 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+
     net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -14,7 +14,7 @@ use tokio::{
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    connection_pool::handle_incoming_message,
+
     registry::{GossipRegistry, GossipResult, GossipTask, RegistryMessage, RegistryStats},
     GossipConfig, GossipError, RegistrationPriority, RemoteActorLocation, Result,
 };
@@ -35,11 +35,11 @@ fn decode_registry_message(
     payload: &[u8],
 ) -> std::result::Result<RegistryMessage, rkyv::rancor::Error> {
     if is_registry_payload_aligned(payload) {
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(payload)
+        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(payload) // ALLOW_RKYV_FROM_BYTES
     } else {
         let mut aligned = RegistryAlignedVec::with_capacity(payload.len());
         aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref())
+        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref()) // ALLOW_RKYV_FROM_BYTES
     }
 }
 
@@ -49,153 +49,6 @@ fn is_registry_payload_aligned(payload: &[u8]) -> bool {
     ptr.is_multiple_of(REGISTRY_MESSAGE_ALIGNMENT)
 }
 
-/// Per-connection streaming state for managing partial streams
-#[derive(Debug)]
-struct StreamingState {
-    active_streams: HashMap<u64, InProgressStream>,
-    max_concurrent_streams: usize,
-}
-
-/// A stream that is currently being assembled
-#[derive(Debug)]
-struct InProgressStream {
-    stream_id: u64,
-    total_size: u64,
-    type_hash: u32,
-    actor_id: u64,
-    correlation_id: u16,
-    chunks: BTreeMap<u32, Bytes>, // chunk_index -> chunk_data
-    received_size: usize,
-    /// Timestamp when stream started (for stale cleanup)
-    started_at: std::time::Instant,
-}
-
-impl StreamingState {
-    fn new() -> Self {
-        Self {
-            active_streams: HashMap::new(),
-            max_concurrent_streams: 16, // Reasonable limit
-        }
-    }
-
-    fn start_stream_with_correlation(&mut self, header: crate::StreamHeader, correlation_id: u16) -> Result<()> {
-        if self.active_streams.len() >= self.max_concurrent_streams {
-            return Err(GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::ResourceBusy,
-                "Too many concurrent streams",
-            )));
-        }
-
-        let stream = InProgressStream {
-            stream_id: header.stream_id,
-            total_size: header.total_size,
-            type_hash: header.type_hash,
-            actor_id: header.actor_id,
-            correlation_id,
-            chunks: BTreeMap::new(),
-            received_size: 0,
-            started_at: std::time::Instant::now(),
-        };
-
-        self.active_streams.insert(header.stream_id, stream);
-        Ok(())
-    }
-
-    fn add_chunk_with_correlation(
-        &mut self,
-        header: crate::StreamHeader,
-        chunk_data: Bytes,
-    ) -> Result<Option<(Vec<u8>, u16)>> {
-        let stream = self
-            .active_streams
-            .get_mut(&header.stream_id)
-            .ok_or_else(|| {
-                GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Received chunk for unknown stream_id={}", header.stream_id),
-                ))
-            })?;
-
-        // Store chunk
-        stream.received_size += chunk_data.len();
-        stream.chunks.insert(header.chunk_index, chunk_data);
-
-        // Check if we have all chunks (when total matches expected size)
-        if stream.received_size >= stream.total_size as usize {
-            self.assemble_complete_message_with_correlation(header.stream_id)
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn finalize_stream_with_correlation(&mut self, stream_id: u64) -> Result<Option<(Vec<u8>, u16)>> {
-        // StreamEnd received - assemble the message
-        self.assemble_complete_message_with_correlation(stream_id)
-    }
-
-    fn assemble_complete_message_with_correlation(&mut self, stream_id: u64) -> Result<Option<(Vec<u8>, u16)>> {
-        let stream = self.active_streams.remove(&stream_id).ok_or_else(|| {
-            GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Cannot finalize unknown stream_id={}", stream_id),
-            ))
-        })?;
-
-        let correlation_id = stream.correlation_id;
-
-        // Assemble chunks in order
-        let mut complete_data = BytesMut::with_capacity(stream.total_size as usize);
-        for (_chunk_index, chunk_data) in stream.chunks {
-            complete_data.put_slice(&chunk_data);
-        }
-
-        info!(
-            "✅ STREAMING: Assembled complete message for stream_id={} ({} bytes for actor={}, type_hash=0x{:x}, correlation_id={})",
-            stream.stream_id,
-            complete_data.len(),
-            stream.actor_id,
-            stream.type_hash,
-            correlation_id
-        );
-
-        Ok(Some((complete_data.to_vec(), correlation_id)))
-    }
-
-    /// Clean up stale streams that have been incomplete for too long.
-    /// This prevents memory leaks when StreamStart arrives but StreamEnd never comes.
-    fn cleanup_stale(&mut self) {
-        use std::time::Duration;
-        const STREAM_TIMEOUT: Duration = Duration::from_secs(60);
-
-        let before_count = self.active_streams.len();
-
-        self.active_streams.retain(|stream_id, stream| {
-            let age = stream.started_at.elapsed();
-            if age > STREAM_TIMEOUT {
-                warn!(
-                    stream_id = stream_id,
-                    age_secs = age.as_secs(),
-                    received_size = stream.received_size,
-                    expected_size = stream.total_size,
-                    chunks_received = stream.chunks.len(),
-                    "Cleaning up stale stream - StreamEnd never arrived"
-                );
-                false // Remove this entry
-            } else {
-                true // Keep this entry
-            }
-        });
-
-        let removed = before_count - self.active_streams.len();
-        if removed > 0 {
-            info!(
-                removed_count = removed,
-                remaining = self.active_streams.len(),
-                "Cleaned up stale in-progress streams"
-            );
-        }
-    }
-}
 
 /// Main API for the gossip registry with vector clocks and separated locks
 pub struct GossipRegistryHandle {
@@ -370,9 +223,40 @@ impl GossipRegistryHandle {
         self.registry.unregister_actor(name).await
     }
 
-    /// Lookup an actor (now much faster - read-only lock)
-    pub async fn lookup(&self, name: &str) -> Option<RemoteActorLocation> {
-        self.registry.lookup_actor(name).await
+    /// Lookup an actor and return a RemoteActorRef with cached connection.
+    ///
+    /// This does ALL the work in one call:
+    /// - Finds the actor in the registry
+    /// - Gets the connection handle (cached in pool)
+    /// - Returns RemoteActorRef for zero-lookup message sending
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Step 1: Lookup does ALL the work - finds actor AND caches connection
+    /// let remote_actor = registry.lookup("chat_service").await?;
+    ///
+    /// // Step 2: tell/ask use cached connection - ZERO lookups, just pointer deref
+    /// remote_actor.tell(message1).await?;
+    /// remote_actor.ask(request).await?;
+    /// ```
+    pub async fn lookup(&self, name: &str) -> Option<crate::RemoteActorRef> {
+        // Step 1: Find the actor location
+        let location = self.registry.lookup_actor(name).await?;
+
+        // Step 2: Get the connection to the peer hosting this actor
+        // Use peer_id to get existing connection, not the actor's address
+        let conn = if location.peer_id == self.registry.peer_id {
+            // Actor is local - try to get connection to the actor's address
+            // If it's not listening yet, return None (connection will be optional)
+            let addr: SocketAddr = location.address.parse().ok()?;
+            self.registry.get_connection(addr).await.ok()
+        } else {
+            // Actor is remote - get connection to the peer
+            self.get_connection_to_peer(&location.peer_id).await.ok()
+        };
+
+        // Step 3: Return RemoteActorRef with optional connection AND registry reference (for auto-reconnection)
+        Some(crate::RemoteActorRef::with_registry(location, conn, self.registry.clone()))
     }
 
     /// Get registry statistics including vector clock metrics
@@ -831,7 +715,7 @@ where
     let max_message_size = registry.config.max_message_size;
 
     // Initialize streaming state for this connection
-    let mut streaming_state = StreamingState::new();
+    let mut streaming_state = crate::protocol::StreamingState::new();
 
     // First, read the initial message to identify the sender
     let msg_result = read_message_from_tls_reader(&mut reader, max_message_size).await;
@@ -1000,6 +884,22 @@ where
         // Track the writer task handle (H-004)
         connection.task_tracker.lock().set_writer(writer_task_handle);
 
+        // CRITICAL: Get the shared correlation tracker BEFORE wrapping in Arc
+        // This ensures the inbound connection uses the same correlation tracker as the outbound connection
+        {
+            let pool = registry.connection_pool.lock().await;
+            let correlation_tracker = pool.get_or_create_correlation_tracker(&peer_id);
+            connection.correlation = Some(correlation_tracker);
+            debug!(
+                peer_id = %peer_id,
+                "Set shared correlation tracker on inbound connection before Arc::new"
+            );
+        }
+
+        // CRITICAL: Set embedded_peer_id so responses can find the shared correlation tracker
+        // even after addr_to_peer_id mapping is migrated from ephemeral to bind address
+        connection.embedded_peer_id = Some(peer_id.clone());
+
         let connection_arc = Arc::new(connection);
 
         let keep_connection = {
@@ -1075,133 +975,10 @@ where
     }
 
     // Process the initial message with correlation ID if present
-    match msg_result {
-        Ok(MessageReadResult::Gossip(msg, _correlation_id)) => {
-            // For ActorMessage with correlation_id, ensure it's set
-            let msg_to_handle = if let RegistryMessage::ActorMessage {
-                actor_id,
-                type_hash,
-                payload,
-                correlation_id: _,
-            } = msg
-            {
-                // Create a new ActorMessage with the correlation_id from the Ask envelope
-                RegistryMessage::ActorMessage {
-                    actor_id,
-                    type_hash,
-                    payload,
-                    correlation_id: initial_correlation_id,
-                }
-            } else {
-                msg
-            };
-
-            if let Err(e) =
-                handle_incoming_message(registry.clone(), peer_addr, msg_to_handle).await
-            {
-                warn!(error = %e, "Failed to process initial TLS message");
-            }
-        }
-        Ok(MessageReadResult::AskRaw {
-            correlation_id,
-            payload,
-        }) => {
-            handle_raw_ask_request(&registry, peer_addr, correlation_id, &payload).await;
-        }
-        Ok(MessageReadResult::Response {
-            correlation_id,
-            payload,
-        }) => {
-            handle_response_message(&registry, peer_addr, correlation_id, payload).await;
-        }
-        Ok(MessageReadResult::Actor {
-            msg_type,
-            correlation_id,
-            actor_id,
-            type_hash,
-            payload,
-        }) => {
-            // Handle initial actor message directly
-            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                let actor_id_str = actor_id.to_string();
-                let correlation = if msg_type == crate::MessageType::ActorAsk as u8 {
-                    Some(correlation_id)
-                } else {
-                    None
-                };
-                let _ = handler
-                    .handle_actor_message(&actor_id_str, type_hash, &payload, correlation)
-                    .await;
-            }
-        }
-        Ok(MessageReadResult::Streaming {
-            msg_type,
-            correlation_id,
-            stream_header,
-            chunk_data,
-        }) => {
-            // Handle initial streaming message
-            match msg_type {
-                msg_type if msg_type == crate::MessageType::StreamStart as u8
-                    || msg_type == crate::MessageType::StreamResponseStart as u8 =>
-                {
-                    if let Err(e) = streaming_state.start_stream_with_correlation(stream_header, correlation_id) {
-                        warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
-                    }
-                }
-                msg_type if msg_type == crate::MessageType::StreamData as u8
-                    || msg_type == crate::MessageType::StreamResponseData as u8 =>
-                {
-                    // Data chunk - this should not be the first message typically, but handle it
-                    if let Err(e) = streaming_state.start_stream_with_correlation(stream_header, correlation_id) {
-                        debug!(error = %e, "Auto-starting stream for data chunk: stream_id={}", stream_header.stream_id);
-                    }
-                    if let Ok(Some((complete_data, corr_id))) =
-                        streaming_state.add_chunk_with_correlation(stream_header, chunk_data)
-                    {
-                        // Complete message assembled - route to actor
-                        // corr_id == 0 means tell (fire-and-forget), non-zero means ask (expects response)
-                        let correlation_opt = if corr_id == 0 { None } else { Some(corr_id) };
-                        if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                            let actor_id_str = stream_header.actor_id.to_string();
-                            if let Ok(Some(response)) = handler
-                                .handle_actor_message(
-                                    &actor_id_str,
-                                    stream_header.type_hash,
-                                    &complete_data,
-                                    correlation_opt,
-                                )
-                                .await
-                            {
-                                // Only send response for asks (non-zero correlation_id)
-                                if corr_id != 0 {
-                                    send_streaming_response(&registry, peer_addr, corr_id, response).await;
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    warn!(
-                        "Unexpected streaming message type as initial message: 0x{:02x}",
-                        msg_type
-                    );
-                }
-            }
-        }
-        Ok(MessageReadResult::Raw(_payload)) => {
-            #[cfg(any(test, feature = "test-helpers", debug_assertions))]
-            {
-                if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
-                    crate::test_helpers::record_raw_payload(_payload.clone());
-                }
-            }
-            debug!(peer_addr = %peer_addr, "Ignoring raw message payload");
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to read initial message - connection will be closed");
-            return ConnectionCloseOutcome::Normal { node_id: None };
-        }
+    // We can safely unwrap here because the error case was handled by the match block above (returning early)
+    if let Err(e) = crate::protocol::process_read_result(msg_result.unwrap(), &mut streaming_state, &registry, peer_addr).await {
+         warn!(error = %e, "Failed to process initial TLS message - connection will be closed");
+         return ConnectionCloseOutcome::Normal { node_id: None };
     }
 
     // Continue reading messages from the TLS stream
@@ -1222,149 +999,10 @@ where
         };
 
         match msg_result {
-            Ok(MessageReadResult::Gossip(msg, correlation_id)) => {
-                // For ActorMessage with correlation_id from Ask envelope, ensure it's set
-                let msg_to_handle = if let RegistryMessage::ActorMessage {
-                    actor_id,
-                    type_hash,
-                    payload,
-                    correlation_id: _,
-                } = msg
-                {
-                    // Create a new ActorMessage with the correlation_id from the Ask envelope
-                    RegistryMessage::ActorMessage {
-                        actor_id,
-                        type_hash,
-                        payload,
-                        correlation_id,
-                    }
-                } else {
-                    msg
-                };
-
-                if let Err(e) =
-                    handle_incoming_message(registry.clone(), peer_addr, msg_to_handle).await
-                {
-                    warn!(error = %e, "Failed to process TLS message");
+            Ok(result) => {
+                 if let Err(e) = crate::protocol::process_read_result(result, &mut streaming_state, &registry, peer_addr).await {
+                    warn!(peer_addr = %peer_addr, error = %e, "Failed to process TLS message");
                 }
-            }
-            Ok(MessageReadResult::AskRaw {
-                correlation_id,
-                payload,
-            }) => {
-                handle_raw_ask_request(&registry, peer_addr, correlation_id, &payload).await;
-            }
-            Ok(MessageReadResult::Response {
-                correlation_id,
-                payload,
-            }) => {
-                handle_response_message(&registry, peer_addr, correlation_id, payload).await;
-            }
-            Ok(MessageReadResult::Actor {
-                msg_type,
-                correlation_id,
-                actor_id,
-                type_hash,
-                payload,
-            }) => {
-                // Handle actor message directly
-                // Call the actor message handler if available
-                if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                    let actor_id_str = actor_id.to_string();
-                    let correlation = if msg_type == crate::MessageType::ActorAsk as u8 {
-                        Some(correlation_id)
-                    } else {
-                        None
-                    };
-                    let _ = handler
-                        .handle_actor_message(&actor_id_str, type_hash, &payload, correlation)
-                        .await;
-                }
-            }
-            Ok(MessageReadResult::Streaming {
-                msg_type,
-                correlation_id,
-                stream_header,
-                chunk_data,
-            }) => {
-                // Handle streaming messages
-                match msg_type {
-                    msg_type if msg_type == crate::MessageType::StreamStart as u8
-                        || msg_type == crate::MessageType::StreamResponseStart as u8 =>
-                    {
-                        if let Err(e) = streaming_state.start_stream_with_correlation(stream_header, correlation_id) {
-                            warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
-                        }
-                    }
-                    msg_type if msg_type == crate::MessageType::StreamData as u8
-                        || msg_type == crate::MessageType::StreamResponseData as u8 =>
-                    {
-                        if let Ok(Some((complete_data, corr_id))) =
-                            streaming_state.add_chunk_with_correlation(stream_header, chunk_data)
-                        {
-                            // Complete message assembled - route to actor
-                            // corr_id == 0 means tell (fire-and-forget), non-zero means ask (expects response)
-                            let correlation_opt = if corr_id == 0 { None } else { Some(corr_id) };
-                            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                                let actor_id_str = stream_header.actor_id.to_string();
-                                if let Ok(Some(response)) = handler
-                                    .handle_actor_message(
-                                        &actor_id_str,
-                                        stream_header.type_hash,
-                                        &complete_data,
-                                        correlation_opt,
-                                    )
-                                    .await
-                                {
-                                    // Only send response for asks (non-zero correlation_id)
-                                    if corr_id != 0 {
-                                        send_streaming_response(&registry, peer_addr, corr_id, response).await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    msg_type if msg_type == crate::MessageType::StreamEnd as u8
-                        || msg_type == crate::MessageType::StreamResponseEnd as u8 =>
-                    {
-                        if let Ok(Some((complete_data, corr_id))) =
-                            streaming_state.finalize_stream_with_correlation(stream_header.stream_id)
-                        {
-                            // Complete message assembled - route to actor
-                            // corr_id == 0 means tell (fire-and-forget), non-zero means ask (expects response)
-                            let correlation_opt = if corr_id == 0 { None } else { Some(corr_id) };
-                            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                                let actor_id_str = stream_header.actor_id.to_string();
-                                if let Ok(Some(response)) = handler
-                                    .handle_actor_message(
-                                        &actor_id_str,
-                                        stream_header.type_hash,
-                                        &complete_data,
-                                        correlation_opt,
-                                    )
-                                    .await
-                                {
-                                    // Only send response for asks (non-zero correlation_id)
-                                    if corr_id != 0 {
-                                        send_streaming_response(&registry, peer_addr, corr_id, response).await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        warn!("Unknown streaming message type: 0x{:02x}", msg_type);
-                    }
-                }
-            }
-            Ok(MessageReadResult::Raw(_payload)) => {
-                #[cfg(any(test, feature = "test-helpers", debug_assertions))]
-                {
-                    if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
-                        crate::test_helpers::record_raw_payload(_payload.clone());
-                    }
-                }
-                debug!(peer_addr = %peer_addr, "Ignoring raw message payload");
             }
             Err(e) => {
                 warn!(peer_addr = %peer_addr, error = %e, "⚠️ TLS connection closed or error reading message - incoming handler exiting");
@@ -1474,12 +1112,46 @@ pub(crate) async fn send_streaming_response(
     correlation_id: u16,
     response: Vec<u8>,
 ) {
-    let conn = {
-        let pool = registry.connection_pool.lock().await;
-        pool.get_connection_by_addr(&peer_addr)
+    let pool = registry.connection_pool.lock().await;
+
+    // IMPORTANT: Look up by peer_id first, then fall back to peer_addr
+    // For responses, we prefer OUTBOUND connection, but will use INBOUND if that's all we have
+    // (both connections use the same TCP wire - responses go back on the same connection)
+    let mut conn_opt: Option<Arc<crate::connection_pool::LockFreeConnection>> = None;
+    if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
+        debug!(peer = %peer_addr, %peer_id, "Found peer_id for streaming response, looking up connection");
+
+        // Get connection by peer_id - this returns the best available connection
+        let conn = pool.get_connection_by_peer_id(&peer_id);
+        if let Some(ref c) = conn {
+            debug!(peer = %peer_addr, %peer_id, conn_addr = %c.addr, conn_direction = ?c.direction,
+                  "Found connection by peer_id for streaming response");
+        }
+
+        // For responses, we prefer OUTBOUND connection over INBOUND
+        // because we typically have an outbound connection for ongoing communication
+        if let Some(ref c) = conn {
+            if c.direction == crate::connection_pool::ConnectionDirection::Outbound {
+                // Perfect - use the outbound connection
+                debug!(peer = %peer_addr, %peer_id, conn_addr = %c.addr,
+                      "✅ Using outbound connection for response");
+                conn_opt = Some(c.clone());
+            } else {
+                // We only have an inbound connection
+                // That's OK! The inbound connection is the same TCP wire, just from the peer's perspective
+                // Responses will go back on the same TCP connection
+                debug!(peer = %peer_addr, %peer_id, conn_addr = %c.addr,
+                      "Using inbound connection for response (same TCP wire)");
+                conn_opt = Some(c.clone());
+            }
+        }
+    } else {
+        debug!(peer = %peer_addr, "No peer_id found for address, falling back to direct address lookup for streaming response");
+        conn_opt = pool.get_connection_by_addr(&peer_addr);
     };
 
-    if let Some(conn) = conn {
+    if let Some(conn) = conn_opt {
+        debug!(peer = %peer_addr, conn_addr = %conn.addr, conn_direction = ?conn.direction, "Sending streaming response on connection");
         if let Some(ref stream_handle) = conn.stream_handle {
             // Use send_response_auto_bytes which automatically handles:
             // - Small responses: direct control buffer write
@@ -1506,45 +1178,65 @@ pub(crate) async fn handle_response_message(
     correlation_id: u16,
     payload: bytes::Bytes,
 ) {
+    debug!(peer = %peer_addr, correlation_id = correlation_id, payload_len = payload.len(),
+          "📥 RESPONSE: Received Response message, attempting to deliver");
+
     let pool = registry.connection_pool.lock().await;
 
     // First, try to deliver via connection's embedded correlation tracker
     if let Some(conn) = pool.get_connection_by_addr(&peer_addr) {
+        debug!(peer = %peer_addr, conn_addr = %conn.addr, has_correlation = conn.correlation.is_some(),
+              "Found connection for response delivery");
         if let Some(ref correlation) = conn.correlation {
+            debug!(peer = %peer_addr, correlation_id = correlation_id, has_pending = correlation.has_pending(correlation_id),
+                  "Checking connection correlation tracker");
             if correlation.has_pending(correlation_id) {
                 correlation.complete(correlation_id, payload);
                 debug!(
                     peer = %peer_addr,
                     correlation_id = correlation_id,
-                    "Delivered response via connection correlation tracker"
+                    "✅ Delivered response via connection correlation tracker"
                 );
                 return;
             }
         }
+    } else {
+        debug!(peer = %peer_addr, "No connection found for response delivery");
     }
 
     // FALLBACK: Use shared correlation tracker by peer_id.
     // This is critical for bidirectional connections where the ask was sent on
     // the outbound connection but the response arrives on the inbound connection.
     if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
+        debug!(peer = %peer_addr, %peer_id, correlation_id = correlation_id,
+              "Trying shared correlation tracker fallback");
         if let Some(correlation) = pool.get_shared_correlation_tracker(&peer_id) {
+            debug!(peer = %peer_addr, %peer_id, correlation_id = correlation_id, has_pending = correlation.has_pending(correlation_id),
+                  "Checking shared correlation tracker");
             if correlation.has_pending(correlation_id) {
                 correlation.complete(correlation_id, payload);
                 debug!(
                     peer = %peer_addr,
                     peer_id = %peer_id,
                     correlation_id = correlation_id,
-                    "Delivered response via shared correlation tracker (fallback)"
+                    "✅ Delivered response via shared correlation tracker (fallback)"
                 );
                 return;
+            } else {
+                debug!(peer = %peer_addr, %peer_id, correlation_id = correlation_id,
+                      "Shared correlation tracker has no pending request");
             }
+        } else {
+            debug!(peer = %peer_addr, %peer_id, "No shared correlation tracker found");
         }
+    } else {
+        debug!(peer = %peer_addr, "No peer_id found for address");
     }
 
     debug!(
         peer = %peer_addr,
         correlation_id = correlation_id,
-        "Response received with no pending request (neither connection nor shared tracker)"
+        "❌ Response received with no pending request (neither connection nor shared tracker)"
     );
 }
 

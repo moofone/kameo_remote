@@ -6,24 +6,6 @@ use tracing_subscriber::EnvFilter;
 
 static TEST_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-async fn wait_for_lookup(
-    handle: &GossipRegistryHandle,
-    name: &str,
-    timeout: Duration,
-) -> RemoteActorLocation {
-    let start = Instant::now();
-    loop {
-        if let Some(location) = handle.lookup(name).await {
-            return location;
-        }
-        if start.elapsed() > timeout {
-            let stats = handle.stats().await;
-            panic!("Timed out waiting for actor lookup: {} stats: {:?}", name, stats);
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-}
-
 async fn wait_for_active_peers(
     handle: &GossipRegistryHandle,
     min_peers: usize,
@@ -45,16 +27,21 @@ async fn wait_for_active_peers(
     }
 }
 
-async fn get_connection_for_peer(
+// Helper function to wait for an actor to be available via lookup
+async fn wait_for_actor(
     handle: &GossipRegistryHandle,
-    peer_id: &PeerId,
-    local_id: &PeerId,
-    local_addr: std::net::SocketAddr,
-) -> kameo_remote::connection_pool::ConnectionHandle {
-    if peer_id == local_id {
-        handle.get_connection(local_addr).await.unwrap()
-    } else {
-        handle.get_connection_to_peer(peer_id).await.unwrap()
+    name: &str,
+    timeout: Duration,
+) -> kameo_remote::RemoteActorRef {
+    let start = Instant::now();
+    loop {
+        if let Some(remote_actor) = handle.lookup(name).await {
+            return remote_actor;
+        }
+        if start.elapsed() > timeout {
+            panic!("Timed out waiting for actor: {}", name);
+        }
+        sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -82,7 +69,7 @@ async fn test_ask_with_lookup_and_performance() {
     let node1_keypair = KeyPair::new_for_testing("node1");
     let node2_keypair = KeyPair::new_for_testing("node2");
     let node3_keypair = KeyPair::new_for_testing("node3");
-    let node1_id = node1_keypair.peer_id();
+    let _node1_id = node1_keypair.peer_id();
     let node2_id = node2_keypair.peer_id();
     let node3_id = node3_keypair.peer_id();
 
@@ -163,7 +150,7 @@ async fn test_ask_with_lookup_and_performance() {
     println!("   ✅ Node3: registered 'cache_service'");
 
     // Wait for propagation
-    sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(500)).await;
     println!(
         "   🔍 Stats after registration:\n      node1={:?}\n      node2={:?}\n      node3={:?}",
         node1.stats().await,
@@ -172,61 +159,39 @@ async fn test_ask_with_lookup_and_performance() {
     );
 
     // ===========================================
-    // PART 1: CREATE ACTOR REFS WITH LOOKUP
+    // PART 1: CREATE ACTOR REFS WITH LOOKUP (NEW API)
     // ===========================================
     println!("\n📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION");
     println!("==============================================");
 
     let lookup_start = Instant::now();
 
-    // Lookup actors and create connections
-    let db_location = wait_for_lookup(&node1, "database_service", Duration::from_secs(2)).await;
-    let db_conn = get_connection_for_peer(
-        &node1,
-        &db_location.peer_id,
-        &node1_id,
-        "127.0.0.1:30001".parse().unwrap(),
-    )
-    .await;
-
-    let compute_location = wait_for_lookup(&node1, "compute_service", Duration::from_secs(2)).await;
-    let compute_conn = get_connection_for_peer(
-        &node1,
-        &compute_location.peer_id,
-        &node1_id,
-        "127.0.0.1:30001".parse().unwrap(),
-    )
-    .await;
-
-    let cache_location = wait_for_lookup(&node1, "cache_service", Duration::from_secs(2)).await;
-    let cache_conn = get_connection_for_peer(
-        &node1,
-        &cache_location.peer_id,
-        &node1_id,
-        "127.0.0.1:30001".parse().unwrap(),
-    )
-    .await;
+    // NEW API: lookup() returns RemoteActorRef directly (location + cached connection)
+    let db_actor = wait_for_actor(&node1, "database_service", Duration::from_secs(5)).await;
+    let compute_actor = wait_for_actor(&node1, "compute_service", Duration::from_secs(5)).await;
+    let cache_actor = wait_for_actor(&node1, "cache_service", Duration::from_secs(5)).await;
 
     let lookup_time = lookup_start.elapsed();
 
-    println!("   ✅ Created actor references:");
+    println!("   ✅ Created RemoteActorRefs:");
     println!(
         "     - database_service at {} (peer: {})",
-        db_location.address, db_location.peer_id
+        db_actor.location.address, db_actor.location.peer_id
     );
     println!(
         "     - compute_service at {} (peer: {})",
-        compute_location.address, compute_location.peer_id
+        compute_actor.location.address, compute_actor.location.peer_id
     );
     println!(
         "     - cache_service at {} (peer: {})",
-        cache_location.address, cache_location.peer_id
+        cache_actor.location.address, cache_actor.location.peer_id
     );
     println!(
         "   📈 Total lookup time: {:?} ({:.3} μs)",
         lookup_time,
         lookup_time.as_nanos() as f64 / 1000.0
     );
+    println!("   💡 Each RemoteActorRef has connection cached - zero lookups for ask()!");
 
     // ===========================================
     // PART 2: ASK() PERFORMANCE TESTING
@@ -256,16 +221,16 @@ async fn test_ask_with_lookup_and_performance() {
     for (i, (service, query)) in queries.iter().enumerate() {
         let ask_start = Instant::now();
 
-        // Select the appropriate connection
-        let conn = match *service {
-            "database_service" => &db_conn,
-            "compute_service" => &compute_conn,
-            "cache_service" => &cache_conn,
+        // Select the appropriate RemoteActorRef (with cached connection)
+        let actor = match *service {
+            "database_service" => &db_actor,
+            "compute_service" => &compute_actor,
+            "cache_service" => &cache_actor,
             _ => panic!("Unknown service"),
         };
 
-        // Send request and wait for response
-        let response = conn.ask(query.as_bytes()).await.unwrap();
+        // Send request and wait for response (uses cached connection, zero lookups)
+        let response = actor.ask(query.as_bytes()).await.unwrap();
         let response_str = String::from_utf8_lossy(&response);
 
         let ask_time = ask_start.elapsed();
@@ -301,13 +266,14 @@ async fn test_ask_with_lookup_and_performance() {
     let parallel_start = Instant::now();
 
     // Send all queries in parallel
+    // Send all queries in parallel using RemoteActorRefs (each uses cached connection)
     let (r1, r2, r3, r4, r5, r6) = tokio::join!(
-        db_conn.ask(queries[0].1.as_bytes()),
-        compute_conn.ask(queries[1].1.as_bytes()),
-        cache_conn.ask(queries[2].1.as_bytes()),
-        db_conn.ask(queries[3].1.as_bytes()),
-        compute_conn.ask(queries[4].1.as_bytes()),
-        cache_conn.ask(queries[5].1.as_bytes()),
+        db_actor.ask(queries[0].1.as_bytes()),
+        compute_actor.ask(queries[1].1.as_bytes()),
+        cache_actor.ask(queries[2].1.as_bytes()),
+        db_actor.ask(queries[3].1.as_bytes()),
+        compute_actor.ask(queries[4].1.as_bytes()),
+        cache_actor.ask(queries[5].1.as_bytes()),
     );
 
     // Verify all responses
@@ -356,7 +322,7 @@ async fn test_ask_with_lookup_and_performance() {
     );
     let tell_start = Instant::now();
     for _ in 0..iterations {
-        db_conn.tell(test_message).await.unwrap();
+        db_actor.tell(test_message).await.unwrap();
     }
     let tell_total = tell_start.elapsed();
     let tell_avg = tell_total / iterations;
@@ -383,7 +349,7 @@ async fn test_ask_with_lookup_and_performance() {
     );
     let ask_start = Instant::now();
     for _ in 0..iterations {
-        let _ = db_conn.ask(test_message).await.unwrap();
+        let _ = db_actor.ask(test_message).await.unwrap();
     }
     let ask_total = ask_start.elapsed();
     let ask_avg = ask_total / iterations;
@@ -420,7 +386,11 @@ async fn test_ask_with_lookup_and_performance() {
 
     // Send request and get delegated reply sender
     let request = "SELECT COUNT(*) FROM users".as_bytes();
-    let reply_sender = db_conn.ask_with_reply_sender(request).await.unwrap();
+    let reply_sender = db_actor.connection.as_ref()
+        .expect("Actor should be connected")
+        .ask_with_reply_sender(request)
+        .await
+        .unwrap();
 
     println!("   - Request sent, got DelegatedReplySender");
     println!("   - Reply sender: {:?}", reply_sender);
@@ -436,7 +406,10 @@ async fn test_ask_with_lookup_and_performance() {
     // Test with timeout
     println!("\n🔸 Test 4B: ask_with_timeout_and_reply()");
     let timeout = Duration::from_millis(100);
-    let reply_with_timeout = db_conn
+    let reply_with_timeout = db_actor
+        .connection
+        .as_ref()
+        .expect("Actor should be connected")
         .ask_with_timeout_and_reply(request, timeout)
         .await
         .unwrap();
@@ -467,23 +440,22 @@ async fn test_ask_with_lookup_and_performance() {
     println!("\n✅ Best Practices:");
     println!("   1. Use ask() for operations that require a response (queries, calculations)");
     println!("   2. Use tell() for fire-and-forget operations (logging, notifications)");
-    println!("   3. Cache actor refs to avoid repeated lookups");
-    println!("   4. Use parallel ask() calls when querying multiple services");
-    println!("   5. Consider timeouts for ask() operations in production");
+    println!("   3. Do lookup() once to get RemoteActorRef, then reuse it");
+    println!("   4. RemoteActorRef uses cached connection (no lookups, direct reference)");
+    println!("   5. Use parallel ask() calls when querying multiple services");
 
     println!("\n🔧 Code Examples:");
-    println!("   // Create actor ref once:");
-    println!("   let location = registry.lookup(\"database_service\").await?;");
-    println!("   let conn = registry.get_connection(peer_addr).await?;");
+    println!("   // Lookup once - gets actor AND caches connection:");
+    println!("   let remote_actor = registry.lookup(\"database_service\").await?;");
     println!();
-    println!("   // Sequential queries:");
-    println!("   let result1 = conn.ask(query1).await?;");
-    println!("   let result2 = conn.ask(query2).await?;");
+    println!("   // Sequential queries (no lookups - direct reference):");
+    println!("   let result1 = remote_actor.ask(query1).await?;");
+    println!("   let result2 = remote_actor.ask(query2).await?;");
     println!();
     println!("   // Parallel queries:");
     println!("   let (r1, r2) = tokio::join!(");
-    println!("       conn1.ask(query1),");
-    println!("       conn2.ask(query2)");
+    println!("       actor1.ask(query1),");
+    println!("       actor2.ask(query2)");
     println!("   );");
 
     println!("\n⚠️  NOTE: Current ask() implementation returns mock responses.");
@@ -545,11 +517,12 @@ async fn test_ask_high_throughput() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(500)).await;
 
-    // Lookup and create connection
-    // Skip lookup in this throughput test to avoid gossip timing dependencies.
-    let api_conn = node1.get_connection_to_peer(&node2_id).await.unwrap();
+    // NEW API: Lookup to get RemoteActorRef (includes cached connection)
+    let api_actor = wait_for_actor(&node1, "api_service", Duration::from_secs(5)).await;
+    let api_conn = api_actor.connection.clone()
+        .expect("API service should be connected");
 
     // Test parameters
     let request_count = 1000;

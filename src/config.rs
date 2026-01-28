@@ -123,9 +123,27 @@ pub struct GossipConfig {
 
 impl Default for GossipConfig {
     fn default() -> Self {
+        // Read gossip interval from environment variable for testing flexibility
+        // Example: KAMEO_GOSSIP_INTERVAL_MS=100 for fast testing (100ms)
+        //          KAMEO_GOSSIP_INTERVAL_MS=5000 for production (5s default)
+        let gossip_interval = if let Ok(ms_str) = std::env::var("KAMEO_GOSSIP_INTERVAL_MS") {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                Duration::from_millis(ms)
+            } else {
+                tracing::warn!(
+                    "Invalid KAMEO_GOSSIP_INTERVAL_MS value '{}', using default {}ms",
+                    ms_str,
+                    DEFAULT_GOSSIP_INTERVAL_SECS * 1000
+                );
+                Duration::from_secs(DEFAULT_GOSSIP_INTERVAL_SECS)
+            }
+        } else {
+            Duration::from_secs(DEFAULT_GOSSIP_INTERVAL_SECS)
+        };
+
         Self {
             key_pair: None,
-            gossip_interval: Duration::from_secs(DEFAULT_GOSSIP_INTERVAL_SECS),
+            gossip_interval,
             max_gossip_peers: 3,
             // Increase default actor TTL to avoid premature expiry of distributed actor discovery
             // This prevents cases where peers stop discovering actors after a few minutes of idle time.

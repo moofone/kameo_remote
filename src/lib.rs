@@ -6,8 +6,10 @@ mod handle_builder;
 pub mod handshake;
 pub mod peer_discovery;
 pub mod priority;
+pub mod protocol;
 pub mod registry;
 pub mod remote_actor_location;
+pub mod remote_actor_ref;
 pub mod reply_to;
 pub mod stream_writer;
 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
@@ -32,6 +34,7 @@ pub use handle::GossipRegistryHandle;
 pub use handle_builder::GossipRegistryBuilder;
 pub use priority::{ConsistencyLevel, RegistrationPriority};
 pub use remote_actor_location::RemoteActorLocation;
+pub use remote_actor_ref::RemoteActorRef;
 pub use reply_to::{ReplyTo, TimeoutReplyTo};
 pub use typed::{decode_typed, encode_typed, WireEncode, WireType};
 

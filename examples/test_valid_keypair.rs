@@ -115,7 +115,7 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
     // Try to lookup the actor
     match registry.lookup("test_actor").await {
         Some(location) => {
-            println!("✅ Found actor 'test_actor' at {}", location.address);
+            println!("✅ Found actor 'test_actor' at {}", location.location.address);
             println!("🎉 Test PASSED: Client with valid keypair connected successfully!");
         }
         None => {

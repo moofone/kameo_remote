@@ -81,7 +81,7 @@ async fn test_connection_survives_multiple_gossip_rounds() {
     handle_b.shutdown().await;
 }
 
-/// Test that addr_to_peer_id mappings are preserved after reindexing.
+/// Test that addr_to_peer_id mappings are preserved after reindexing
 ///
 /// This specifically tests the fix for the bug where FullSync removes
 /// the ephemeral address mapping before reindex, causing orphaned entries.
@@ -93,7 +93,7 @@ async fn test_addr_mappings_preserved_after_fullsync() {
         ))
         .try_init();
 
-    let addr_a: SocketAddr = "127.0.0.1:7923".parse().unwrap();
+    let addr_a: SocketAddr = "127.0.0.1:7930".parse().unwrap();
     let addr_b: SocketAddr = "127.0.0.1:7924".parse().unwrap();
 
     let key_pair_a = KeyPair::new_for_testing("mapping_node_a");
@@ -175,8 +175,8 @@ async fn test_reconnect_cleanup() {
         ))
         .try_init();
 
-    let addr_a: SocketAddr = "127.0.0.1:7925".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7926".parse().unwrap();
+    let addr_a: SocketAddr = "127.0.0.1:7935".parse().unwrap();
+    let addr_b: SocketAddr = "127.0.0.1:7936".parse().unwrap();
 
     let key_pair_a = KeyPair::new_for_testing("reconnect_node_a");
     let key_pair_b = KeyPair::new_for_testing("reconnect_node_b");
@@ -209,7 +209,10 @@ async fn test_reconnect_cleanup() {
     // Disconnect by shutting down B
     info!("Shutting down node B to force disconnect");
     handle_b.shutdown().await;
-    sleep(Duration::from_millis(500)).await;
+
+    // Wait longer for peer cleanup to avoid consensus query race condition
+    // (old peer failure handling needs time to complete before we reconnect with new peer)
+    sleep(Duration::from_secs(2)).await;
 
     // Restart B with same address but NEW identity
     info!("Restarting node B with new identity");

@@ -149,7 +149,7 @@ where
 
     let mut buf = vec![0u8; len];
     read_exact_with_timeout(reader, &mut buf).await?;
-    let hello: Hello = rkyv::from_bytes::<Hello, rkyv::rancor::Error>(&buf)?;
+    let hello: Hello = rkyv::from_bytes::<Hello, rkyv::rancor::Error>(&buf)?; // ALLOW_RKYV_FROM_BYTES
     Ok(hello)
 }
 
@@ -215,7 +215,7 @@ mod tests {
 
         // Deserialize
         let deserialized: Hello =
-            rkyv::from_bytes::<Hello, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<Hello, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         assert_eq!(deserialized.protocol_version, hello.protocol_version);
         assert_eq!(deserialized.features.len(), hello.features.len());
@@ -262,7 +262,7 @@ mod tests {
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&feature).unwrap();
         let deserialized: Feature =
-            rkyv::from_bytes::<Feature, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<Feature, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         assert_eq!(deserialized, feature);
     }

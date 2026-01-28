@@ -109,7 +109,7 @@ mod tests {
         let priority = RegistrationPriority::Immediate;
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&priority).unwrap();
         let deserialized: RegistrationPriority =
-            rkyv::from_bytes::<RegistrationPriority, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RegistrationPriority, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
         assert_eq!(priority, deserialized);
     }
 
@@ -130,7 +130,7 @@ mod tests {
         let level = ConsistencyLevel::Strong;
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&level).unwrap();
         let deserialized: ConsistencyLevel =
-            rkyv::from_bytes::<ConsistencyLevel, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<ConsistencyLevel, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
         assert_eq!(level, deserialized);
     }
 

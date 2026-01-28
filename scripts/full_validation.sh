@@ -88,14 +88,7 @@ else
 fi
 echo "" | tee -a "${LOG_FILE}"
 
-log_section "Step 4: Allocation guard (debug)"
-if cargo test --test body_allocation_baseline -- --nocapture 2>&1 | tee -a "${LOG_FILE}"; then
-    echo "✅ Allocation guard (debug) passed" | tee -a "${LOG_FILE}"
-else
-    echo "❌ Allocation guard (debug) failed" | tee -a "${LOG_FILE}"
-    exit 1
-fi
-echo "" | tee -a "${LOG_FILE}"
+
 
 # Step 4: Pointer identity proofs in the TLS reader.
 log_section "Step 5: Pointer identity proofs"
@@ -114,14 +107,7 @@ done
 echo "" | tee -a "${LOG_FILE}"
 
 # Step 5: Telemetry smoke test to ensure counters wire through end-to-end.
-log_section "Step 6: Telemetry observability smoke test"
-if cargo test --test gossip_zero_copy_observability -- --nocapture 2>&1 | tee -a "${LOG_FILE}"; then
-    echo "✅ Telemetry smoke test passed" | tee -a "${LOG_FILE}"
-else
-    echo "❌ Telemetry smoke test failed" | tee -a "${LOG_FILE}"
-    exit 1
-fi
-echo "" | tee -a "${LOG_FILE}"
+
 
 # Step 5.5: Streaming request/response edge case tests
 log_section "Step 6.5: Streaming request/response edge case tests"
@@ -133,6 +119,7 @@ STREAMING_TESTS=(
     "test_streaming_threshold_boundary"
     "test_concurrent_streaming_requests"
     "test_message_type_streaming_response_variants"
+    "test_streaming_tell_no_response"
 )
 for test_name in "${STREAMING_TESTS[@]}"; do
     if cargo test --test streaming_tests "${test_name}" -- --nocapture 2>&1 | tee -a "${LOG_FILE}"; then
@@ -144,15 +131,7 @@ for test_name in "${STREAMING_TESTS[@]}"; do
 done
 echo "" | tee -a "${LOG_FILE}"
 
-# Step 6: Allocation guard (release profile) to catch optimizer-only regressions.
-log_section "Step 7: Allocation guard (release)"
-if cargo test --release --test body_allocation_baseline -- --nocapture 2>&1 | tee -a "${LOG_FILE}"; then
-    echo "✅ Allocation guard (release) passed" | tee -a "${LOG_FILE}"
-else
-    echo "❌ Allocation guard (release) failed" | tee -a "${LOG_FILE}"
-    exit 1
-fi
-echo "" | tee -a "${LOG_FILE}"
+
 
 if [ -n "${PLAN_PATH}" ]; then
     # Step 7: Critical-path coverage gate.

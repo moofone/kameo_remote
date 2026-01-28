@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
             if let Some(location) = node.lookup(name).await {
                 println!(
                     "✅ Node{node_id} found {name:<20} (node{peer_node}) at: {}",
-                    location.address
+                    location.location.address
                 );
             } else {
                 println!("❌ Node1 cannot yet find {name:<20}");

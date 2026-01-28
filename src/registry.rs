@@ -668,6 +668,11 @@ impl GossipRegistry {
     }
 
     async fn propagate_node_id_to_known_addresses(&self, addr: SocketAddr, node_id: NodeId) {
+        // Only track in known_peers if peer discovery is enabled
+        if !self.config.enable_peer_discovery {
+            return;
+        }
+
         let mut gossip_state = self.gossip_state.lock().await;
         if let Some(peer_info) = gossip_state.peers.get_mut(&addr) {
             peer_info.node_id = Some(node_id);
@@ -3046,18 +3051,16 @@ impl GossipRegistry {
 
     /// Query other peers for their view of a potentially failed peer
     async fn query_peer_health_consensus(&self, target_peer: SocketAddr) -> Result<()> {
-        // First check if we still have an active connection
-        let has_active_connection = {
-            let pool = self.connection_pool.lock().await;
-            pool.has_connection(&target_peer)
-        };
+        // Note: We may have a connection to this address but for a different peer (after reconnection)
+        // This is OK - we query other peers to get consensus about the ORIGINAL peer
 
-        if has_active_connection {
-            error!(
-                target_peer = %target_peer,
-                "🚨 CONSENSUS WARNING: Starting consensus query for a peer we still have an ACTIVE SOCKET CONNECTION to! This indicates a logic error."
-            );
-        }
+        // TODO: Ideally we'd track which peer_id a connection was established for and check that
+        // For now, we rely on the fact that if we're querying, we've already decided the peer might be failed
+
+        warn!(
+            target_peer = %target_peer,
+            "🔍 Starting consensus query for peer (may have active connection to different peer after reconnection)"
+        );
 
         let query_msg = RegistryMessage::PeerHealthQuery {
             sender: self.peer_id.clone(),
@@ -4001,38 +4004,64 @@ impl GossipRegistry {
         let candidates = {
             let mut gossip_state = self.gossip_state.lock().await;
 
-            // Update known_peers LRU cache and active peers
-            for peer_gossip in &peers {
-                if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
-                    // Conservative merge: only update if newer
-                    if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address) {
-                        // Only update if the incoming info is newer
-                        if peer_gossip.last_success > existing.last_success {
-                            existing.last_success = peer_gossip.last_success;
-                            existing.last_attempt = peer_gossip.last_attempt;
-                            // Don't overwrite local failure count
+            // Only update known_peers if peer discovery is enabled
+            // OR if we're already connected to the peer (in gossip_state.peers)
+            if gossip_state.peer_discovery.is_some() {
+                // Update known_peers LRU cache and active peers
+                for peer_gossip in &peers {
+                    if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
+                        // Conservative merge: only update if newer
+                        if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address) {
+                            // Only update if the incoming info is newer
+                            if peer_gossip.last_success > existing.last_success {
+                                existing.last_success = peer_gossip.last_success;
+                                existing.last_attempt = peer_gossip.last_attempt;
+                                // Don't overwrite local failure count
+                            }
+                            // Always update dns_name if gossip provides one and we don't have it
+                            // (or update to latest if provided)
+                            if peer_info.dns_name.is_some() {
+                                existing.dns_name = peer_info.dns_name.clone();
+                            }
+                        } else {
+                            // New peer, add to cache
+                            gossip_state.known_peers.put(peer_info.address, peer_info.clone());
                         }
-                        // Always update dns_name if gossip provides one and we don't have it
-                        // (or update to latest if provided)
-                        if peer_info.dns_name.is_some() {
-                            existing.dns_name = peer_info.dns_name.clone();
-                        }
-                    } else {
-                        // New peer, add to cache
-                        gossip_state.known_peers.put(peer_info.address, peer_info.clone());
-                    }
 
-                    // Also update dns_name in active peers (gossip_state.peers)
-                    // This ensures existing connected peers get DNS refresh capability
-                    if peer_info.dns_name.is_some() {
-                        if let Some(active_peer) = gossip_state.peers.get_mut(&peer_info.address) {
-                            if active_peer.dns_name.is_none() {
-                                active_peer.dns_name = peer_info.dns_name;
-                                debug!(
-                                    addr = %peer_info.address,
-                                    dns_name = ?active_peer.dns_name,
-                                    "Updated active peer with DNS name from gossip"
-                                );
+                        // Also update dns_name in active peers (gossip_state.peers)
+                        // This ensures existing connected peers get DNS refresh capability
+                        if peer_info.dns_name.is_some() {
+                            if let Some(active_peer) = gossip_state.peers.get_mut(&peer_info.address) {
+                                if active_peer.dns_name.is_none() {
+                                    active_peer.dns_name = peer_info.dns_name;
+                                    debug!(
+                                        addr = %peer_info.address,
+                                        dns_name = ?active_peer.dns_name,
+                                        "Updated active peer with DNS name from gossip"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Peer discovery disabled: only update DNS names for existing connections
+                // Don't add new peers to known_peers
+                for peer_gossip in &peers {
+                    if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
+                        // Only update dns_name in active peers (gossip_state.peers)
+                        // This ensures existing connected peers get DNS refresh capability
+                        // but we don't add them to known_peers
+                        if peer_info.dns_name.is_some() {
+                            if let Some(active_peer) = gossip_state.peers.get_mut(&peer_info.address) {
+                                if active_peer.dns_name.is_none() {
+                                    active_peer.dns_name = peer_info.dns_name;
+                                    debug!(
+                                        addr = %peer_info.address,
+                                        dns_name = ?active_peer.dns_name,
+                                        "Updated active peer with DNS name from gossip (peer discovery disabled)"
+                                    );
+                                }
                             }
                         }
                     }
@@ -4358,7 +4387,7 @@ mod tests {
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&change).unwrap();
         let deserialized: RegistryChange =
-            rkyv::from_bytes::<RegistryChange, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RegistryChange, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         match deserialized {
             RegistryChange::ActorAdded { name, .. } => {
@@ -4381,7 +4410,7 @@ mod tests {
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&delta).unwrap();
         let deserialized: RegistryDelta =
-            rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         assert_eq!(deserialized.since_sequence, 10);
         assert_eq!(deserialized.current_sequence, 15);
@@ -4415,7 +4444,7 @@ mod tests {
         let msg = RegistryMessage::DeltaGossip { delta };
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: RegistryMessage =
-            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
         match deserialized {
             RegistryMessage::DeltaGossip { .. } => (),
             _ => panic!("Wrong message type"),
@@ -4430,7 +4459,7 @@ mod tests {
         };
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: RegistryMessage =
-            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
         match deserialized {
             RegistryMessage::FullSyncRequest { sequence, .. } => {
                 assert_eq!(sequence, 10);
@@ -5214,7 +5243,7 @@ mod tests {
 
         // Deserialize
         let deserialized: RegistryMessage =
-            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         // Verify
         match deserialized {
@@ -5382,7 +5411,7 @@ mod tests {
 
         // Deserialize
         let deserialized: PeerInfoGossip =
-            rkyv::from_bytes::<PeerInfoGossip, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<PeerInfoGossip, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         assert_eq!(deserialized.address, "10.0.0.1:9000");
         assert_eq!(
