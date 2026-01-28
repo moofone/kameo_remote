@@ -81,7 +81,7 @@ async fn test_end_to_end_ask_reply() {
 
     info!("=== Test 1: Basic ask/reply with actor handler ===");
     {
-        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+        let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
 
         let request = encode_actor_ask(b"Hello from test");
         let start = std::time::Instant::now();
@@ -98,7 +98,7 @@ async fn test_end_to_end_ask_reply() {
 
     info!("=== Test 2: Multiple concurrent asks with correlation tracking ===");
     {
-        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+        let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
 
         let mut handles = Vec::new();
         let start = std::time::Instant::now();
@@ -135,7 +135,7 @@ async fn test_end_to_end_ask_reply() {
         // 3. Node B passes the ReplyTo to an actor for processing
         // 4. The actor sends the response back through the ReplyTo
 
-        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+        let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
         // Simulate what would happen on Node B:
         // When an Ask arrives, the connection handler would create a ReplyTo
         // and pass it to an actor. We'll simulate this with ask_with_reply_to
@@ -159,7 +159,7 @@ async fn test_end_to_end_ask_reply() {
 
     info!("=== Test 4: Performance test ===");
     {
-        let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+        let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
 
         let num_requests = 100;
         let start = std::time::Instant::now();

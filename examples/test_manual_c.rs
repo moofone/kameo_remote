@@ -73,6 +73,7 @@ async fn main() {
             let mut status = Vec::new();
             let mut configured_count = 0;
             let mut connected_count = 0;
+            let connected_set: std::collections::HashSet<_> = pool.get_connected_peers().into_iter().collect();
 
             // Check all configured peers (from peer_id_to_addr)
             for entry in pool.peer_id_to_addr.iter() {
@@ -81,7 +82,7 @@ async fn main() {
                 configured_count += 1;
 
                 // Check if we have an active connection to this node
-                let has_connection = pool.get_connection_by_peer_id(peer_id).is_some();
+                let has_connection = connected_set.contains(addr);
                 if has_connection {
                     connected_count += 1;
                 }

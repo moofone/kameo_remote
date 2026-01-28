@@ -1,4 +1,5 @@
 use crate::RemoteActorLocation;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 /// A remote actor reference with a cached connection for zero-lookup message sending.
@@ -109,12 +110,10 @@ impl RemoteActorRef {
     pub async fn tell(&self, message: &[u8]) -> crate::Result<()> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
-            // Check shutdown flag
-            let gossip_state = registry.gossip_state.lock().await;
-            if gossip_state.shutdown {
+            // LOCK-FREE CHECK: Check atomic shutdown flag
+            if registry.shutdown.load(Ordering::Relaxed) {
                 return Err(crate::GossipError::Shutdown);
             }
-            drop(gossip_state);
         } else {
             // Registry was dropped
             return Err(crate::GossipError::Shutdown);
@@ -135,11 +134,9 @@ impl RemoteActorRef {
     pub async fn tell_message<'a>(&self, message: crate::connection_pool::TellMessage<'a>) -> crate::Result<()> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
-            let gossip_state = registry.gossip_state.lock().await;
-            if gossip_state.shutdown {
+            if registry.shutdown.load(Ordering::Relaxed) {
                 return Err(crate::GossipError::Shutdown);
             }
-            drop(gossip_state);
         } else {
             return Err(crate::GossipError::Shutdown);
         }
@@ -159,11 +156,9 @@ impl RemoteActorRef {
     pub async fn ask(&self, request: &[u8]) -> crate::Result<Vec<u8>> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
-            let gossip_state = registry.gossip_state.lock().await;
-            if gossip_state.shutdown {
+            if registry.shutdown.load(Ordering::Relaxed) {
                 return Err(crate::GossipError::Shutdown);
             }
-            drop(gossip_state);
         } else {
             return Err(crate::GossipError::Shutdown);
         }
@@ -178,18 +173,17 @@ impl RemoteActorRef {
     /// Send a request with timeout and wait for response
     ///
     /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
+    /// ZERO-COPY: Takes owned Bytes to avoid allocation.
     pub async fn ask_with_timeout(
         &self,
-        request: &[u8],
+        request: bytes::Bytes,
         timeout: std::time::Duration,
-    ) -> crate::Result<Vec<u8>> {
+    ) -> crate::Result<bytes::Bytes> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
-            let gossip_state = registry.gossip_state.lock().await;
-            if gossip_state.shutdown {
+            if registry.shutdown.load(Ordering::Relaxed) {
                 return Err(crate::GossipError::Shutdown);
             }
-            drop(gossip_state);
         } else {
             return Err(crate::GossipError::Shutdown);
         }
@@ -197,7 +191,55 @@ impl RemoteActorRef {
         let conn = self.connection.as_ref()
             .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
 
-        conn.ask_with_timeout(request, timeout).await
+        conn.ask_with_timeout_bytes(request, timeout).await
+    }
+
+    /// Send a request and delegate the response handling via ReplyTo
+    ///
+    /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
+    pub async fn ask_with_reply_to(&self, request: &[u8]) -> crate::Result<crate::ReplyTo> {
+        // Check if registry has been shut down
+        if let Some(registry) = self.registry.upgrade() {
+            if registry.shutdown.load(Ordering::Relaxed) {
+                return Err(crate::GossipError::Shutdown);
+            }
+        } else {
+            return Err(crate::GossipError::Shutdown);
+        }
+
+        let conn = self.connection.as_ref()
+            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+
+        conn.ask_with_reply_to(request).await
+    }
+
+    /// Send a typed fire-and-forget message
+    pub async fn tell_typed<T>(&self, message: &T) -> crate::Result<()>
+    where
+        T: crate::typed::WireEncode,
+    {
+        let bytes = crate::typed::encode_typed(message)?;
+        self.tell(&bytes).await
+    }
+
+    /// Send a typed request and wait for a typed response
+    pub async fn ask_typed<T, R>(&self, request: &T) -> crate::Result<R>
+    where
+        T: crate::typed::WireEncode,
+        R: crate::typed::WireType + rkyv::Archive,
+        for<'a> R::Archived: rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            > + rkyv::Deserialize<R, rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
+    {
+        let req_bytes = crate::typed::encode_typed(request)?;
+        let resp_bytes = self.ask(&req_bytes).await?;
+        crate::typed::decode_typed(&resp_bytes)
     }
 
     /// Send a large request using streaming (for payloads > 1MB)
@@ -215,11 +257,9 @@ impl RemoteActorRef {
     ) -> crate::Result<bytes::Bytes> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
-            let gossip_state = registry.gossip_state.lock().await;
-            if gossip_state.shutdown {
+            if registry.shutdown.load(Ordering::Relaxed) {
                 return Err(crate::GossipError::Shutdown);
             }
-            drop(gossip_state);
         } else {
             return Err(crate::GossipError::Shutdown);
         }
@@ -231,6 +271,11 @@ impl RemoteActorRef {
         conn
             .ask_streaming_bytes(payload, type_hash, actor_id, timeout)
             .await
+    }
+
+    /// Get the streaming threshold for this connection
+    pub fn streaming_threshold(&self) -> usize {
+        crate::connection_pool::STREAMING_THRESHOLD
     }
 }
 

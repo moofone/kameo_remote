@@ -282,7 +282,7 @@ impl GossipRegistryHandle {
     }
 
     /// Get a connection handle for direct communication (reuses existing pool connections)
-    pub async fn get_connection(
+    pub(crate) async fn get_connection(
         &self,
         addr: SocketAddr,
     ) -> Result<crate::connection_pool::ConnectionHandle> {
@@ -290,7 +290,7 @@ impl GossipRegistryHandle {
     }
 
     /// Get a connection handle by peer ID (ensures TLS NodeId is known)
-    pub async fn get_connection_to_peer(
+    pub(crate) async fn get_connection_to_peer(
         &self,
         peer_id: &crate::PeerId,
     ) -> Result<crate::connection_pool::ConnectionHandle> {
@@ -300,6 +300,46 @@ impl GossipRegistryHandle {
             .await
             .get_connection_to_peer(peer_id)
             .await
+    }
+
+    /// Lookup a peer and return a RemoteActorRef for communicating with it.
+    ///
+    /// This is the primary entry point for sending messages to remote peers.
+    /// It automatically manages connection pooling and reconnects if needed.
+    pub async fn lookup_peer(&self, peer_id: &crate::PeerId) -> Result<crate::RemoteActorRef> {
+        let conn = self.get_connection_to_peer(peer_id).await?;
+        let addr = conn.addr;
+        
+        // Create a location for this peer
+        let location = crate::RemoteActorLocation::new_with_peer(addr, peer_id.clone());
+        
+        // Return a RemoteActorRef linked to this registry
+        Ok(crate::RemoteActorRef::with_registry(
+            location,
+            Some(conn),
+            self.registry.clone(),
+        ))
+    }
+
+    /// Lookup a peer by address and return a RemoteActorRef.
+    ///
+    /// Note: Prefer `lookup_peer` if possible as it ensures TLS identity verification.
+    /// This method is primarily useful for testing or when only the address is known.
+    pub async fn lookup_address(&self, addr: SocketAddr) -> Result<crate::RemoteActorRef> {
+        let conn = self.get_connection(addr).await?;
+        
+        // Try to resolve the PeerId
+        let peer_id = self.registry.connection_pool.lock().await
+            .get_peer_id_by_addr(&addr)
+            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("No peer ID found for {}", addr)))?;
+            
+        let location = crate::RemoteActorLocation::new_with_peer(addr, peer_id);
+        
+        Ok(crate::RemoteActorRef::with_registry(
+            location,
+            Some(conn),
+            self.registry.clone(),
+        ))
     }
 
     /// Set the DNS name for a peer. When a peer has a DNS name configured,
@@ -728,16 +768,16 @@ where
         None => registry.lookup_node_id(&peer_addr).await,
     };
 
-    let (sender_node_id, _initial_correlation_id) = match &msg_result {
+    let (sender_node_id, _initial_correlation_id, sender_bind_addr_opt) = match &msg_result {
         Ok(MessageReadResult::Gossip(msg, correlation_id)) => {
-            let node_id = match msg {
-                RegistryMessage::DeltaGossip { delta } => delta.sender_peer_id.to_hex(),
-                RegistryMessage::FullSync { sender_peer_id, .. } => sender_peer_id.to_hex(),
-                RegistryMessage::FullSyncRequest { sender_peer_id, .. } => sender_peer_id.to_hex(),
-                RegistryMessage::FullSyncResponse { sender_peer_id, .. } => sender_peer_id.to_hex(),
-                RegistryMessage::DeltaGossipResponse { delta } => delta.sender_peer_id.to_hex(),
-                RegistryMessage::PeerHealthQuery { sender, .. } => sender.to_hex(),
-                RegistryMessage::PeerHealthReport { reporter, .. } => reporter.to_hex(),
+            let (node_id, bind_addr) = match msg {
+                RegistryMessage::DeltaGossip { delta } => (delta.sender_peer_id.to_hex(), None),
+                RegistryMessage::FullSync { sender_peer_id, sender_bind_addr, .. } => (sender_peer_id.to_hex(), sender_bind_addr.clone()),
+                RegistryMessage::FullSyncRequest { sender_peer_id, sender_bind_addr, .. } => (sender_peer_id.to_hex(), sender_bind_addr.clone()),
+                RegistryMessage::FullSyncResponse { sender_peer_id, sender_bind_addr, .. } => (sender_peer_id.to_hex(), sender_bind_addr.clone()),
+                RegistryMessage::DeltaGossipResponse { delta } => (delta.sender_peer_id.to_hex(), None),
+                RegistryMessage::PeerHealthQuery { sender, .. } => (sender.to_hex(), None),
+                RegistryMessage::PeerHealthReport { reporter, .. } => (reporter.to_hex(), None),
                 RegistryMessage::ImmediateAck { .. } => {
                     warn!("Received ImmediateAck as first message - cannot identify sender");
                     return ConnectionCloseOutcome::Normal { node_id: None };
@@ -748,19 +788,19 @@ where
                     if correlation_id.is_some() {
                         debug!("Received ActorMessage with Ask envelope as first message");
                         // We'll use a placeholder sender ID for now
-                        "ask_sender".to_string()
+                        ("ask_sender".to_string(), None)
                     } else {
                         warn!("Received ActorMessage as first message - cannot identify sender");
                         return ConnectionCloseOutcome::Normal { node_id: None };
                     }
                 }
-                RegistryMessage::PeerListGossip { sender_addr, .. } => sender_addr.clone(),
+                RegistryMessage::PeerListGossip { sender_addr, .. } => (sender_addr.clone(), None),
             };
-            (node_id, *correlation_id)
+            (node_id, *correlation_id, bind_addr)
         }
         Ok(MessageReadResult::AskRaw { correlation_id, .. }) => {
             if let Some(node_id) = known_node_id {
-                (node_id.to_peer_id().to_hex(), Some(*correlation_id))
+                (node_id.to_peer_id().to_hex(), Some(*correlation_id), None)
             } else {
                 warn!(
                     peer_addr = %peer_addr,
@@ -771,7 +811,7 @@ where
         }
         Ok(MessageReadResult::Response { .. }) => {
             if let Some(node_id) = known_node_id {
-                (node_id.to_peer_id().to_hex(), None)
+                (node_id.to_peer_id().to_hex(), None, None)
             } else {
                 warn!(
                     peer_addr = %peer_addr,
@@ -783,15 +823,15 @@ where
         Ok(MessageReadResult::Actor { actor_id, .. }) => {
             // For actor messages received as the first message, we can't determine the sender
             // Use a placeholder identifier
-            (format!("actor_sender_{}", actor_id), None)
+            (format!("actor_sender_{}", actor_id), None, None)
         }
         Ok(MessageReadResult::Streaming { stream_header, .. }) => {
             // For streaming messages received as the first message, use the actor ID
-            (format!("stream_sender_{}", stream_header.actor_id), None)
+            (format!("stream_sender_{}", stream_header.actor_id), None, None)
         }
         Ok(MessageReadResult::Raw(_)) => {
             if let Some(node_id) = known_node_id {
-                (node_id.to_peer_id().to_hex(), None)
+                (node_id.to_peer_id().to_hex(), None, None)
             } else {
                 warn!(
                     peer_addr = %peer_addr,
@@ -854,6 +894,10 @@ where
                 peer_info.peer_address = Some(peer_addr);
             }
         }
+        
+        // Notify peer discovery that a connection is established (incoming)
+        registry.mark_peer_connected(peer_state_addr).await;
+        
         debug!(
             peer_addr = %peer_addr,
             peer_state_addr = %peer_state_addr,

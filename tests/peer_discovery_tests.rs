@@ -4,6 +4,8 @@
 //! These tests verify the peer discovery functionality implemented in Phases 1-5.
 
 use kameo_remote::{registry::PeerInfoGossip, GossipConfig, GossipRegistryHandle, SecretKey};
+mod common;
+use common::wait_for_active_peers;
 use std::net::SocketAddr;
 use std::sync::Once;
 use std::time::Duration;
@@ -73,33 +75,33 @@ async fn test_mesh_formation_3_nodes() -> Result<(), Box<dyn std::error::Error>>
     node_b.bootstrap_non_blocking(vec![addr_a]).await;
     node_c.bootstrap_non_blocking(vec![addr_a]).await;
 
-    // Wait for gossip propagation (2 gossip intervals)
-    sleep(Duration::from_secs(2)).await;
+    // Verify all nodes are known to each other (using wait_for_active_peers for robustness)
 
-    // Verify all nodes are known to each other
-    let stats_a = node_a.stats().await;
-    let stats_b = node_b.stats().await;
-    let stats_c = node_c.stats().await;
-
-    // Each node should have at least 2 active peers (the other two nodes)
+    // A should have at least 2 peers
     assert!(
-        stats_a.active_peers >= 2,
-        "Node A should have at least 2 peers, has {}",
-        stats_a.active_peers
-    );
-    assert!(
-        stats_b.active_peers >= 1,
-        "Node B should have at least 1 peer, has {}",
-        stats_b.active_peers
-    );
-    assert!(
-        stats_c.active_peers >= 1,
-        "Node C should have at least 1 peer, has {}",
-        stats_c.active_peers
+        wait_for_active_peers(&node_a, 2, Duration::from_secs(10)).await,
+        "Node A should have at least 2 peers"
     );
 
+    // B should have at least 1 peer
     assert!(
-        stats_a.mesh_formation_time_ms.is_some(),
+        wait_for_active_peers(&node_b, 1, Duration::from_secs(10)).await,
+        "Node B should have at least 1 peer"
+    );
+
+    // C should have at least 1 peer
+    assert!(
+        wait_for_active_peers(&node_c, 1, Duration::from_secs(10)).await,
+        "Node C should have at least 1 peer"
+    );
+
+    // Verify mesh formation time (should be recorded on A)
+    // Wait for the metric to be populated (async timing)
+    assert!(
+        common::wait_for_condition(Duration::from_secs(10), || async {
+            node_a.stats().await.mesh_formation_time_ms.is_some()
+        })
+        .await,
         "Node A should record mesh formation timing"
     );
 
@@ -476,16 +478,23 @@ async fn test_failure_recovery_backoff() -> Result<(), Box<dyn std::error::Error
     node_b.bootstrap_non_blocking(vec![addr_a]).await;
     node_c.bootstrap_non_blocking(vec![addr_a]).await;
 
-    // Wait for mesh formation
-    sleep(Duration::from_secs(2)).await;
-
+    // Wait for mesh formation (robustly)
     // Verify mesh formed
-    let stats_a = node_a.stats().await;
-    assert!(stats_a.active_peers >= 2, "A should have 2+ peers");
     assert!(
-        stats_a.mesh_formation_time_ms.is_some(),
+        wait_for_active_peers(&node_a, 2, Duration::from_secs(10)).await,
+        "A should have 2+ peers"
+    );
+
+    assert!(
+        common::wait_for_condition(Duration::from_secs(10), || async {
+            node_a.stats().await.mesh_formation_time_ms.is_some()
+        })
+        .await,
         "mesh formation timing should be recorded"
     );
+
+    // Verify stats for subsequent logic
+    let stats_a = node_a.stats().await;
 
     // Kill node C (simulating failure)
     node_c.shutdown().await;
@@ -493,9 +502,13 @@ async fn test_failure_recovery_backoff() -> Result<(), Box<dyn std::error::Error
     // Wait for failure detection
     sleep(Duration::from_secs(1)).await;
 
-    // A and B should still be connected
+    // A and B should still be connected (using robust wait)
+    assert!(
+        wait_for_active_peers(&node_a, 1, Duration::from_secs(10)).await,
+        "A should still have B"
+    );
+
     let stats_a_after = node_a.stats().await;
-    assert!(stats_a_after.active_peers >= 1, "A should still have B");
     assert_eq!(
         stats_a_after.mesh_formation_time_ms, stats_a.mesh_formation_time_ms,
         "mesh formation timing should remain stable"
@@ -530,19 +543,15 @@ async fn test_simultaneous_dial_tiebreaker() -> Result<(), Box<dyn std::error::E
     node_a.bootstrap_non_blocking(vec![addr_b]).await;
     node_b.bootstrap_non_blocking(vec![addr_a]).await;
 
-    // Wait for connection race to resolve
-    sleep(Duration::from_secs(2)).await;
-
+    // Wait for connection race to resolve (using robust wait)
     // Both should have exactly 1 peer (each other)
-    let stats_a = node_a.stats().await;
-    let stats_b = node_b.stats().await;
-
     assert!(
-        stats_a.active_peers >= 1,
+        wait_for_active_peers(&node_a, 1, Duration::from_secs(10)).await,
         "A should have at least 1 peer after tie-breaker"
     );
+
     assert!(
-        stats_b.active_peers >= 1,
+        wait_for_active_peers(&node_b, 1, Duration::from_secs(10)).await,
         "B should have at least 1 peer after tie-breaker"
     );
 

@@ -48,14 +48,15 @@ async fn main() {
     println!("Test: Basic ask with correlation tracking");
 
     // Get connection and test ask
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     println!("Sending ask request...");
     let request = b"ECHO:Hello from Node A";
-    match conn.ask_with_timeout(request, Duration::from_secs(2)).await {
+    let result: kameo_remote::Result<bytes::Bytes> = conn.ask_with_timeout(bytes::Bytes::copy_from_slice(request), Duration::from_secs(2)).await;
+    match result {
         Ok(response) => {
             println!("✅ Got response: {:?}", String::from_utf8_lossy(&response));
-            assert_eq!(response, b"ECHOED:Hello from Node A");
+            assert_eq!(response.as_ref(), b"ECHOED:Hello from Node A");
         }
         Err(e) => {
             println!("❌ Ask failed: {:?}", e);

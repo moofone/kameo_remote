@@ -125,7 +125,7 @@ async fn test_streaming_request_large_payload() {
 
     info!("Test: Streaming request with 2MB payload");
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     // Create 2MB payload (over the 1MB streaming threshold)
     let payload_size = 2 * 1024 * 1024;
@@ -195,7 +195,7 @@ async fn test_streaming_request_zero_copy() {
 
     info!("Test: Zero-copy streaming request with ask_streaming_bytes");
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     // Create 1.5MB payload as Bytes (over threshold)
     let payload_size = 1536 * 1024;
@@ -252,7 +252,7 @@ async fn test_streaming_response_auto() {
 
     info!("Test: Streaming response (large reply triggers auto-streaming)");
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     // Send a request that triggers a large response
     // The LARGE_RESPONSE command tells the handler to return a large payload
@@ -307,7 +307,7 @@ async fn test_small_payload_uses_ring_buffer() {
 
     info!("Test: Small payload (under threshold) uses ring buffer");
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     // Small payload (1KB) - should NOT use streaming
     let payload = create_test_payload(1024);
@@ -369,7 +369,7 @@ async fn test_streaming_threshold_boundary() {
 
     info!("Test: Streaming threshold boundary (exactly at threshold)");
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     // Get the streaming threshold
     let threshold = conn.streaming_threshold();
@@ -448,7 +448,7 @@ async fn test_concurrent_streaming_requests() {
 
     info!("Test: Multiple concurrent streaming requests");
 
-    let conn = Arc::new(handle_a.get_connection(addr_b).await.unwrap());
+    let conn = Arc::new(handle_a.lookup_address(addr_b).await.unwrap());
     let results = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn multiple concurrent streaming requests
@@ -607,7 +607,7 @@ async fn test_streaming_tell_no_response() {
 
     info!("Test: Streaming tell (correlation_id=0) - fire-and-forget");
 
-    let conn = handle_a.get_connection(addr_b).await.unwrap();
+    let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
     // Create a large payload (>1MB to trigger streaming)
     let payload_size = 1_500_000; // 1.5MB
@@ -619,7 +619,7 @@ async fn test_streaming_tell_no_response() {
     let test_actor_id: u64 = 12345;
 
     info!("📤 Sending {} byte streaming tell...", payload_size);
-    conn.stream_large_message(&payload, test_type_hash, test_actor_id)
+    conn.connection.as_ref().unwrap().stream_large_message(&payload, test_type_hash, test_actor_id)
         .await
         .expect("stream_large_message should succeed");
 

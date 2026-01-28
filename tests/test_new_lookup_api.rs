@@ -22,7 +22,7 @@ async fn test_new_lookup_api_returns_actor_ref() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7901".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -30,7 +30,7 @@ async fn test_new_lookup_api_returns_actor_ref() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7902".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -39,7 +39,7 @@ async fn test_new_lookup_api_returns_actor_ref() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7902".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -48,7 +48,7 @@ async fn test_new_lookup_api_returns_actor_ref() {
     handle_b
         .register_urgent(
             "test_service".to_string(),
-            "127.0.0.1:8902".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -128,7 +128,7 @@ async fn test_old_api_not_accessible() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7910".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -136,7 +136,7 @@ async fn test_old_api_not_accessible() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7911".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -145,7 +145,7 @@ async fn test_old_api_not_accessible() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7911".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
 
@@ -163,7 +163,7 @@ async fn test_old_api_not_accessible() {
     handle_b
         .register_urgent(
             "my_actor".to_string(),
-            addr,
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -192,7 +192,7 @@ async fn test_multiple_lookups_return_different_refs() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7904".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -200,7 +200,7 @@ async fn test_multiple_lookups_return_different_refs() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7905".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -208,7 +208,7 @@ async fn test_multiple_lookups_return_different_refs() {
     .unwrap();
 
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7905".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -217,7 +217,7 @@ async fn test_multiple_lookups_return_different_refs() {
     handle_b
         .register_urgent(
             "shared_service".to_string(),
-            "127.0.0.1:8905".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await
@@ -274,7 +274,7 @@ async fn test_lookup_caches_connection_for_zero_lookup_sending() {
     let peer_id_b = key_pair_b.peer_id();
 
     let handle_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7906".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_a,
         Some(config.clone()),
     )
@@ -282,7 +282,7 @@ async fn test_lookup_caches_connection_for_zero_lookup_sending() {
     .unwrap();
 
     let handle_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:7907".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
         key_pair_b,
         Some(config.clone()),
     )
@@ -290,7 +290,7 @@ async fn test_lookup_caches_connection_for_zero_lookup_sending() {
     .unwrap();
 
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&"127.0.0.1:7907".parse().unwrap())
+    peer_b.connect(&handle_b.registry.bind_addr)
         .await
         .unwrap();
     sleep(Duration::from_millis(100)).await;
@@ -298,7 +298,7 @@ async fn test_lookup_caches_connection_for_zero_lookup_sending() {
     handle_b
         .register_urgent(
             "fast_service".to_string(),
-            "127.0.0.1:8907".parse().unwrap(),
+            handle_b.registry.bind_addr,
             RegistrationPriority::Immediate,
         )
         .await

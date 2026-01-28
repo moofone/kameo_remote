@@ -2440,7 +2440,7 @@ impl<'a> TellMessage<'a> {
     /// Send this message via the connection handle
     pub async fn send_via(self, handle: &ConnectionHandle) -> Result<()> {
         match self {
-            TellMessage::Single(data) => handle.tell_raw(data).await,
+            TellMessage::Single(data) => handle.tell_bytes(bytes::Bytes::copy_from_slice(data)).await, // ALLOW_COPY
             TellMessage::Batch(messages) => handle.tell_batch(&messages).await,
         }
     }
@@ -2920,17 +2920,7 @@ impl ConnectionHandle {
         self.stream_handle.streaming_threshold()
     }
 
-    /// Raw tell() - LOCK-FREE write (used internally)
-    pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
-        // Create message with length header using BytesMut for efficiency
-        let mut message = bytes::BytesMut::with_capacity(4 + data.len());
-        message.extend_from_slice(&(data.len() as u32).to_be_bytes()); // ALLOW_COPY
-        message.extend_from_slice(data); // ALLOW_COPY
 
-        self.stream_handle
-            .write_bytes_control(message.freeze())
-            .await
-    }
 
     /// Tell using owned bytes to avoid payload copies.
     pub async fn tell_bytes(&self, data: bytes::Bytes) -> Result<()> {
@@ -3017,7 +3007,7 @@ impl ConnectionHandle {
         }
 
         if messages.len() == 1 {
-            self.tell_raw(messages[0]).await
+            self.tell_bytes(bytes::Bytes::copy_from_slice(messages[0])).await // ALLOW_COPY
         } else {
             self.tell_batch(messages).await
         }
@@ -3051,43 +3041,19 @@ impl ConnectionHandle {
     /// Send raw bytes through existing connection (zero-copy where possible)
     pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
         // Direct TCP write
-        self.tell_raw(data).await
+        self.tell_bytes(bytes::Bytes::copy_from_slice(data)).await // ALLOW_COPY
     }
 
     /// Ask method for request-response (Note: This is a simplified implementation)
     /// For full request-response, you would need a proper protocol with correlation IDs
     pub async fn ask(&self, request: &[u8]) -> Result<Vec<u8>> {
         // Use default timeout of 30 seconds
-        self.ask_with_timeout(request, Duration::from_secs(30))
-            .await
-    }
-
-    /// Ask method with custom timeout for request-response
-    pub async fn ask_with_timeout(&self, request: &[u8], timeout: Duration) -> Result<Vec<u8>> {
-        // Allocate correlation ID
-        let correlation_id = self.correlation.allocate();
-
-        let header = framing::write_ask_response_header(
-            crate::MessageType::Ask,
-            correlation_id,
-            request.len(),
-        );
-
-        if let Err(e) = self
-            .stream_handle
-            .write_header_and_payload_ask_inline(header, 8, bytes::Bytes::copy_from_slice(request)) // ALLOW_COPY
-            .await
-        {
-            self.correlation.cancel(correlation_id);
-            return Err(e);
-        }
-
-        let response = self
-            .correlation
-            .wait_for_response(correlation_id, timeout)
+        let response = self.ask_with_timeout_bytes(bytes::Bytes::copy_from_slice(request), Duration::from_secs(30)) // ALLOW_COPY
             .await?;
         Ok(response.to_vec())
     }
+
+
 
     /// Ask using owned bytes to avoid payload copies. Returns response as Bytes.
     pub async fn ask_bytes(&self, request: bytes::Bytes) -> Result<bytes::Bytes> {
@@ -3872,7 +3838,7 @@ impl ConnectionPool {
     }
 
     /// Get a connection by peer ID
-    pub fn get_connection_by_peer_id(
+    pub(crate) fn get_connection_by_peer_id(
         &self,
         peer_id: &crate::PeerId,
     ) -> Option<Arc<LockFreeConnection>> {
@@ -3924,7 +3890,7 @@ impl ConnectionPool {
     }
 
     /// Get a connection by socket address
-    pub fn get_connection_by_addr(&self, addr: &SocketAddr) -> Option<Arc<LockFreeConnection>> {
+    pub(crate) fn get_connection_by_addr(&self, addr: &SocketAddr) -> Option<Arc<LockFreeConnection>> {
         self.connections_by_addr.get(addr).and_then(|entry| {
             let conn = entry.value().clone();
             if conn.is_connected() {
@@ -4444,7 +4410,7 @@ impl ConnectionPool {
     }
 
     /// Get or create a connection to a peer by its ID
-    pub async fn get_connection_to_peer(
+    pub(crate) async fn get_connection_to_peer(
         &mut self,
         peer_id: &crate::PeerId,
     ) -> Result<ConnectionHandle> {
@@ -4527,11 +4493,11 @@ impl ConnectionPool {
         Ok(handle)
     }
 
-    pub async fn get_connection(&mut self, addr: SocketAddr) -> Result<ConnectionHandle> {
+    pub(crate) async fn get_connection(&mut self, addr: SocketAddr) -> Result<ConnectionHandle> {
         self.get_connection_with_node_id(addr, None).await
     }
 
-    pub async fn get_connection_with_node_id(
+    pub(crate) async fn get_connection_with_node_id(
         &mut self,
         addr: SocketAddr,
         node_id: Option<crate::NodeId>,
@@ -4734,10 +4700,15 @@ impl ConnectionPool {
                                                 "Extracted NodeId {} from peer certificate",
                                                 node_id.fmt_short()
                                             );
+                                            // Spawn to avoid deadlock: get_connection_with_node_id holds pool lock,
+                                            // and add_peer_with_node_id tries to acquire it.
+                                            let registry_clone = registry_arc.clone();
                                             if registry_arc.lookup_node_id(&addr).await.is_none() {
-                                                registry_arc
+                                                tokio::spawn(async move {
+                                                    registry_clone
                                                     .add_peer_with_node_id(addr, Some(node_id))
                                                     .await;
+                                                });
                                             }
                                             discovered_node_id = Some(node_id);
                                         }
@@ -4795,6 +4766,14 @@ impl ConnectionPool {
                             registry_arc
                                 .associate_peer_capabilities_with_node(addr, node_id)
                                 .await;
+
+                            // Notify peer discovery that a connection is established (outgoing)
+                            // H-004: Spawn to avoid potential deadlock as we currently hold the Pool lock
+                            // and mark_peer_connected locks GossipState (safe) but potentially interacts back
+                            let registry_clone_for_mark = registry_arc.clone();
+                            tokio::spawn(async move {
+                                registry_clone_for_mark.mark_peer_connected(addr).await;
+                            });
                         }
 
                         let (read_half, write_half) = tokio::io::split(tls_stream);

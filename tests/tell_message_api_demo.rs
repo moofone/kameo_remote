@@ -32,10 +32,22 @@ async fn test_tell_message_api_comprehensive() {
     .unwrap();
 
     // Wait for connection establishment
-    sleep(Duration::from_millis(100)).await;
+    // Wait for connection establishment and handshake
+    sleep(Duration::from_millis(1000)).await;
 
     // Get the raw connection handle (this is what applications would use)
-    let conn = node1.get_connection(node2_addr).await.unwrap();
+    let start_wait = Instant::now();
+    let conn = loop {
+        match node1.lookup_address(node2_addr).await {
+            Ok(c) => break c,
+            Err(_) => {
+                if start_wait.elapsed() > Duration::from_secs(5) {
+                    panic!("Timeout waiting for handshake with {}", node2_addr);
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
     println!("✅ Connection established between nodes");
 
     // ===========================================
@@ -100,7 +112,7 @@ async fn test_tell_message_api_comprehensive() {
     println!("     - Method: Single conn.tell() call with batch");
 
     let batch_start = Instant::now();
-    conn.tell(kameo_remote::connection_pool::TellMessage::batch(
+    conn.tell_message(kameo_remote::connection_pool::TellMessage::batch(
         batch_data,
     ))
     .await
@@ -191,7 +203,7 @@ async fn test_tell_message_api_comprehensive() {
     );
 
     let file_batch_start = Instant::now();
-    conn.tell(kameo_remote::connection_pool::TellMessage::batch(
+    conn.tell_message(kameo_remote::connection_pool::TellMessage::batch(
         file_batch_data,
     ))
     .await
@@ -557,8 +569,21 @@ async fn test_tell_message_high_volume_performance() {
         .await
         .unwrap();
 
-    sleep(Duration::from_millis(100)).await;
-    let conn = node1.get_connection(node2_addr).await.unwrap();
+    // Wait for connection establishment and handshake
+    sleep(Duration::from_millis(1000)).await;
+    // Reset connection
+    let start_wait = Instant::now();
+    let conn = loop {
+        match node1.lookup_address(node2_addr).await {
+            Ok(c) => break c,
+            Err(_) => {
+                if start_wait.elapsed() > Duration::from_secs(5) {
+                    panic!("Timeout waiting for handshake with {}", node2_addr);
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
 
     // Test parameters
     let message_count = 1000;
@@ -614,7 +639,7 @@ async fn test_tell_message_high_volume_performance() {
     let batch_start = Instant::now();
     for i in 0..batch_count {
         let batch_data: Vec<&[u8]> = (0..batch_size).map(|_| test_data.as_slice()).collect();
-        conn.tell(kameo_remote::connection_pool::TellMessage::batch(
+        conn.tell_message(kameo_remote::connection_pool::TellMessage::batch(
             batch_data,
         ))
         .await

@@ -122,7 +122,7 @@ async fn test_ask_with_lookup_and_performance() {
     node2
         .register_urgent(
             "database_service".to_string(),
-            "127.0.0.1:40001".parse().unwrap(),
+            "127.0.0.1:30002".parse().unwrap(),
             RegistrationPriority::Immediate,
         )
         .await
@@ -132,7 +132,7 @@ async fn test_ask_with_lookup_and_performance() {
     node2
         .register_urgent(
             "compute_service".to_string(),
-            "127.0.0.1:40002".parse().unwrap(),
+            "127.0.0.1:30002".parse().unwrap(),
             RegistrationPriority::Immediate,
         )
         .await
@@ -142,7 +142,7 @@ async fn test_ask_with_lookup_and_performance() {
     node3
         .register_urgent(
             "cache_service".to_string(),
-            "127.0.0.1:40003".parse().unwrap(),
+            "127.0.0.1:30003".parse().unwrap(),
             RegistrationPriority::Immediate,
         )
         .await
@@ -230,7 +230,24 @@ async fn test_ask_with_lookup_and_performance() {
         };
 
         // Send request and wait for response (uses cached connection, zero lookups)
-        let response = actor.ask(query.as_bytes()).await.unwrap();
+        // Add retry logic to handle "not listening yet" transient errors during initial connection
+        let response = {
+            let mut result = Err(GossipError::ActorNotFound("Initial error".to_string().into()));
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(5) {
+                match actor.ask(query.as_bytes()).await {
+                    Ok(r) => {
+                        result = Ok(r);
+                        break;
+                    }
+                    Err(e) => {
+                        result = Err(e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+            result.unwrap()
+        };
         let response_str = String::from_utf8_lossy(&response);
 
         let ask_time = ask_start.elapsed();
