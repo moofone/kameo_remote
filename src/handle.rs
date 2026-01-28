@@ -11,6 +11,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     time::{interval, Instant},
 };
+use bytes::{BufMut, BytesMut};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
@@ -717,14 +718,17 @@ where
     // Initialize streaming state for this connection
     let mut streaming_state = crate::protocol::StreamingState::new();
 
+    // Persistent read buffer for zero-copy (reused across messages)
+    let mut read_buffer = BytesMut::with_capacity(1024 * 1024);
+
     // First, read the initial message to identify the sender
-    let msg_result = read_message_from_tls_reader(&mut reader, max_message_size).await;
+    let msg_result = read_message_from_tls_reader(&mut reader, &mut read_buffer, max_message_size).await;
     let known_node_id = match peer_node_id {
         Some(node_id) => Some(node_id),
         None => registry.lookup_node_id(&peer_addr).await,
     };
 
-    let (sender_node_id, initial_correlation_id) = match &msg_result {
+    let (sender_node_id, _initial_correlation_id) = match &msg_result {
         Ok(MessageReadResult::Gossip(msg, correlation_id)) => {
             let node_id = match msg {
                 RegistryMessage::DeltaGossip { delta } => delta.sender_peer_id.to_hex(),
@@ -990,7 +994,7 @@ where
     loop {
         // Use select! to either read a message or trigger periodic cleanup
         let msg_result = tokio::select! {
-            result = read_message_from_tls_reader(&mut reader, max_message_size) => result,
+            result = read_message_from_tls_reader(&mut reader, &mut read_buffer, max_message_size) => result,
             _ = cleanup_interval.tick() => {
                 // Periodically cleanup stale incomplete streams to prevent memory leak
                 streaming_state.cleanup_stale();
@@ -1243,6 +1247,7 @@ pub(crate) async fn handle_response_message(
 /// Read a message from a TLS reader
 pub(crate) async fn read_message_from_tls_reader<R>(
     reader: &mut R,
+    buffer: &mut BytesMut,
     max_message_size: usize,
 ) -> Result<MessageReadResult>
 where
@@ -1261,12 +1266,33 @@ where
     }
 
     // Read the message data into a buffer that keeps the length prefix for alignment.
-    let mut msg_vec = vec![0u8; msg_len + crate::framing::LENGTH_PREFIX_LEN];
-    msg_vec[..crate::framing::LENGTH_PREFIX_LEN].copy_from_slice(&len_buf);
+    // ZERO-COPY: Reuse the passed buffer instead of allocating a new Vec
+    let total_len = msg_len + crate::framing::LENGTH_PREFIX_LEN;
+    
+    // Ensure we start fresh for this message
+    buffer.clear();
+    
+    // Reserve space for the entire message (header + body)
+    if buffer.capacity() < total_len {
+        buffer.reserve(total_len - buffer.len());
+    }
+    
+    // Write length prefix
+    buffer.put_slice(&len_buf);
+    
+    // Extend to full size (zeroes the body area, enabling read_exact)
+    // efficient zeroing for read safety
+    buffer.resize(total_len, 0); 
+    
+    // Read body directly into the mutable buffer slice
     reader
-        .read_exact(&mut msg_vec[crate::framing::LENGTH_PREFIX_LEN..])
+        .read_exact(&mut buffer[crate::framing::LENGTH_PREFIX_LEN..])
         .await?;
-    let msg_buf = bytes::Bytes::from(msg_vec);
+        
+    // Freeze and split off to get an immutable Bytes handle
+    // This leaves 'buffer' empty but (optimistically) retaining capacity for next time
+    // if the returned Bytes is dropped quickly.
+    let msg_buf = buffer.split_to(total_len).freeze();
     let msg_data = msg_buf.slice(crate::framing::LENGTH_PREFIX_LEN..);
 
     #[cfg(any(test, feature = "test-helpers", debug_assertions))]
@@ -1456,7 +1482,8 @@ mod framing_tests {
         tokio::spawn(async move {
             writer.write_all(&frame).await.unwrap();
         });
-        read_message_from_tls_reader(&mut reader, 1024 * 1024)
+        let mut buffer = bytes::BytesMut::with_capacity(1024);
+        read_message_from_tls_reader(&mut reader, &mut buffer, 1024 * 1024)
             .await
             .unwrap()
     }
