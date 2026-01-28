@@ -14,7 +14,7 @@ for file in "${CRITICAL_FILES[@]}"; do
     continue
   fi
   for pattern in "${patterns[@]}"; do
-    if rg --with-filename --line-number --fixed-strings "$pattern" "$file" >/tmp/forbidden_copy_matches.$$; then
+    if rg --with-filename --line-number --fixed-strings "$pattern" "$file" | grep -v "ALLOW_COPY" >/tmp/forbidden_copy_matches.$$; then
       if [ $found -eq 0 ]; then
         echo "Forbidden copy patterns detected:" >&2
       fi

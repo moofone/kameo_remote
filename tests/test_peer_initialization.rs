@@ -7,65 +7,85 @@ use tokio::time::sleep;
 async fn test_peer_initialization_with_names() {
     println!("🧪 Testing proposed peer initialization with names");
 
-    let node1_addr = "127.0.0.1:35003".parse().unwrap();
-    let node2_addr = "127.0.0.1:35004".parse().unwrap();
-    let node3_addr = "127.0.0.1:35005".parse().unwrap();
+    let node1_addr = "127.0.0.1:0".parse().unwrap();
+    let node2_addr = "127.0.0.1:0".parse().unwrap();
+    let node3_addr = "127.0.0.1:0".parse().unwrap();
 
     let node1_keypair = KeyPair::new_for_testing("node1");
     let node2_keypair = KeyPair::new_for_testing("node2");
     let node3_keypair = KeyPair::new_for_testing("node3");
 
+    // Use default config which reads from KAMEO_GOSSIP_INTERVAL_MS
+    let config1 = GossipConfig {
+        key_pair: Some(node1_keypair.clone()),
+        enable_peer_discovery: true, // Enable for service discovery
+        gossip_interval: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let config2 = GossipConfig {
+        key_pair: Some(node2_keypair.clone()),
+        enable_peer_discovery: true, // Enable for service discovery
+        gossip_interval: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let config3 = GossipConfig {
+        key_pair: Some(node3_keypair.clone()),
+        enable_peer_discovery: true, // Enable for service discovery
+        gossip_interval: Duration::from_millis(100),
+        ..Default::default()
+    };
+
     let handle1 = GossipRegistryHandle::new_with_tls(
         node1_addr,
         node1_keypair.to_secret_key(),
-        Some(GossipConfig {
-            key_pair: Some(node1_keypair.clone()),
-            ..Default::default()
-        }),
+        Some(config1),
     )
     .await
     .unwrap();
+
+    // Get actual addresses after port assignment
+    let node1_actual_addr = handle1.registry.bind_addr;
 
     let handle2 = GossipRegistryHandle::new_with_tls(
         node2_addr,
         node2_keypair.to_secret_key(),
-        Some(GossipConfig {
-            key_pair: Some(node2_keypair.clone()),
-            ..Default::default()
-        }),
+        Some(config2),
     )
     .await
     .unwrap();
 
+    let node2_actual_addr = handle2.registry.bind_addr;
+
     let handle3 = GossipRegistryHandle::new_with_tls(
         node3_addr,
         node3_keypair.to_secret_key(),
-        Some(GossipConfig {
-            key_pair: Some(node3_keypair.clone()),
-            ..Default::default()
-        }),
+        Some(config3),
     )
     .await
     .unwrap();
+
+    let node3_actual_addr = handle3.registry.bind_addr;
 
     // Now add peers with correct names
     // Node1 knows Node2 and Node3
     let peer2_from_1 = handle1.add_peer(&node2_keypair.peer_id()).await;
     let peer3_from_1 = handle1.add_peer(&node3_keypair.peer_id()).await;
-    peer2_from_1.connect(&node2_addr).await.unwrap();
-    peer3_from_1.connect(&node3_addr).await.unwrap();
+    peer2_from_1.connect(&node2_actual_addr).await.unwrap();
+    peer3_from_1.connect(&node3_actual_addr).await.unwrap();
 
     // Node2 knows Node1 and Node3
     let peer1_from_2 = handle2.add_peer(&node1_keypair.peer_id()).await;
     let peer3_from_2 = handle2.add_peer(&node3_keypair.peer_id()).await;
-    peer1_from_2.connect(&node1_addr).await.unwrap();
-    peer3_from_2.connect(&node3_addr).await.unwrap();
+    peer1_from_2.connect(&node1_actual_addr).await.unwrap();
+    peer3_from_2.connect(&node3_actual_addr).await.unwrap();
 
     // Node3 knows Node1 and Node2
     let peer1_from_3 = handle3.add_peer(&node1_keypair.peer_id()).await;
     let peer2_from_3 = handle3.add_peer(&node2_keypair.peer_id()).await;
-    peer1_from_3.connect(&node1_addr).await.unwrap();
-    peer2_from_3.connect(&node2_addr).await.unwrap();
+    peer1_from_3.connect(&node1_actual_addr).await.unwrap();
+    peer2_from_3.connect(&node2_actual_addr).await.unwrap();
 
     // Wait for connections
     sleep(Duration::from_millis(200)).await;
@@ -84,8 +104,8 @@ async fn test_peer_initialization_with_names() {
         .await
         .unwrap();
 
-    // Wait for gossip
-    sleep(Duration::from_millis(500)).await;
+    // Wait for gossip (with 100ms interval, wait 2 seconds for multiple rounds)
+    sleep(Duration::from_secs(2)).await;
 
     // Test discovery from all nodes
     println!("\n🔍 Testing full mesh discovery:");

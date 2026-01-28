@@ -55,7 +55,14 @@ async fn test_gossip_matrix_convergence_line_topology() -> Result<(), Box<dyn st
     let converged = wait_for_condition(Duration::from_secs(5), || async {
         for node in nodes {
             for actor in &actors {
-                if node.lookup(actor).await.is_none() {
+                // Check if actor is in registry (either local or known)
+                // Don't use lookup() as it requires a connection
+                let actor_state = node.registry.actor_state.read().await;
+                let has_actor = actor_state.local_actors.contains_key(*actor)
+                    || actor_state.known_actors.contains_key(*actor);
+                drop(actor_state);
+
+                if !has_actor {
                     return false;
                 }
             }
@@ -68,7 +75,12 @@ async fn test_gossip_matrix_convergence_line_topology() -> Result<(), Box<dyn st
         for (idx, node) in nodes.iter().enumerate() {
             let mut missing = Vec::new();
             for actor in &actors {
-                if node.lookup(actor).await.is_none() {
+                let actor_state = node.registry.actor_state.read().await;
+                let has_actor = actor_state.local_actors.contains_key(*actor)
+                    || actor_state.known_actors.contains_key(*actor);
+                drop(actor_state);
+
+                if !has_actor {
                     missing.push(*actor);
                 }
             }

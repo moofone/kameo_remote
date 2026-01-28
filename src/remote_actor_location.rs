@@ -353,7 +353,7 @@ mod tests {
 
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&location).unwrap();
         let deserialized: RemoteActorLocation =
-            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         assert_eq!(location.address, deserialized.address);
         assert_eq!(location.wall_clock_time, deserialized.wall_clock_time);
@@ -380,7 +380,7 @@ mod tests {
         // Test serialization with metadata
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&location).unwrap();
         let deserialized: RemoteActorLocation =
-            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap();
+            rkyv::from_bytes::<RemoteActorLocation, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
         assert_eq!(location.metadata, deserialized.metadata);
     }

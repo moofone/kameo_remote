@@ -78,12 +78,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Actor location: {:?}", location);
 
             // Verify the actor is on the correct node
-            if location.address == actor_addr.to_string() {
+            if location.location.address == actor_addr.to_string() {
                 info!("✅ Actor address matches!");
             } else {
                 error!(
                     "❌ Actor address mismatch! Expected: {}, Got: {}",
-                    actor_addr, location.address
+                    actor_addr, location.location.address
                 );
             }
         }

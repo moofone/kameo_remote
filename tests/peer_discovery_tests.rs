@@ -185,6 +185,9 @@ async fn test_feature_flag_disabled_no_discovery() -> Result<(), Box<dyn std::er
     let stats_a = node_a.stats().await;
     let stats_b = node_b.stats().await;
 
+    println!("Stats A: discovered={}, active={}", stats_a.discovered_peers, stats_a.active_peers);
+    println!("Stats B: discovered={}, active={}", stats_b.discovered_peers, stats_b.active_peers);
+
     assert_eq!(
         stats_a.discovered_peers, 0,
         "No peers should be discovered when disabled"

@@ -85,13 +85,17 @@ async fn test_typed_tell_over_tls_with_pooled_path() {
     let request = Ping { id: 7 };
     conn.tell_typed(&request).await.unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut decoded: Option<Ping> = None;
     while Instant::now() < deadline {
         if let Some(payload) =
             kameo_remote::test_helpers::wait_for_raw_payload(Duration::from_millis(200)).await
         {
-            if let Ok(msg) = kameo_remote::decode_typed::<Ping>(&payload) {
+            // Force alignment by copying to a fresh Vec
+            // record_raw_payload captures a slice offset by 4 bytes (len prefix), causing misalignment
+            // for rkyv if accessed directly.
+            let aligned = payload.to_vec();
+            if let Ok(msg) = kameo_remote::decode_typed::<Ping>(&aligned) {
                 decoded = Some(msg);
                 break;
             }

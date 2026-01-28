@@ -154,107 +154,50 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     println!("\n📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION");
     println!("==============================================");
 
-    // Create actor references by looking up once
-    println!("\n🔸 Looking up actors and creating references...");
+    // NEW API: lookup() returns RemoteActorRef with cached connection
+    println!("\n🔸 Looking up actors (NEW API: returns RemoteActorRef)...");
 
     let lookup_start = Instant::now();
 
-    // Lookup each actor and create a reference (location + connection)
-    let chat_location = node1
-        .lookup("chat_service")
-        .await
-        .expect("chat_service not found");
-    let chat_conn = node1
-        .get_connection(if chat_location.peer_id == node1_id {
-            "127.0.0.1:29001".parse().unwrap()
-        } else if chat_location.peer_id == node2_id {
-            "127.0.0.1:29002".parse().unwrap()
-        } else if chat_location.peer_id == node3_id {
-            "127.0.0.1:29003".parse().unwrap()
-        } else {
-            panic!("Unknown peer")
-        })
-        .await
-        .unwrap();
-
-    let auth_location = node1
+    // Each lookup now returns RemoteActorRef directly (location + cached connection)
+    // NOTE: We lookup remote actors (auth_service and storage_service) from node1's perspective
+    // chat_service is on node1 itself, so we can't lookup it remotely (would need self-connection)
+    let auth_ref = node1
         .lookup("auth_service")
         .await
         .expect("auth_service not found");
-    let auth_conn = node1
-        .get_connection(if auth_location.peer_id == node1_id {
-            "127.0.0.1:29001".parse().unwrap()
-        } else if auth_location.peer_id == node2_id {
-            "127.0.0.1:29002".parse().unwrap()
-        } else if auth_location.peer_id == node3_id {
-            "127.0.0.1:29003".parse().unwrap()
-        } else {
-            panic!("Unknown peer")
-        })
-        .await
-        .unwrap();
-
-    let storage_location = node1
+    let storage_ref = node1
         .lookup("storage_service")
         .await
         .expect("storage_service not found");
-    let storage_conn = node1
-        .get_connection(if storage_location.peer_id == node1_id {
-            "127.0.0.1:29001".parse().unwrap()
-        } else if storage_location.peer_id == node2_id {
-            "127.0.0.1:29002".parse().unwrap()
-        } else if storage_location.peer_id == node3_id {
-            "127.0.0.1:29003".parse().unwrap()
-        } else {
-            panic!("Unknown peer")
-        })
+
+    // For local chat_service, we can access it from node2 or node3
+    let chat_ref = node2
+        .lookup("chat_service")
         .await
-        .unwrap();
+        .expect("chat_service not found");
 
     let total_lookup_time = lookup_start.elapsed();
 
-    println!("   ✅ Created actor references:");
+    println!("   ✅ Created RemoteActorRefs:");
     println!(
         "     - chat_service at {} (peer: {})",
-        chat_location.address, chat_location.peer_id
+        chat_ref.location.address, chat_ref.location.peer_id
     );
     println!(
         "     - auth_service at {} (peer: {})",
-        auth_location.address, auth_location.peer_id
+        auth_ref.location.address, auth_ref.location.peer_id
     );
     println!(
         "     - storage_service at {} (peer: {})",
-        storage_location.address, storage_location.peer_id
+        storage_ref.location.address, storage_ref.location.peer_id
     );
     println!(
-        "   📈 Total lookup and connection time: {:?} ({:.3} μs)",
+        "   📈 Total lookup time (includes connection caching): {:?} ({:.3} μs)",
         total_lookup_time,
         total_lookup_time.as_nanos() as f64 / 1000.0
     );
-
-    // Define a simple ActorRef struct for convenience
-    struct ActorRef {
-        name: &'static str,
-        #[allow(dead_code)]
-        location: RemoteActorLocation,
-        conn: kameo_remote::connection_pool::ConnectionHandle,
-    }
-
-    let chat_ref = ActorRef {
-        name: "chat_service",
-        location: chat_location,
-        conn: chat_conn,
-    };
-    let auth_ref = ActorRef {
-        name: "auth_service",
-        location: auth_location,
-        conn: auth_conn,
-    };
-    let storage_ref = ActorRef {
-        name: "storage_service",
-        location: storage_location,
-        conn: storage_conn,
-    };
+    println!("   💡 Each RemoteActorRef has connection cached - zero lookups for tell()!");
 
     // ===========================================
     // PART 2: MESSAGE SENDING PERFORMANCE
@@ -290,7 +233,7 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     for (i, (actor_name, message)) in test_messages.iter().enumerate() {
         let send_start = Instant::now();
 
-        // Use the pre-created actor reference
+        // Use the pre-created RemoteActorRef
         let actor_ref = match *actor_name {
             "chat_service" => &chat_ref,
             "auth_service" => &auth_ref,
@@ -298,8 +241,8 @@ async fn test_tell_with_lookup_and_performance_comparison() {
             _ => panic!("Unknown actor"),
         };
 
-        // Send message using the saved connection
-        actor_ref.conn.tell(*message).await.unwrap();
+        // Send message using RemoteActorRef (cached connection, zero lookups)
+        actor_ref.tell(*message).await.unwrap();
 
         let send_time = send_start.elapsed();
         individual_send_times.push(send_time);
@@ -307,7 +250,7 @@ async fn test_tell_with_lookup_and_performance_comparison() {
         println!(
             "     Message {} to {}: {:?} ({:.3} μs)",
             i + 1,
-            actor_ref.name,
+            *actor_name,
             send_time,
             send_time.as_nanos() as f64 / 1000.0
         );
@@ -333,7 +276,7 @@ async fn test_tell_with_lookup_and_performance_comparison() {
 
     let sequential_start = Instant::now();
 
-    // Send all messages using the saved actor refs
+    // Send all messages using the RemoteActorRefs
     for (actor_name, message) in &test_messages {
         let actor_ref = match *actor_name {
             "chat_service" => &chat_ref,
@@ -341,7 +284,7 @@ async fn test_tell_with_lookup_and_performance_comparison() {
             "storage_service" => &storage_ref,
             _ => panic!("Unknown actor"),
         };
-        actor_ref.conn.tell(*message).await.unwrap();
+        actor_ref.tell(*message).await.unwrap();
     }
 
     let sequential_total = sequential_start.elapsed();
@@ -391,24 +334,21 @@ async fn test_tell_with_lookup_and_performance_comparison() {
         storage_messages.len()
     );
 
-    // Send batches using actor refs
+    // Send batches using RemoteActorRefs
     chat_ref
-        .conn
-        .tell(kameo_remote::connection_pool::TellMessage::batch(
+        .tell_message(kameo_remote::connection_pool::TellMessage::batch(
             chat_messages,
         ))
         .await
         .unwrap();
     auth_ref
-        .conn
-        .tell(kameo_remote::connection_pool::TellMessage::batch(
+        .tell_message(kameo_remote::connection_pool::TellMessage::batch(
             auth_messages,
         ))
         .await
         .unwrap();
     storage_ref
-        .conn
-        .tell(kameo_remote::connection_pool::TellMessage::batch(
+        .tell_message(kameo_remote::connection_pool::TellMessage::batch(
             storage_messages,
         ))
         .await
@@ -511,13 +451,13 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     for i in 0..volume_count {
         // Send to each service using actor refs
         let msg1 = format!("Message {} to chat_service", i);
-        chat_ref.conn.tell(msg1.as_bytes()).await.unwrap();
+        chat_ref.tell(msg1.as_bytes()).await.unwrap();
 
         let msg2 = format!("Message {} to auth_service", i);
-        auth_ref.conn.tell(msg2.as_bytes()).await.unwrap();
+        auth_ref.tell(msg2.as_bytes()).await.unwrap();
 
         let msg3 = format!("Message {} to storage_service", i);
-        storage_ref.conn.tell(msg3.as_bytes()).await.unwrap();
+        storage_ref.tell(msg3.as_bytes()).await.unwrap();
 
         if i % 50 == 0 && i > 0 {
             println!("   - Sent {}/{} rounds", i, volume_count);
@@ -563,22 +503,19 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     let storage_batch_refs: Vec<&[u8]> = storage_batch.iter().map(|v| v.as_slice()).collect();
 
     chat_ref
-        .conn
-        .tell(kameo_remote::connection_pool::TellMessage::batch(
+        .tell_message(kameo_remote::connection_pool::TellMessage::batch(
             chat_batch_refs,
         ))
         .await
         .unwrap();
     auth_ref
-        .conn
-        .tell(kameo_remote::connection_pool::TellMessage::batch(
+        .tell_message(kameo_remote::connection_pool::TellMessage::batch(
             auth_batch_refs,
         ))
         .await
         .unwrap();
     storage_ref
-        .conn
-        .tell(kameo_remote::connection_pool::TellMessage::batch(
+        .tell_message(kameo_remote::connection_pool::TellMessage::batch(
             storage_batch_refs,
         ))
         .await
@@ -617,28 +554,22 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     println!("==================");
 
     println!("\n✅ Best Practices:");
-    println!("   1. Do lookup() once and save actor refs for repeated communication");
-    println!("   2. Group messages by destination actor for batch sending");
+    println!("   1. Do lookup() once to get RemoteActorRef with cached connection");
+    println!("   2. RemoteActorRef holds the connection - zero additional lookups occur");
     println!("   3. Use tell() for fire-and-forget, ask() for request-response");
-    println!(
-        "   4. For high-throughput scenarios, batching provides {:.0}x-{:.0}x improvement",
-        batch_vs_individual.min(vol_improvement),
-        batch_vs_individual.max(vol_improvement)
-    );
+    println!("   4. All methods use direct stream reference (zero-copy, no lookups)");
 
     println!("\n🔧 Code Examples:");
-    println!("   // Create actor ref once:");
-    println!("   let location = registry.lookup(\"chat_service\").await?;");
-    println!("   let conn = registry.get_connection(peer_addr).await?;");
-    println!("   let chat_ref = ActorRef {{ location, conn }};");
+    println!("   // Lookup once - gets actor location AND caches connection:");
+    println!("   let remote_actor = registry.lookup(\"chat_service\").await?;");
     println!();
-    println!("   // Use actor ref for all messages:");
-    println!("   chat_ref.conn.tell(message1).await?;");
-    println!("   chat_ref.conn.tell(message2).await?;");
+    println!("   // Use RemoteActorRef - ZERO lookups, just pointer deref:");
+    println!("   remote_actor.tell(message1).await?;");
+    println!("   remote_actor.tell(message2).await?;");
+    println!("   remote_actor.ask(request).await?;");
     println!();
-    println!("   // Or batch messages:");
-    println!("   let messages = vec![msg1, msg2, msg3];");
-    println!("   chat_ref.conn.tell(TellMessage::batch(messages)).await?;");
+    println!("   // For large payloads (>1MB), use streaming:");
+    println!("   remote_actor.ask_streaming_bytes(payload, actor_id, type_hash, timeout).await?;");
 
     // Cleanup
     node1.shutdown().await;

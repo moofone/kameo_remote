@@ -142,7 +142,7 @@ async fn run_client_with_wrong_key() -> Result<(), Box<dyn std::error::Error>> {
                 Some(location) => {
                     println!(
                         "❌ CRITICAL: Found actor 'test_actor' at {}",
-                        location.address
+                        location.location.address
                     );
                     println!("   Impostor gained access to protected resources!");
                 }

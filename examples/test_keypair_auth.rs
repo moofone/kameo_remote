@@ -133,11 +133,11 @@ async fn run_client_with_valid_keypair() -> Result<(), Box<dyn std::error::Error
     println!("\n📡 Attempting to access services...");
 
     if let Some(location) = registry.lookup("auth_test_service").await {
-        println!("✅ Found 'auth_test_service' at {}", location.address);
+        println!("✅ Found 'auth_test_service' at {}", location.location.address);
     }
 
     if let Some(location) = registry.lookup("secure_data").await {
-        println!("✅ Found 'secure_data' at {}", location.address);
+        println!("✅ Found 'secure_data' at {}", location.location.address);
     }
 
     let stats = registry.stats().await;

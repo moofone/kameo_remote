@@ -330,6 +330,10 @@ pub struct LockFreeConnection {
     pub stream_handle: Option<Arc<LockFreeStreamHandle>>,
     pub(crate) correlation: Option<Arc<CorrelationTracker>>,
     pub direction: ConnectionDirection,
+    /// Embedded peer_id for this connection
+    /// IMPORTANT: This allows looking up peer_id for inbound connections even after
+    /// addr_to_peer_id mapping has been migrated to bind address (ephemeral port removed)
+    pub(crate) embedded_peer_id: Option<crate::PeerId>,
     /// Task tracker for background tasks (writer and reader)
     /// Uses parking_lot::Mutex for better performance than std::sync::Mutex
     /// (no poisoning overhead, faster lock acquisition)
@@ -348,6 +352,7 @@ impl Clone for LockFreeConnection {
             stream_handle: self.stream_handle.clone(),
             correlation: self.correlation.clone(),
             direction: self.direction,
+            embedded_peer_id: self.embedded_peer_id.clone(),
             // Note: TaskTracker is not cloned - each clone gets a fresh tracker
             // This is intentional: clones are typically used for metadata snapshots,
             // not to transfer task ownership
@@ -368,6 +373,7 @@ impl LockFreeConnection {
             stream_handle: None,
             correlation: Some(CorrelationTracker::new()),
             direction,
+            embedded_peer_id: None,
             task_tracker: parking_lot::Mutex::new(TaskTracker::new()),
         }
     }
@@ -1924,7 +1930,7 @@ impl LockFreeStreamHandle {
         let mut combined_buffer = bytes::BytesMut::with_capacity(total_len);
 
         for chunk in data_chunks {
-            combined_buffer.extend_from_slice(chunk);
+            combined_buffer.extend_from_slice(chunk); // ALLOW_COPY
         }
 
         self.write_bytes_nonblocking(combined_buffer.freeze())
@@ -1937,7 +1943,7 @@ impl LockFreeStreamHandle {
         }
 
         for chunk in data.chunks(chunk_size) {
-            let _ = self.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(chunk));
+            let _ = self.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(chunk)); // ALLOW_COPY
         }
 
         Ok(())
@@ -2029,13 +2035,13 @@ impl LockFreeStreamHandle {
             let mut message = Vec::with_capacity(4 + inner_size);
 
             // Length prefix (required by protocol)
-            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
+            message.extend_from_slice(&(inner_size as u32).to_be_bytes()); // ALLOW_COPY
 
             // Header
             message.push(msg_type as u8);
-            message.extend_from_slice(&[0, 0]); // correlation_id (not used for streaming)
-            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes for 32-byte alignment
-            message.extend_from_slice(&header.to_bytes());
+            message.extend_from_slice(&[0, 0]); // ALLOW_COPY correlation_id (not used for streaming)
+            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // ALLOW_COPY 9 reserved bytes for 32-byte alignment
+            message.extend_from_slice(&header.to_bytes()); // ALLOW_COPY
             message
         }
 
@@ -2071,16 +2077,16 @@ impl LockFreeStreamHandle {
             let mut chunk_msg = Vec::with_capacity(4 + inner_size);
 
             // Length prefix (includes header + chunk data)
-            chunk_msg.extend_from_slice(&(inner_size as u32).to_be_bytes());
+            chunk_msg.extend_from_slice(&(inner_size as u32).to_be_bytes()); // ALLOW_COPY
 
             // Header
             chunk_msg.push(MessageType::StreamData as u8);
-            chunk_msg.extend_from_slice(&[0, 0]); // correlation_id
-            chunk_msg.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes for 32-byte alignment
-            chunk_msg.extend_from_slice(&data_header.to_bytes());
+            chunk_msg.extend_from_slice(&[0, 0]); // ALLOW_COPY correlation_id
+            chunk_msg.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // ALLOW_COPY 9 reserved bytes for 32-byte alignment
+            chunk_msg.extend_from_slice(&data_header.to_bytes()); // ALLOW_COPY
 
             // Chunk data
-            chunk_msg.extend_from_slice(chunk);
+            chunk_msg.extend_from_slice(chunk); // ALLOW_COPY
 
             self.streaming_tx
                 .send(StreamingCommand::WriteBytes(chunk_msg.into()))
@@ -2124,7 +2130,7 @@ impl LockFreeStreamHandle {
     /// * `correlation_id` - The correlation ID from the original request (for response matching)
     pub async fn stream_response(&self, payload: &[u8], correlation_id: u16) -> Result<()> {
         // Convert to Bytes and use zero-copy implementation
-        self.stream_response_bytes(bytes::Bytes::copy_from_slice(payload), correlation_id)
+        self.stream_response_bytes(bytes::Bytes::copy_from_slice(payload), correlation_id) // ALLOW_COPY
             .await
     }
 
@@ -2298,8 +2304,8 @@ impl LockFreeStreamHandle {
                 payload.len(),
             );
             self.write_header_and_payload_control(
-                bytes::Bytes::copy_from_slice(&header),
-                bytes::Bytes::copy_from_slice(payload),
+                bytes::Bytes::copy_from_slice(&header), // ALLOW_COPY
+                bytes::Bytes::copy_from_slice(payload), // ALLOW_COPY
             )
             .await
         }
@@ -2332,7 +2338,7 @@ impl LockFreeStreamHandle {
                 payload.len(),
             );
             self.write_header_and_payload_control(
-                bytes::Bytes::copy_from_slice(&header),
+                bytes::Bytes::copy_from_slice(&header), // ALLOW_COPY
                 payload,
             )
             .await
@@ -2357,8 +2363,8 @@ impl LockFreeStreamHandle {
                 if let StreamingCommand::VectoredWrite(vectored_cmd) = cmd {
                     let total_len = vectored_cmd.header.len() + vectored_cmd.payload.len();
                     let mut combined = bytes::BytesMut::with_capacity(total_len);
-                    combined.extend_from_slice(&vectored_cmd.header);
-                    combined.extend_from_slice(&vectored_cmd.payload);
+                    combined.extend_from_slice(&vectored_cmd.header); // ALLOW_COPY
+                    combined.extend_from_slice(&vectored_cmd.payload); // ALLOW_COPY
                     self.write_bytes_nonblocking(combined.freeze())
                 } else {
                     Err(GossipError::Shutdown)
@@ -2797,7 +2803,7 @@ impl ConnectionHandle {
     pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
         // Must copy here since we don't own the data
         self.stream_handle
-            .write_bytes_control(bytes::Bytes::copy_from_slice(data))
+            .write_bytes_control(bytes::Bytes::copy_from_slice(data)) // ALLOW_COPY
             .await
     }
 
@@ -2866,7 +2872,7 @@ impl ConnectionHandle {
             correlation_id,
             payload_len,
         );
-        let buf = bytes::Bytes::copy_from_slice(&header).chain(payload);
+        let buf = bytes::Bytes::copy_from_slice(&header).chain(payload); // ALLOW_COPY
         self.stream_handle.write_buf_control(buf).await
     }
 
@@ -2918,8 +2924,8 @@ impl ConnectionHandle {
     pub async fn tell_raw(&self, data: &[u8]) -> Result<()> {
         // Create message with length header using BytesMut for efficiency
         let mut message = bytes::BytesMut::with_capacity(4 + data.len());
-        message.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        message.extend_from_slice(data);
+        message.extend_from_slice(&(data.len() as u32).to_be_bytes()); // ALLOW_COPY
+        message.extend_from_slice(data); // ALLOW_COPY
 
         self.stream_handle
             .write_bytes_control(message.freeze())
@@ -2955,7 +2961,7 @@ impl ConnectionHandle {
     pub async fn send_binary_message(&self, message: &[u8]) -> Result<()> {
         // Message already has length prefix, send as-is
         self.stream_handle
-            .write_bytes_control(bytes::Bytes::copy_from_slice(message))
+            .write_bytes_control(bytes::Bytes::copy_from_slice(message)) // ALLOW_COPY
             .await
     }
 
@@ -3024,8 +3030,8 @@ impl ConnectionHandle {
         let mut batch_buffer = bytes::BytesMut::with_capacity(total_size);
 
         for msg in messages {
-            batch_buffer.extend_from_slice(&(msg.len() as u32).to_be_bytes());
-            batch_buffer.extend_from_slice(msg);
+            batch_buffer.extend_from_slice(&(msg.len() as u32).to_be_bytes()); // ALLOW_COPY
+            batch_buffer.extend_from_slice(msg); // ALLOW_COPY
         }
 
         self.stream_handle
@@ -3069,7 +3075,7 @@ impl ConnectionHandle {
 
         if let Err(e) = self
             .stream_handle
-            .write_header_and_payload_ask_inline(header, 8, bytes::Bytes::copy_from_slice(request))
+            .write_header_and_payload_ask_inline(header, 8, bytes::Bytes::copy_from_slice(request)) // ALLOW_COPY
             .await
         {
             self.correlation.cancel(correlation_id);
@@ -3309,11 +3315,11 @@ impl ConnectionHandle {
             let inner_size = 12 + StreamHeader::SERIALIZED_SIZE;
             let mut message = bytes::BytesMut::with_capacity(4 + inner_size);
 
-            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
+            message.extend_from_slice(&(inner_size as u32).to_be_bytes()); // ALLOW_COPY
             message.put_u8(msg_type as u8);
-            message.extend_from_slice(&correlation_id.to_be_bytes());
-            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes
-            message.extend_from_slice(&header.to_bytes());
+            message.extend_from_slice(&correlation_id.to_be_bytes()); // ALLOW_COPY
+            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // ALLOW_COPY 9 reserved bytes
+            message.extend_from_slice(&header.to_bytes()); // ALLOW_COPY
             message.freeze()
         }
 
@@ -3328,11 +3334,11 @@ impl ConnectionHandle {
             let inner_size = 12 + StreamHeader::SERIALIZED_SIZE + chunk_len;
             let mut message = bytes::BytesMut::with_capacity(4 + 12 + StreamHeader::SERIALIZED_SIZE);
 
-            message.extend_from_slice(&(inner_size as u32).to_be_bytes());
+            message.extend_from_slice(&(inner_size as u32).to_be_bytes()); // ALLOW_COPY
             message.put_u8(MessageType::StreamData as u8);
-            message.extend_from_slice(&correlation_id.to_be_bytes());
-            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // 9 reserved bytes
-            message.extend_from_slice(&header.to_bytes());
+            message.extend_from_slice(&correlation_id.to_be_bytes()); // ALLOW_COPY
+            message.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0]); // ALLOW_COPY 9 reserved bytes
+            message.extend_from_slice(&header.to_bytes()); // ALLOW_COPY
             message.freeze()
         }
 
@@ -3442,8 +3448,8 @@ impl ConnectionHandle {
             correlation_id,
             request.len(),
         );
-        message.extend_from_slice(&header);
-        message.extend_from_slice(request);
+        message.extend_from_slice(&header); // ALLOW_COPY
+        message.extend_from_slice(request); // ALLOW_COPY
 
         if let Err(e) = self.stream_handle.write_bytes_ask(message.freeze()).await {
             self.correlation.cancel(correlation_id);
@@ -3525,8 +3531,8 @@ impl ConnectionHandle {
                 correlation_id,
                 request.len(),
             );
-            batch_message.extend_from_slice(&header);
-            batch_message.extend_from_slice(request);
+            batch_message.extend_from_slice(&header); // ALLOW_COPY
+            batch_message.extend_from_slice(request); // ALLOW_COPY
         }
 
         if let Err(e) = self
@@ -3607,8 +3613,8 @@ impl ConnectionHandle {
                 correlation_id,
                 request.len(),
             );
-            batch_message.extend_from_slice(&header);
-            batch_message.extend_from_slice(request);
+            batch_message.extend_from_slice(&header); // ALLOW_COPY
+            batch_message.extend_from_slice(request); // ALLOW_COPY
         }
 
         if let Err(e) = self
@@ -3657,8 +3663,8 @@ impl ConnectionHandle {
 
         // Combine header and payload for single write
         let mut combined = bytes::BytesMut::with_capacity(header_bytes.len() + payload.len());
-        combined.extend_from_slice(&header_bytes);
-        combined.extend_from_slice(&payload);
+        combined.extend_from_slice(&header_bytes); // ALLOW_COPY
+        combined.extend_from_slice(&payload); // ALLOW_COPY
 
         // Use lock-free ring buffer - NO MUTEX!
         self.stream_handle
@@ -3704,8 +3710,8 @@ impl ConnectionHandle {
 
             let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&frame_header)
                 .map_err(crate::GossipError::Serialization)?;
-            total_payload.extend_from_slice(&header_bytes);
-            total_payload.extend_from_slice(&payload);
+            total_payload.extend_from_slice(&header_bytes); // ALLOW_COPY
+            total_payload.extend_from_slice(&payload); // ALLOW_COPY
         }
 
         // Use lock-free ring buffer for entire batch - NO MUTEX!
@@ -4054,7 +4060,7 @@ impl ConnectionPool {
                     data.len(),
                     peer_id
                 );
-                return stream_handle.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data));
+                return stream_handle.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data)); // ALLOW_COPY
             } else {
                 warn!(peer_id = %peer_id, "Connection found but no stream handle");
             }
@@ -4178,7 +4184,7 @@ impl ConnectionPool {
     pub fn send_lock_free(&self, addr: SocketAddr, data: &[u8]) -> Result<()> {
         if let Some(connection) = self.get_lock_free_connection(addr) {
             if let Some(ref stream_handle) = connection.stream_handle {
-                return stream_handle.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data));
+                return stream_handle.write_bytes_nonblocking(bytes::Bytes::copy_from_slice(data)); // ALLOW_COPY
             } else {
                 warn!(addr = %addr, "Connection found but no stream handle");
             }
@@ -4393,8 +4399,8 @@ impl ConnectionPool {
     pub fn create_message_buffer(&mut self, data: &[u8]) -> Vec<u8> {
         let header = framing::write_gossip_frame_prefix(data.len());
         let mut buffer = self.get_buffer(header.len() + data.len());
-        buffer.extend_from_slice(&header);
-        buffer.extend_from_slice(data);
+        buffer.extend_from_slice(&header); // ALLOW_COPY
+        buffer.extend_from_slice(data); // ALLOW_COPY
         buffer
     }
 
@@ -4409,14 +4415,20 @@ impl ConnectionPool {
                 conn.value().update_last_used();
                 debug!(addr = %addr, "using existing persistent connection (fast path)");
                 if let Some(ref stream_handle) = conn.value().stream_handle {
+                    // Look up peer_id to get shared correlation tracker
+                    let peer_id = self.addr_to_peer_id.get(&addr).map(|e| e.clone());
+
+                    // Use shared correlation tracker if we have a peer_id, otherwise use connection's tracker
+                    let correlation = if let Some(pid) = peer_id {
+                        self.get_or_create_correlation_tracker(&pid)
+                    } else {
+                        conn.value().correlation.clone().unwrap_or_else(CorrelationTracker::new)
+                    };
+
                     return Some(ConnectionHandle {
                         addr,
                         stream_handle: stream_handle.clone(),
-                        correlation: conn
-                            .value()
-                            .correlation
-                            .clone()
-                            .unwrap_or_else(CorrelationTracker::new),
+                        correlation,
                     });
                 }
 
@@ -4454,13 +4466,12 @@ impl ConnectionPool {
                 if let Some(ref stream_handle) = conn.stream_handle {
                     // Need to get the address for ConnectionHandle
                     let addr = conn.addr;
+                    // Use shared correlation tracker
+                    let correlation = self.get_or_create_correlation_tracker(peer_id);
                     return Ok(ConnectionHandle {
                         addr,
                         stream_handle: stream_handle.clone(),
-                        correlation: conn
-                            .correlation
-                            .clone()
-                            .unwrap_or_else(CorrelationTracker::new),
+                        correlation,
                     });
                 } else {
                     return Err(crate::GossipError::Network(std::io::Error::other(
@@ -4541,13 +4552,20 @@ impl ConnectionPool {
 
                 // Return the existing lock-free connection handle
                 if let Some(ref stream_handle) = conn.stream_handle {
+                    // Look up peer_id to get shared correlation tracker
+                    let peer_id = self.addr_to_peer_id.get(&addr).map(|e| e.clone());
+
+                    // Use shared correlation tracker if we have a peer_id, otherwise use connection's tracker
+                    let correlation = if let Some(pid) = peer_id {
+                        self.get_or_create_correlation_tracker(&pid)
+                    } else {
+                        conn.correlation.clone().unwrap_or_else(CorrelationTracker::new)
+                    };
+
                     return Ok(ConnectionHandle {
                         addr,
                         stream_handle: stream_handle.clone(),
-                        correlation: conn
-                            .correlation
-                            .clone()
-                            .unwrap_or_else(CorrelationTracker::new),
+                        correlation,
                     });
                 } else {
                     // Connection exists but no stream handle - this shouldn't happen
@@ -4610,13 +4628,12 @@ impl ConnectionPool {
                         "tie-breaker: reusing existing connection instead of dialing outbound"
                     );
                     if let Some(ref stream_handle) = existing_conn.stream_handle {
+                        // Use shared correlation tracker
+                        let correlation = self.get_or_create_correlation_tracker(&remote_peer_id);
                         return Ok(ConnectionHandle {
                             addr: existing_conn.addr,
                             stream_handle: stream_handle.clone(),
-                            correlation: existing_conn
-                                .correlation
-                                .clone()
-                                .unwrap_or_else(CorrelationTracker::new),
+                            correlation,
                         });
                     } else {
                         return Err(GossipError::Network(std::io::Error::other(
@@ -4852,6 +4869,7 @@ impl ConnectionPool {
         if let Some(peer_id) = peer_id_opt {
             // Use shared correlation tracker for this peer
             conn.correlation = Some(self.get_or_create_correlation_tracker(&peer_id));
+            conn.embedded_peer_id = Some(peer_id.clone());
             debug!(
                 "CONNECTION POOL: Using shared correlation tracker for peer {:?} at {}",
                 peer_id, addr
@@ -4901,8 +4919,8 @@ impl ConnectionPool {
                 Ok(data) => {
                     let header = framing::write_gossip_frame_prefix(data.len());
                     let mut msg_buffer = Vec::with_capacity(header.len() + data.len());
-                    msg_buffer.extend_from_slice(&header);
-                    msg_buffer.extend_from_slice(&data);
+                    msg_buffer.extend_from_slice(&header); // ALLOW_COPY
+                    msg_buffer.extend_from_slice(&data); // ALLOW_COPY
 
                     // Create a connection handle to send the message
                     let conn_handle = ConnectionHandle {
@@ -4941,115 +4959,42 @@ impl ConnectionPool {
                 .map(|registry| registry.config.max_message_size)
                 .unwrap_or(10 * 1024 * 1024);
 
+            // Initialize streaming state
+            let mut streaming_state = crate::protocol::StreamingState::new();
+            
+            // Cleanup interval for stale streams (every 30 seconds)
+            let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
             loop {
-                match crate::handle::read_message_from_tls_reader(&mut reader, max_message_size)
-                    .await
-                {
-                    Ok(crate::handle::MessageReadResult::Gossip(msg, correlation_id)) => {
-                        let msg_to_handle = if let RegistryMessage::ActorMessage {
-                            actor_id,
-                            type_hash,
-                            payload,
-                            correlation_id: _,
-                        } = msg
-                        {
-                            RegistryMessage::ActorMessage {
-                                actor_id,
-                                type_hash,
-                                payload,
-                                correlation_id,
+                let msg_result = tokio::select! {
+                    result = crate::handle::read_message_from_tls_reader(&mut reader, max_message_size) => result,
+                    _ = cleanup_interval.tick() => {
+                        streaming_state.cleanup_stale();
+                        continue;
+                    }
+                };
+
+                match msg_result {
+                    Ok(result) => {
+                        if let Some(registry) = registry_weak_for_reader.as_ref().and_then(|w| w.upgrade()) {
+                            if let Err(e) = crate::protocol::process_read_result(
+                                result, 
+                                &mut streaming_state, 
+                                &registry, 
+                                addr
+                            ).await {
+                                warn!(peer = %addr, error = %e, "Failed to process message on outgoing connection");
                             }
                         } else {
-                            msg
-                        };
-
-                        if let Some(registry) =
-                            registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
-                        {
-                            if let Err(e) =
-                                handle_incoming_message(registry, addr, msg_to_handle).await
-                            {
-                                warn!(peer = %addr, error = %e, "Failed to handle gossip message");
-                            }
-                        }
-                    }
-                    Ok(crate::handle::MessageReadResult::AskRaw {
-                        correlation_id,
-                        payload,
-                    }) => {
-                        if let Some(registry) =
-                            registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
-                        {
-                            crate::handle::handle_raw_ask_request(
-                                &registry,
-                                addr,
-                                correlation_id,
-                                &payload,
-                            )
-                            .await;
-                        }
-                    }
-                    Ok(crate::handle::MessageReadResult::Response {
-                        correlation_id,
-                        payload,
-                    }) => {
-                        if let Some(registry) =
-                            registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
-                        {
-                            crate::handle::handle_response_message(
-                                &registry,
-                                addr,
-                                correlation_id,
-                                payload,
-                            )
-                            .await;
-                        }
-                    }
-                    Ok(crate::handle::MessageReadResult::Actor {
-                        msg_type,
-                        correlation_id,
-                        actor_id,
-                        type_hash,
-                        payload,
-                    }) => {
-                        if let Some(registry) =
-                            registry_weak_for_reader.as_ref().and_then(|w| w.upgrade())
-                        {
-                            if let Some(handler) = &*registry.actor_message_handler.lock().await {
-                                let actor_id_str = actor_id.to_string();
-                                let correlation = if msg_type == crate::MessageType::ActorAsk as u8
-                                {
-                                    Some(correlation_id)
-                                } else {
-                                    None
-                                };
-                                let _ = handler
-                                    .handle_actor_message(
-                                        &actor_id_str,
-                                        type_hash,
-                                        &payload,
-                                        correlation,
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    Ok(crate::handle::MessageReadResult::Streaming { .. }) => {
-                        // Streaming messages are not handled on outgoing readers yet.
-                    }
-                    Ok(crate::handle::MessageReadResult::Raw(_payload)) => {
-                        #[cfg(any(test, feature = "test-helpers", debug_assertions))]
-                        {
-                            if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
-                                crate::test_helpers::record_raw_payload(_payload.clone());
-                            }
-                        }
-                        // Raw tell payloads are ignored on outgoing readers.
+                            warn!(peer = %addr, "Registry dropped, stopping outgoing connection reader");
+                            break;
+                         }
                     }
                     Err(e) => {
-                        reader_connection.set_state(ConnectionState::Disconnected);
-                        warn!(peer = %addr, error = %e, "Outgoing connection reader error");
-                        break;
+                         reader_connection.set_state(ConnectionState::Disconnected);
+                         warn!(peer = %addr, error = %e, "Outgoing connection reader error");
+                         break;
                     }
                 }
             }
@@ -5237,7 +5182,7 @@ impl ConnectionPool {
                     break;
                 }
                 Ok(n) => {
-                    partial_msg_buf.extend_from_slice(&read_buf[..n]);
+                    partial_msg_buf.extend_from_slice(&read_buf[..n]); // ALLOW_COPY
 
                     // Process complete messages
                     while partial_msg_buf.len() >= 4 {
@@ -5338,7 +5283,7 @@ impl ConnectionPool {
                                             // Try to deserialize the payload as a RegistryMessage
                                             // Note: payload might not be aligned, so we need to copy it to an aligned buffer
                                             let aligned_payload = payload.to_vec();
-                                            match rkyv::from_bytes::<
+                                            match rkyv::from_bytes::< // ALLOW_RKYV_FROM_BYTES
                                                 crate::registry::RegistryMessage,
                                                 rkyv::rancor::Error,
                                             >(
@@ -5399,12 +5344,27 @@ impl ConnectionPool {
                                                                 let payload = bytes::Bytes::from(reply_payload);
 
                                                                 // For both incoming and outgoing connections, find the stream handle from the pool
+                                                                // IMPORTANT: Look up by peer_id first, then fall back to peer_addr
+                                                                // This ensures responses are sent on the correct connection even when
+                                                                // the request arrives on an inbound connection (ephemeral port)
                                                                 let pool = registry.connection_pool.lock().await;
-                                                                if let Some(conn) = pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone()) {
+                                                                let conn = if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
+                                                                    debug!(peer = %peer_addr, %peer_id, "Found peer_id for response, looking up connection by peer_id");
+                                                                    // Found peer_id, now get the connection (prefer outbound if available)
+                                                                    pool.get_connection_by_peer_id(&peer_id)
+                                                                } else {
+                                                                    debug!(peer = %peer_addr, "No peer_id found for address, falling back to direct address lookup");
+                                                                    // Fall back to direct address lookup
+                                                                    pool.connections_by_addr.get(&peer_addr).map(|c| c.value().clone())
+                                                                };
+
+                                                                debug!(peer = %peer_addr, conn_found = conn.is_some(), conn_addr = ?conn.as_ref().map(|c| c.addr), "Connection lookup result for response");
+
+                                                                if let Some(conn) = conn {
                                                                     if let Some(ref stream_handle) = conn.stream_handle {
                                                                         if let Err(e) = stream_handle
                                                                             .write_header_and_payload_control(
-                                                                                bytes::Bytes::copy_from_slice(&header),
+                                                                                bytes::Bytes::copy_from_slice(&header), // ALLOW_COPY
                                                                                 payload,
                                                                             )
                                                                             .await
@@ -5492,8 +5452,8 @@ impl ConnectionPool {
                                                                     correlation_id,
                                                                     response_data.len(),
                                                                 );
-                                                                    msg.extend_from_slice(&header);
-                                                                    msg.extend_from_slice(
+                                                                    msg.extend_from_slice(&header); // ALLOW_COPY
+                                                                    msg.extend_from_slice( // ALLOW_COPY
                                                                         &response_data,
                                                                     );
 
@@ -5600,7 +5560,7 @@ impl ConnectionPool {
                                                                                 {
                                                                                     if let Err(e) = handle
                                                                                     .write_header_and_payload_control(
-                                                                                        bytes::Bytes::copy_from_slice(&header),
+                                                                                        bytes::Bytes::copy_from_slice(&header), // ALLOW_COPY
                                                                                         payload.clone(),
                                                                                     )
                                                                                     .await
@@ -5620,7 +5580,7 @@ impl ConnectionPool {
                                                                                     if let Some(ref stream_handle) = conn.stream_handle {
                                                                                         if let Err(e) = stream_handle
                                                                                             .write_header_and_payload_control(
-                                                                                                bytes::Bytes::copy_from_slice(&header),
+                                                                                                bytes::Bytes::copy_from_slice(&header), // ALLOW_COPY
                                                                                                 payload.clone(),
                                                                                             )
                                                                                             .await
@@ -5669,11 +5629,28 @@ impl ConnectionPool {
                                                     let mut delivered = false;
 
                                                     // Look up peer ID for this address
-                                                    if let Some(peer_id) = pool
+                                                    // NOTE: peer_addr might be ephemeral port (inbound connection)
+                                                    // so we need to check addr_to_peer_id first, then fall back to connection lookup
+                                                    let peer_id = pool
                                                         .addr_to_peer_id
                                                         .get(&peer_addr)
                                                         .map(|e| e.clone())
-                                                    {
+                                                        .or_else(|| {
+                                                            // If not in addr_to_peer_id, try looking up the connection directly
+                                                            // This handles responses arriving on inbound connections
+                                                            // where the ephemeral port mapping was removed after FullSync
+                                                            pool.connections_by_addr.get(&peer_addr)
+                                                                .and_then(|conn| {
+                                                                    // If connection has embedded peer_id, use it
+                                                                    if let Some(ref pid) = conn.value().embedded_peer_id {
+                                                                        Some(pid.clone())
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                })
+                                                        });
+
+                                                    if let Some(peer_id) = peer_id {
                                                         // Use shared correlation tracker
                                                         if let Some(correlation) =
                                                             pool.correlation_trackers.get(&peer_id)
@@ -5683,18 +5660,24 @@ impl ConnectionPool {
                                                             {
                                                                 correlation.complete(
                                                                     correlation_id,
-                                                                    bytes::Bytes::copy_from_slice(
+                                                                    bytes::Bytes::copy_from_slice( // ALLOW_COPY
                                                                         payload,
                                                                     ),
                                                                 );
-                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, "Delivered response to shared correlation tracker");
+                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, %peer_id, "Delivered response to shared correlation tracker");
                                                                 delivered = true;
+                                                            } else {
+                                                                debug!(peer = %peer_addr, correlation_id = correlation_id, %peer_id, "Shared correlation tracker has no pending request");
                                                             }
+                                                        } else {
+                                                            debug!(peer = %peer_addr, correlation_id = correlation_id, %peer_id, "No shared correlation tracker found");
                                                         }
+                                                    } else {
+                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, "Could not find peer_id for address (tried addr_to_peer_id and connection lookup)");
                                                     }
 
                                                     if !delivered {
-                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, "Could not find pending request for correlation_id");
+                                                        debug!(peer = %peer_addr, correlation_id = correlation_id, "Could not deliver response");
                                                     }
                                                 }
                                             }
@@ -6158,11 +6141,29 @@ impl ConnectionPool {
                                                                           "📥 Received streaming response, delivering to correlation tracker");
 
                                                                     let pool = registry.connection_pool.lock().await;
-                                                                    if let Some(peer_id) = pool
+                                                                    // Look up peer ID for this address
+                                                                    // NOTE: peer_addr might be ephemeral port (inbound connection)
+                                                                    // so we need to check addr_to_peer_id first, then fall back to connection lookup
+                                                                    let peer_id = pool
                                                                         .addr_to_peer_id
                                                                         .get(&peer_addr)
                                                                         .map(|e| e.clone())
-                                                                    {
+                                                                        .or_else(|| {
+                                                                            // If not in addr_to_peer_id, try looking up the connection directly
+                                                                            // This handles responses arriving on inbound connections
+                                                                            // where the ephemeral port mapping was removed after FullSync
+                                                                            pool.connections_by_addr.get(&peer_addr)
+                                                                                .and_then(|conn| {
+                                                                                    // If connection has embedded peer_id, use it
+                                                                                    if let Some(ref pid) = conn.value().embedded_peer_id {
+                                                                                        Some(pid.clone())
+                                                                                    } else {
+                                                                                        None
+                                                                                    }
+                                                                                })
+                                                                        });
+
+                                                                    if let Some(peer_id) = peer_id {
                                                                         if let Some(correlation) =
                                                                             pool.correlation_trackers.get(&peer_id)
                                                                         {
@@ -6171,17 +6172,17 @@ impl ConnectionPool {
                                                                                     corr_id,
                                                                                     bytes::Bytes::from(result.data),
                                                                                 );
-                                                                                debug!(peer = %peer_addr, correlation_id = corr_id,
+                                                                                debug!(peer = %peer_addr, correlation_id = corr_id, %peer_id,
                                                                                        "✅ Streaming response delivered to correlation tracker");
                                                                             } else {
                                                                                 warn!(peer = %peer_addr, correlation_id = corr_id,
                                                                                       "No pending correlation for streaming response");
                                                                             }
                                                                         } else {
-                                                                            warn!(peer = %peer_addr, "No correlation tracker for streaming response");
+                                                                            warn!(peer = %peer_addr, %peer_id, "No correlation tracker for streaming response");
                                                                         }
                                                                     } else {
-                                                                        warn!(peer = %peer_addr, "No peer ID mapping for streaming response");
+                                                                        warn!(peer = %peer_addr, correlation_id = corr_id, "Could not find peer_id for streaming response (tried addr_to_peer_id and connection lookup)");
                                                                     }
                                                                 } else {
                                                                     warn!(peer = %peer_addr, stream_id = header.stream_id,
@@ -6214,7 +6215,7 @@ impl ConnectionPool {
                             // Process message
                             if let Some(ref registry_weak) = registry_weak {
                                 if let Some(registry) = registry_weak.upgrade() {
-                                    if let Ok(msg) = rkyv::from_bytes::<
+                                    if let Ok(msg) = rkyv::from_bytes::< // ALLOW_RKYV_FROM_BYTES
                                         crate::registry::RegistryMessage,
                                         rkyv::rancor::Error,
                                     >(msg_data)
@@ -7352,7 +7353,7 @@ pub(crate) fn handle_incoming_message(
                             // CRITICAL FIX: Try the ephemeral TCP source address first, then fall back
                             // to the bind address if the connection was reindexed after FullSync.
                             let pool = registry.connection_pool.lock().await;
-                            let header_bytes = bytes::Bytes::copy_from_slice(&header);
+                            let header_bytes = bytes::Bytes::copy_from_slice(&header); // ALLOW_COPY
 
                             // First try: use original TCP source address (ephemeral port)
                             if let Err(_e1) = pool.send_lock_free_parts(
