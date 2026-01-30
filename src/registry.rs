@@ -4412,7 +4412,7 @@ impl GossipRegistry {
         }
 
         // Update peer_discovery
-        let should_track_mesh_time =
+        let should_track_mesh_time = 
             self.config.mesh_formation_target > 0 && gossip_state.mesh_formation_time_ms.is_none();
 
         if let Some(ref mut discovery) = gossip_state.peer_discovery {
