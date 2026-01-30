@@ -1,0 +1,164 @@
+╔═══════════════════════════════════════════════════════════════╗
+║     ZERO-COPY VALIDATION (Legacy Cleanup Plan)               ║
+╚═══════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════
+Step 1: cargo test --workspace
+═══════════════════════════════════════════════════════════════
+   Compiling kameo_remote v0.1.0 (/Users/greg/Dev/git/kameo_remote)
+warning: method `get_connection` is never used
+   --> src/handle.rs:285:25
+    |
+ 62 | impl GossipRegistryHandle {
+    | ------------------------- method in this implementation
+...
+285 |     pub(crate) async fn get_connection(
+    |                         ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `get_connection_direct` is never used
+    --> src/registry.rs:2799:19
+     |
+ 526 | impl GossipRegistry {
+     | ------------------- method in this implementation
+...
+2799 |     pub(crate) fn get_connection_direct(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `kameo_remote` (lib) generated 2 warnings
+warning: `kameo_remote` (lib test) generated 2 warnings (2 duplicates)
+error[E0624]: method `get_connection` is private
+    --> examples/illegal_api_usage.rs:13:26
+     |
+  13 |       let _conn = registry.get_connection(addr).await;
+     |                            ^^^^^^^^^^^^^^ private method
+     |
+    ::: /Users/greg/Dev/git/kameo_remote/src/registry.rs:2790:5
+     |
+2790 | /     pub(crate) async fn get_connection(
+2791 | |         &self,
+2792 | |         addr: SocketAddr,
+2793 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+     | |_________________________________________________________- private method defined here
+
+For more information about this error, try `rustc --explain E0624`.
+error: could not compile `kameo_remote` (example "illegal_api_usage") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0624]: method `get_connection_by_peer_id` is private
+    --> examples/test_manual_c.rs:84:43
+     |
+  84 |                   let has_connection = pool.get_connection_by_peer_id(peer_id).is_some();
+     |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+     |
+    ::: /Users/greg/Dev/git/kameo_remote/src/connection_pool.rs:3875:5
+     |
+3875 | /     pub(crate) fn get_connection_by_peer_id(
+3876 | |         &self,
+3877 | |         peer_id: &crate::PeerId,
+3878 | |     ) -> Option<Arc<LockFreeConnection>> {
+     | |________________________________________- private method defined here
+
+error: could not compile `kameo_remote` (example "test_manual_c") due to 1 previous error
+error[E0624]: method `get_connection_by_peer_id` is private
+    --> examples/test_manual_a.rs:84:43
+     |
+  84 |                   let has_connection = pool.get_connection_by_peer_id(peer_id).is_some();
+     |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+     |
+    ::: /Users/greg/Dev/git/kameo_remote/src/connection_pool.rs:3875:5
+     |
+3875 | /     pub(crate) fn get_connection_by_peer_id(
+3876 | |         &self,
+3877 | |         peer_id: &crate::PeerId,
+3878 | |     ) -> Option<Arc<LockFreeConnection>> {
+     | |________________________________________- private method defined here
+
+error[E0624]: method `get_connection` is private
+   --> tests/typed_tls_end_to_end.rs:41:25
+    |
+ 41 |       let conn = handle_a.get_connection(addr_b).await.unwrap();
+    |                           ^^^^^^^^^^^^^^ private method
+    |
+   ::: /Users/greg/Dev/git/kameo_remote/src/handle.rs:285:5
+    |
+285 | /     pub(crate) async fn get_connection(
+286 | |         &self,
+287 | |         addr: SocketAddr,
+288 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+    | |_________________________________________________________- private method defined here
+
+error[E0624]: method `get_connection` is private
+   --> tests/typed_tls_end_to_end.rs:84:25
+    |
+ 84 |       let conn = handle_a.get_connection(addr_b).await.unwrap();
+    |                           ^^^^^^^^^^^^^^ private method
+    |
+   ::: /Users/greg/Dev/git/kameo_remote/src/handle.rs:285:5
+    |
+285 | /     pub(crate) async fn get_connection(
+286 | |         &self,
+287 | |         addr: SocketAddr,
+288 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+    | |_________________________________________________________- private method defined here
+
+error[E0624]: method `get_connection_to_peer` is private
+   --> tests/ask_reply_end_to_end.rs:84:29
+    |
+ 84 |           let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^ private method
+    |
+   ::: /Users/greg/Dev/git/kameo_remote/src/handle.rs:293:5
+    |
+293 | /     pub(crate) async fn get_connection_to_peer(
+294 | |         &self,
+295 | |         peer_id: &crate::PeerId,
+296 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+    | |_________________________________________________________- private method defined here
+
+error[E0624]: method `get_connection_to_peer` is private
+   --> tests/ask_reply_end_to_end.rs:101:29
+    |
+101 |           let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^ private method
+    |
+   ::: /Users/greg/Dev/git/kameo_remote/src/handle.rs:293:5
+    |
+293 | /     pub(crate) async fn get_connection_to_peer(
+294 | |         &self,
+295 | |         peer_id: &crate::PeerId,
+296 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+    | |_________________________________________________________- private method defined here
+
+error[E0624]: method `get_connection_to_peer` is private
+   --> tests/ask_reply_end_to_end.rs:138:29
+    |
+138 |           let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^ private method
+    |
+   ::: /Users/greg/Dev/git/kameo_remote/src/handle.rs:293:5
+    |
+293 | /     pub(crate) async fn get_connection_to_peer(
+294 | |         &self,
+295 | |         peer_id: &crate::PeerId,
+296 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+    | |_________________________________________________________- private method defined here
+
+error[E0624]: method `get_connection_to_peer` is private
+   --> tests/ask_reply_end_to_end.rs:162:29
+    |
+162 |           let conn = handle_a.get_connection_to_peer(&peer_b_id).await.unwrap();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^ private method
+    |
+   ::: /Users/greg/Dev/git/kameo_remote/src/handle.rs:293:5
+    |
+293 | /     pub(crate) async fn get_connection_to_peer(
+294 | |         &self,
+295 | |         peer_id: &crate::PeerId,
+296 | |     ) -> Result<crate::connection_pool::ConnectionHandle> {
+    | |_________________________________________________________- private method defined here
+
+error: could not compile `kameo_remote` (example "test_manual_a") due to 1 previous error
+error: could not compile `kameo_remote` (test "typed_tls_end_to_end") due to 2 previous errors
+error: could not compile `kameo_remote` (test "ask_reply_end_to_end") due to 4 previous errors
+❌ Workspace tests failed

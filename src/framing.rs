@@ -6,9 +6,15 @@ pub const GOSSIP_HEADER_LEN: usize = 4; // type(1) + pad(3)
 pub const ACTOR_HEADER_LEN: usize = 28; // type(1) + correlation_id(2) + reserved(9) + actor_id(8) + type_hash(4) + payload_len(4)
 pub const STREAM_HEADER_PREFIX_LEN: usize = 12; // type(1) + correlation_id(2) + reserved(9)
 
+// DirectAsk fast path constants
+pub const DIRECT_ASK_HEADER_LEN: usize = 7; // type(1) + correlation_id(2) + payload_len(4)
+pub const DIRECT_RESPONSE_HEADER_LEN: usize = 7; // type(1) + correlation_id(2) + payload_len(4)
+
 pub const ASK_RESPONSE_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + ASK_RESPONSE_HEADER_LEN;
 pub const GOSSIP_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + GOSSIP_HEADER_LEN;
 pub const ACTOR_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + ACTOR_HEADER_LEN;
+pub const DIRECT_ASK_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + DIRECT_ASK_HEADER_LEN;
+pub const DIRECT_RESPONSE_FRAME_HEADER_LEN: usize = LENGTH_PREFIX_LEN + DIRECT_RESPONSE_HEADER_LEN;
 
 pub fn write_ask_response_header(
     msg_type: MessageType,
@@ -34,6 +40,36 @@ pub fn write_gossip_frame_prefix(payload_len: usize) -> [u8; GOSSIP_FRAME_HEADER
     header[5] = 0;
     header[6] = 0;
     header[7] = 0;
+    header
+}
+
+/// Write DirectAsk header - fast path for direct ask without actor message handler
+/// Wire format: [length:4][type:1][correlation_id:2][payload_len:4][payload:N]
+pub fn write_direct_ask_header(
+    correlation_id: u16,
+    payload_len: usize,
+) -> [u8; DIRECT_ASK_FRAME_HEADER_LEN] {
+    let total_size = DIRECT_ASK_HEADER_LEN + payload_len;
+    let mut header = [0u8; DIRECT_ASK_FRAME_HEADER_LEN];
+    header[..4].copy_from_slice(&(total_size as u32).to_be_bytes());
+    header[4] = MessageType::DirectAsk as u8;
+    header[5..7].copy_from_slice(&correlation_id.to_be_bytes());
+    header[7..11].copy_from_slice(&(payload_len as u32).to_be_bytes());
+    header
+}
+
+/// Write DirectResponse header - fast path for direct response
+/// Wire format: [length:4][type:1][correlation_id:2][payload_len:4][payload:N]
+pub fn write_direct_response_header(
+    correlation_id: u16,
+    payload_len: usize,
+) -> [u8; DIRECT_RESPONSE_FRAME_HEADER_LEN] {
+    let total_size = DIRECT_RESPONSE_HEADER_LEN + payload_len;
+    let mut header = [0u8; DIRECT_RESPONSE_FRAME_HEADER_LEN];
+    header[..4].copy_from_slice(&(total_size as u32).to_be_bytes());
+    header[4] = MessageType::DirectResponse as u8;
+    header[5..7].copy_from_slice(&correlation_id.to_be_bytes());
+    header[7..11].copy_from_slice(&(payload_len as u32).to_be_bytes());
     header
 }
 

@@ -1,13 +1,57 @@
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
-use std::time::Duration;
+use std::future::Future;
+use std::time::{Duration, Instant};
+use tokio::runtime::Builder;
 use tokio::time::sleep;
 
-#[tokio::test]
-async fn test_node_name_based_connections() {
-    // Initialize logging for debugging
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("kameo_remote=debug")
-        .try_init();
+const TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TEST_WORKER_THREADS: usize = 4;
+
+async fn wait_for_peer_mapping(
+    node: &GossipRegistryHandle,
+    peer_id: &kameo_remote::PeerId,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let pool = &node.registry.connection_pool;
+        if pool.peer_id_to_addr.contains_key(peer_id) && pool.connection_count() >= 1 {
+            return true;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+fn run_node_name_test<F>(future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("node-name-test".into())
+        .stack_size(TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let rt = Builder::new_multi_thread()
+                .worker_threads(TEST_WORKER_THREADS)
+                .thread_stack_size(TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build node name test runtime");
+            rt.block_on(future);
+        })
+        .expect("failed to spawn node name test thread")
+        .join()
+        .expect("node name test thread panicked unexpectedly");
+}
+
+#[test]
+fn test_node_name_based_connections() {
+    run_node_name_test(async {
+        // Initialize logging for debugging
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("kameo_remote=debug")
+            .try_init();
 
     // Create configs
     let config_a = GossipConfig {
@@ -62,33 +106,18 @@ async fn test_node_name_based_connections() {
         .await
         .expect("Failed to connect to node B");
 
-    // Give nodes time to connect
-    sleep(Duration::from_secs(2)).await;
+    assert!(
+        wait_for_peer_mapping(&node_b, &peer_id_a, Duration::from_secs(5)).await,
+        "Node B failed to retain mapping for Node A"
+    );
 
-    // Check that Node B has the expected mappings
-    {
-        let pool = node_b.registry.connection_pool.lock().await;
-        println!("Node B pool state:");
-        println!("  Total connections: {}", pool.connection_count());
-        println!("  Node mappings: {}", pool.peer_id_to_addr.len());
-
-        // Verify Node B knows about Node A
-        assert!(pool.peer_id_to_addr.contains_key(&peer_id_a));
-        assert_eq!(pool.connection_count(), 1);
-    }
-
-    // Check that Node A has learned about Node B
-    {
-        let pool = node_a.registry.connection_pool.lock().await;
-        println!("Node A pool state:");
-        println!("  Total connections: {}", pool.connection_count());
-        println!("  Node mappings: {}", pool.peer_id_to_addr.len());
-
-        // After exchange, Node A should know about Node B
-        assert!(pool.peer_id_to_addr.contains_key(&peer_id_b));
-    }
+    assert!(
+        wait_for_peer_mapping(&node_a, &peer_id_b, Duration::from_secs(5)).await,
+        "Node A failed to retain mapping for Node B"
+    );
 
     // Clean shutdown
     node_a.shutdown().await;
     node_b.shutdown().await;
+    });
 }

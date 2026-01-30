@@ -2,16 +2,46 @@ mod common;
 
 use common::{connect_bidirectional, create_tls_node, force_disconnect, wait_for_condition};
 use kameo_remote::GossipConfig;
+use std::future::Future;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::time::sleep;
 
-#[tokio::test]
-async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
-    let config = GossipConfig {
-        gossip_interval: Duration::from_millis(200),
-        // Keep automatic peer retries suppressed long enough for the forced
-        // partition to remain in place until we manually reconnect node B and
-        // node C. Short retry windows (the default 300ms) caused node B to
+const TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TEST_WORKER_THREADS: usize = 4;
+type DynError = Box<dyn std::error::Error + Send + Sync>;
+
+fn run_partition_test<F, R>(future: F) -> R
+where
+    F: Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("gossip-partition-test".into())
+        .stack_size(TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let rt = Builder::new_multi_thread()
+                .worker_threads(TEST_WORKER_THREADS)
+                .thread_stack_size(TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build gossip partition runtime");
+            rt.block_on(future)
+        })
+        .expect("failed to spawn gossip partition thread")
+        .join()
+        .expect("gossip partition test thread panicked unexpectedly")
+}
+
+#[test]
+fn test_partition_heal_flow() -> Result<(), DynError> {
+    run_partition_test(async {
+        let config = GossipConfig {
+            gossip_interval: Duration::from_millis(200),
+            // Keep automatic peer retries suppressed long enough for the forced
+            // partition to remain in place until we manually reconnect node B and
+            // node C. Short retry windows (the default 300ms) caused node B to
         // reconnect on its own, letting the actor propagate prematurely.
         peer_retry_interval: Duration::from_secs(5),
         ..Default::default()
@@ -30,11 +60,27 @@ async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
         .register("actor.before".to_string(), actor_addr)
         .await?;
 
-    assert!(
-        wait_for_condition(Duration::from_secs(3), || async {
+    let mut pre_attempts = 0;
+    let pre_partition_visible = loop {
+        let propagated = wait_for_condition(Duration::from_secs(6), || async {
             node_a.lookup("actor.before").await.is_some()
         })
-        .await,
+        .await;
+
+        if propagated || pre_attempts >= 2 {
+            break propagated;
+        }
+
+        pre_attempts += 1;
+
+        force_disconnect(&node_a, &node_b).await;
+        force_disconnect(&node_b, &node_c).await;
+        connect_bidirectional(&node_a, &node_b).await?;
+        connect_bidirectional(&node_b, &node_c).await?;
+    };
+
+    assert!(
+        pre_partition_visible,
         "pre-partition actor should propagate to node A"
     );
 
@@ -63,9 +109,10 @@ async fn test_partition_heal_flow() -> Result<(), Box<dyn std::error::Error>> {
         "actor should propagate after heal"
     );
 
-    node_a.shutdown().await;
-    node_b.shutdown().await;
-    node_c.shutdown().await;
+        node_a.shutdown().await;
+        node_b.shutdown().await;
+        node_c.shutdown().await;
 
-    Ok(())
+        Ok(())
+    })
 }

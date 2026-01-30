@@ -3,6 +3,7 @@ mod common;
 use common::{create_tls_node, wait_for_condition};
 use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler, RegistryMessage};
 use kameo_remote::GossipConfig;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -11,6 +12,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 const TEST_ACTOR_ID: &str = "tls_test_actor";
 const TEST_TYPE_HASH: u32 = 0xA57A_A5C0;
+const TEST_THREAD_STACK: usize = 8 * 1024 * 1024;
+const TEST_WORKER_STACK: usize = 4 * 1024 * 1024;
 
 struct TestActorHandler;
 
@@ -48,9 +51,32 @@ fn encode_actor_ask(payload: impl Into<Vec<u8>>) -> Vec<u8> {
         .to_vec()
 }
 
+fn run_with_large_stack<F, Fut>(name: &str, fut: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(format!("test-{name}"))
+        .stack_size(TEST_THREAD_STACK)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(TEST_WORKER_STACK)
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(fut());
+        })
+        .expect("spawn large stack test thread")
+        .join()
+        .expect("join large stack test thread");
+}
+
 /// Test true end-to-end ask/reply over TCP sockets
-#[tokio::test]
-async fn test_end_to_end_ask_reply() {
+#[test]
+fn test_end_to_end_ask_reply() {
+    run_with_large_stack("end_to_end_ask_reply", || async {
     // Initialize tracing
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(
@@ -93,7 +119,7 @@ async fn test_end_to_end_ask_reply() {
             elapsed,
             String::from_utf8_lossy(&response)
         );
-        assert_eq!(response, b"RESPONSE:15"); // Mock response with request length
+        assert_eq!(response.as_ref(), b"RESPONSE:15"); // Mock response with request length
     }
 
     info!("=== Test 2: Multiple concurrent asks with correlation tracking ===");
@@ -154,7 +180,7 @@ async fn test_end_to_end_ask_reply() {
 
         let response = response_future.await.unwrap().unwrap();
         info!("Got response: {:?}", String::from_utf8_lossy(&response));
-        assert_eq!(response, b"RESPONSE:20");
+        assert_eq!(response.as_ref(), b"RESPONSE:20");
     }
 
     info!("=== Test 4: Performance test ===");
@@ -180,11 +206,13 @@ async fn test_end_to_end_ask_reply() {
     // Shutdown
     handle_a.shutdown().await;
     handle_b.shutdown().await;
+    });
 }
 
 /// Test timeout handling
-#[tokio::test]
-async fn test_ask_timeout() {
+#[test]
+fn test_ask_timeout() {
+    run_with_large_stack("ask_timeout", || async {
     // Initialize tracing
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(
@@ -207,4 +235,5 @@ async fn test_ask_timeout() {
     }
 
     handle_a.shutdown().await;
+    });
 }

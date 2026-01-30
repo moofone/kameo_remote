@@ -68,12 +68,13 @@ async fn main() {
         // Get detailed peer status
         let (peer_status, configured_peers, connected_peers) = {
             let gossip_state = handle.registry.gossip_state.lock().await;
-            let pool = handle.registry.connection_pool.lock().await;
+            let pool = &handle.registry.connection_pool;
             let actor_state = handle.registry.actor_state.read().await;
             let mut status = Vec::new();
             let mut configured_count = 0;
             let mut connected_count = 0;
-            let connected_set: std::collections::HashSet<_> = pool.get_connected_peers().into_iter().collect();
+            let connected_set: std::collections::HashSet<_> =
+                pool.get_connected_peers().into_iter().collect();
 
             // Check all configured peers (from peer_id_to_addr)
             for entry in pool.peer_id_to_addr.iter() {

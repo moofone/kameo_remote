@@ -6,8 +6,27 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
 
 /// Test basic ask() functionality with correlation ID tracking
-#[tokio::test]
-async fn test_basic_ask_correlation() {
+#[test]
+fn test_basic_ask_correlation() {
+    let handle = std::thread::Builder::new()
+        .name("ask-basic-correlation".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(4 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            rt.block_on(async {
+                run_test_basic_ask_correlation().await;
+            });
+        })
+        .expect("failed to spawn basic ask test thread");
+    handle.join().expect("basic ask test panicked");
+}
+
+async fn run_test_basic_ask_correlation() {
     // Initialize tracing
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(
@@ -67,13 +86,13 @@ async fn test_basic_ask_correlation() {
             String::from_utf8_lossy(request)
         );
         let response = conn.ask(request).await.unwrap();
-        assert_eq!(response, b"ECHOED:Hello from Node A");
+        assert_eq!(response.as_ref(), b"ECHOED:Hello from Node A");
         info!("ECHO test passed: {:?}", String::from_utf8_lossy(&response));
 
         // Test REVERSE command
         let request = b"REVERSE:12345";
         let response = conn.ask(request).await.unwrap();
-        assert_eq!(response, b"REVERSED:54321");
+        assert_eq!(response.as_ref(), b"REVERSED:54321");
         info!(
             "REVERSE test passed: {:?}",
             String::from_utf8_lossy(&response)
@@ -82,7 +101,7 @@ async fn test_basic_ask_correlation() {
         // Test COUNT command
         let request = b"COUNT:Hello World";
         let response = conn.ask(request).await.unwrap();
-        assert_eq!(response, b"COUNTED:11 chars");
+        assert_eq!(response.as_ref(), b"COUNTED:11 chars");
         info!(
             "COUNT test passed: {:?}",
             String::from_utf8_lossy(&response)
@@ -99,7 +118,7 @@ async fn test_basic_ask_correlation() {
         let request = b"Just a plain message";
         let response = conn.ask(request).await.unwrap();
         let expected = b"RECEIVED:20 bytes, content: 'Just a plain message'";
-        assert_eq!(response, expected);
+        assert_eq!(response.as_ref(), expected.as_slice());
         info!(
             "Default processing test passed: {:?}",
             String::from_utf8_lossy(&response)
@@ -197,8 +216,27 @@ async fn test_basic_ask_correlation() {
 }
 
 /// Test high throughput ask operations
-#[tokio::test]
-async fn test_ask_high_throughput() {
+#[test]
+fn test_ask_high_throughput() {
+    let handle = std::thread::Builder::new()
+        .name("ask-high-throughput".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(4 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            rt.block_on(async {
+                run_test_ask_high_throughput().await;
+            });
+        })
+        .expect("failed to spawn throughput test thread");
+    handle.join().expect("throughput test panicked");
+}
+
+async fn run_test_ask_high_throughput() {
     // Initialize tracing with less verbosity
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(

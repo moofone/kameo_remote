@@ -9,16 +9,17 @@
 
 use bytes::Bytes;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
+use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
-use kameo_remote::registry::{ActorMessageHandler, ActorMessageFuture};
 
 /// Helper to initialize tracing for tests
 fn init_tracing() {
@@ -58,6 +59,32 @@ struct AskTestHandler {
     payload_size: AtomicU32,
 }
 
+const STREAM_TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const STREAM_TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const STREAM_TEST_WORKERS: usize = 4;
+
+fn run_streaming_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("streaming-test-{}", name))
+        .stack_size(STREAM_TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(STREAM_TEST_WORKERS)
+                .thread_stack_size(STREAM_TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build streaming test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn streaming test thread");
+
+    handle.join().expect("streaming test panicked");
+}
+
 impl ActorMessageHandler for AskTestHandler {
     fn handle_actor_message(
         &self,
@@ -67,7 +94,8 @@ impl ActorMessageHandler for AskTestHandler {
         _correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_> {
         self.message_received.store(true, Ordering::SeqCst);
-        self.payload_size.store(payload.len() as u32, Ordering::SeqCst);
+        self.payload_size
+            .store(payload.len() as u32, Ordering::SeqCst);
 
         info!(
             "📨 AskTestHandler received {} bytes, sending response",
@@ -83,333 +111,354 @@ impl ActorMessageHandler for AskTestHandler {
 }
 
 /// Test streaming request with large payload (>1MB)
-#[tokio::test]
-async fn test_streaming_request_large_payload() {
-    init_tracing();
+#[test]
+fn test_streaming_request_large_payload() {
+    run_streaming_test("streaming-request-large", || async {
+        init_tracing();
 
-    let addr_a: SocketAddr = "127.0.0.1:7921".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7922".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:7921".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7922".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("stream_node_a");
-    let key_pair_b = KeyPair::new_for_testing("stream_node_b");
+        let key_pair_a = KeyPair::new_for_testing("stream_node_a");
+        let key_pair_b = KeyPair::new_for_testing("stream_node_b");
 
-    let peer_id_b = key_pair_b.peer_id();
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_b =
+            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+                .await
+                .unwrap();
 
-    // Set up actor message handler for ask tests
-    let handler = Arc::new(AskTestHandler {
-        message_received: AtomicBool::new(false),
-        payload_size: AtomicU32::new(0),
+        // Set up actor message handler for ask tests
+        let handler = Arc::new(AskTestHandler {
+            message_received: AtomicBool::new(false),
+            payload_size: AtomicU32::new(0),
+        });
+        handle_b
+            .registry
+            .set_actor_message_handler(handler)
+            .await;
+
+        // Connect nodes
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+
+        info!("Test: Streaming request with 2MB payload");
+
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
+
+        // Create 2MB payload (over the 1MB streaming threshold)
+        let payload_size = 2 * 1024 * 1024;
+        let payload = Bytes::from(create_test_payload(payload_size));
+
+        // Use ask_streaming_bytes for large payload
+        let response = conn
+            .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        // Default handler echoes back with "PROCESSED:" prefix
+        info!("Received response of {} bytes", response.len());
+
+        // Verify we got a response (exact format depends on handler)
+        assert!(!response.is_empty(), "Response should not be empty");
+
+        info!("✅ Streaming request test passed");
+
+        // Cleanup
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
     });
-    handle_b
-        .registry
-        .set_actor_message_handler(handler)
-        .await;
-
-    // Connect nodes
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
-
-    info!("Test: Streaming request with 2MB payload");
-
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
-
-    // Create 2MB payload (over the 1MB streaming threshold)
-    let payload_size = 2 * 1024 * 1024;
-    let payload = Bytes::from(create_test_payload(payload_size));
-
-    // Use ask_streaming_bytes for large payload
-    let response = conn
-        .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(30))
-        .await
-        .unwrap();
-
-    // Default handler echoes back with "PROCESSED:" prefix
-    info!(
-        "Received response of {} bytes",
-        response.len()
-    );
-
-    // Verify we got a response (exact format depends on handler)
-    assert!(!response.is_empty(), "Response should not be empty");
-
-    info!("✅ Streaming request test passed");
-
-    // Cleanup
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
 }
 
 /// Test zero-copy streaming request with Bytes
-#[tokio::test]
-async fn test_streaming_request_zero_copy() {
-    init_tracing();
+#[test]
+fn test_streaming_request_zero_copy() {
+    run_streaming_test("streaming-request-zero-copy", || async {
+        init_tracing();
 
-    let addr_a: SocketAddr = "127.0.0.1:7923".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7924".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:7923".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7924".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("zc_node_a");
-    let key_pair_b = KeyPair::new_for_testing("zc_node_b");
+        let key_pair_a = KeyPair::new_for_testing("zc_node_a");
+        let key_pair_b = KeyPair::new_for_testing("zc_node_b");
 
-    let peer_id_b = key_pair_b.peer_id();
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_b =
+            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+                .await
+                .unwrap();
 
-    // Set up actor message handler for ask tests
-    let handler = Arc::new(AskTestHandler {
-        message_received: AtomicBool::new(false),
-        payload_size: AtomicU32::new(0),
+        // Set up actor message handler for ask tests
+        let handler = Arc::new(AskTestHandler {
+            message_received: AtomicBool::new(false),
+            payload_size: AtomicU32::new(0),
+        });
+        handle_b
+            .registry
+            .set_actor_message_handler(handler)
+            .await;
+
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+
+        info!("Test: Zero-copy streaming request with ask_streaming_bytes");
+
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
+
+        // Create 1.5MB payload as Bytes (over threshold)
+        let payload_size = 1536 * 1024;
+        let payload = Bytes::from(create_test_payload(payload_size));
+
+        // Use ask_streaming_bytes for zero-copy
+        let response = conn
+            .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        info!(
+            "Received response of {} bytes via zero-copy path",
+            response.len()
+        );
+
+        assert!(!response.is_empty(), "Response should not be empty");
+
+        info!("✅ Zero-copy streaming request test passed");
+
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
     });
-    handle_b
-        .registry
-        .set_actor_message_handler(handler)
-        .await;
-
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
-
-    info!("Test: Zero-copy streaming request with ask_streaming_bytes");
-
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
-
-    // Create 1.5MB payload as Bytes (over threshold)
-    let payload_size = 1536 * 1024;
-    let payload = Bytes::from(create_test_payload(payload_size));
-
-    // Use ask_streaming_bytes for zero-copy
-    let response = conn
-        .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(30))
-        .await
-        .unwrap();
-
-    info!(
-        "Received response of {} bytes via zero-copy path",
-        response.len()
-    );
-
-    assert!(!response.is_empty(), "Response should not be empty");
-
-    info!("✅ Zero-copy streaming request test passed");
-
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
 }
 
 /// Test streaming response (large reply via auto-streaming)
-#[tokio::test]
-async fn test_streaming_response_auto() {
-    init_tracing();
+#[test]
+fn test_streaming_response_auto() {
+    run_streaming_test("streaming-response-auto", || async {
+        init_tracing();
 
-    let addr_a: SocketAddr = "127.0.0.1:7925".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7926".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:7925".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7926".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("resp_node_a");
-    let key_pair_b = KeyPair::new_for_testing("resp_node_b");
+        let key_pair_a = KeyPair::new_for_testing("resp_node_a");
+        let key_pair_b = KeyPair::new_for_testing("resp_node_b");
 
-    let peer_id_b = key_pair_b.peer_id();
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_b =
+            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+                .await
+                .unwrap();
 
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
 
-    info!("Test: Streaming response (large reply triggers auto-streaming)");
+        info!("Test: Streaming response (large reply triggers auto-streaming)");
 
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
-    // Send a request that triggers a large response
-    // The LARGE_RESPONSE command tells the handler to return a large payload
-    let request = b"LARGE_RESPONSE:2097152"; // Request 2MB response
+        // Send a request that triggers a large response
+        let request = b"LARGE_RESPONSE:2097152"; // Request 2MB response
 
-    let response = conn.ask(request).await.unwrap();
+        let response = conn.ask(request).await.unwrap();
 
-    info!(
-        "Received potentially streamed response of {} bytes",
-        response.len()
-    );
+        info!(
+            "Received potentially streamed response of {} bytes",
+            response.len()
+        );
 
-    // Note: This test verifies the protocol works, but the actual response
-    // depends on the default handler implementation
-    assert!(!response.is_empty(), "Response should not be empty");
+        assert!(!response.is_empty(), "Response should not be empty");
 
-    info!("✅ Streaming response test passed");
+        info!("✅ Streaming response test passed");
 
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    });
 }
 
 /// Test that small payloads use ring buffer (not streaming)
-#[tokio::test]
-async fn test_small_payload_uses_ring_buffer() {
-    init_tracing();
+#[test]
+fn test_small_payload_uses_ring_buffer() {
+    run_streaming_test("small-payload-ring-buffer", || async {
+        init_tracing();
 
-    let addr_a: SocketAddr = "127.0.0.1:7927".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7928".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:7927".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7928".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("small_node_a");
-    let key_pair_b = KeyPair::new_for_testing("small_node_b");
+        let key_pair_a = KeyPair::new_for_testing("small_node_a");
+        let key_pair_b = KeyPair::new_for_testing("small_node_b");
 
-    let peer_id_b = key_pair_b.peer_id();
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_b =
+            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+                .await
+                .unwrap();
 
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
 
-    info!("Test: Small payload (under threshold) uses ring buffer");
+        info!("Test: Small payload (under threshold) uses ring buffer");
 
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
-    // Small payload (1KB) - should NOT use streaming
-    let payload = create_test_payload(1024);
+        // Small payload (1KB) - should NOT use streaming
+        let payload = create_test_payload(1024);
 
-    let response = conn.ask(&payload).await.unwrap();
+        let response = conn.ask(&payload).await.unwrap();
 
-    info!(
-        "Received response of {} bytes via ring buffer path",
-        response.len()
-    );
+        info!(
+            "Received response of {} bytes via ring buffer path",
+            response.len()
+        );
 
-    assert!(!response.is_empty(), "Response should not be empty");
+        assert!(!response.is_empty(), "Response should not be empty");
 
-    info!("✅ Small payload ring buffer test passed");
+        info!("✅ Small payload ring buffer test passed");
 
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    });
 }
 
 /// Test streaming threshold boundary
-#[tokio::test]
-async fn test_streaming_threshold_boundary() {
-    init_tracing();
+#[test]
+fn test_streaming_threshold_boundary() {
+    run_streaming_test("streaming-threshold-boundary", || async {
+        init_tracing();
 
-    let addr_a: SocketAddr = "127.0.0.1:7929".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7930".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:7929".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7930".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("boundary_node_a");
-    let key_pair_b = KeyPair::new_for_testing("boundary_node_b");
+        let key_pair_a = KeyPair::new_for_testing("boundary_node_a");
+        let key_pair_b = KeyPair::new_for_testing("boundary_node_b");
 
-    let peer_id_b = key_pair_b.peer_id();
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_b =
+            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+                .await
+                .unwrap();
 
-    // Set up actor message handler for ask tests
-    let handler = Arc::new(AskTestHandler {
-        message_received: AtomicBool::new(false),
-        payload_size: AtomicU32::new(0),
+        let handler = Arc::new(AskTestHandler {
+            message_received: AtomicBool::new(false),
+            payload_size: AtomicU32::new(0),
+        });
+        handle_b
+            .registry
+            .set_actor_message_handler(handler)
+            .await;
+
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+
+        info!("Test: Streaming threshold boundary (exactly at threshold)");
+
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
+
+        let threshold = conn.streaming_threshold();
+        info!("Streaming threshold: {} bytes", threshold);
+
+        let payload_over_threshold = Bytes::from(create_test_payload(threshold + 100));
+        let response = conn
+            .ask_streaming_bytes(
+                payload_over_threshold.clone(),
+                0,
+                0,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(!response.is_empty(), "Response over threshold should work");
+        info!(
+            "✅ Payload over threshold ({} bytes) succeeded",
+            threshold + 100
+        );
+
+        let under_size = threshold.saturating_sub(100).max(100);
+        let payload_under_threshold = Bytes::from(create_test_payload(under_size));
+        let response = conn
+            .ask_streaming_bytes(
+                payload_under_threshold.clone(),
+                0,
+                0,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(!response.is_empty(), "Response under threshold should work");
+        info!(
+            "✅ Payload under threshold ({} bytes) succeeded",
+            payload_under_threshold.len()
+        );
+
+        info!("✅ Streaming threshold boundary test passed");
+
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
     });
-    handle_b
-        .registry
-        .set_actor_message_handler(handler)
-        .await;
-
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
-
-    info!("Test: Streaming threshold boundary (exactly at threshold)");
-
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
-
-    // Get the streaming threshold
-    let threshold = conn.streaming_threshold();
-    info!("Streaming threshold: {} bytes", threshold);
-
-    // Test payload just over threshold (should use streaming)
-    // Skip the exact threshold test for now due to edge case with conn.ask() not handling streaming responses
-    let payload_over_threshold = Bytes::from(create_test_payload(threshold + 100));
-    let response = conn
-        .ask_streaming_bytes(payload_over_threshold.clone(), 0, 0, Duration::from_secs(30))
-        .await
-        .unwrap();
-    assert!(!response.is_empty(), "Response over threshold should work");
-    info!("✅ Payload over threshold ({} bytes) succeeded", threshold + 100);
-
-    // Test small payload (under threshold, should use ring buffer)
-    // Use at least 100 bytes to ensure we have a valid payload
-    let under_size = threshold.saturating_sub(100).max(100);
-    let payload_under_threshold = Bytes::from(create_test_payload(under_size));
-    // Note: Using ask_streaming_bytes here instead of conn.ask() because conn.ask()
-    // has issues with bidirectional TLS connections (response sent on incoming connection
-    // but outgoing reader doesn't receive it properly). ask_streaming_bytes works correctly
-    // with the shared correlation tracker.
-    let response = conn
-        .ask_streaming_bytes(payload_under_threshold.clone(), 0, 0, Duration::from_secs(30))
-        .await
-        .unwrap();
-    assert!(!response.is_empty(), "Response under threshold should work");
-    info!("✅ Payload under threshold ({} bytes) succeeded", payload_under_threshold.len());
-
-    info!("✅ Streaming threshold boundary test passed");
-
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
 }
 
 /// Test multiple concurrent streaming requests
-#[tokio::test]
-async fn test_concurrent_streaming_requests() {
-    init_tracing();
+#[test]
+fn test_concurrent_streaming_requests() {
+    run_streaming_test("concurrent-streaming-requests", || async {
+        init_tracing();
 
     let addr_a: SocketAddr = "127.0.0.1:7931".parse().unwrap();
     let addr_b: SocketAddr = "127.0.0.1:7932".parse().unwrap();
@@ -441,10 +490,7 @@ async fn test_concurrent_streaming_requests() {
         message_received: AtomicBool::new(false),
         payload_size: AtomicU32::new(0),
     });
-    handle_b
-        .registry
-        .set_actor_message_handler(handler)
-        .await;
+    handle_b.registry.set_actor_message_handler(handler).await;
 
     info!("Test: Multiple concurrent streaming requests");
 
@@ -481,10 +527,11 @@ async fn test_concurrent_streaming_requests() {
         assert!(success, "Request {} should succeed", i);
     }
 
-    info!("✅ Concurrent streaming requests test passed");
+        info!("✅ Concurrent streaming requests test passed");
 
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    });
 }
 
 /// Test MessageType enum includes streaming response types
@@ -531,12 +578,13 @@ fn test_message_type_streaming_response_variants() {
 /// 1. Streaming tells with correlation_id = 0 are correctly routed to the handler
 /// 2. The handler receives `None` for correlation_id (not `Some(0)`)
 /// 3. No response is sent back on the wire (handler returns None, no send_streaming_response called)
-#[tokio::test]
-async fn test_streaming_tell_no_response() {
+#[test]
+fn test_streaming_tell_no_response() {
     use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    init_tracing();
+    run_streaming_test("streaming-tell-no-response", || async {
+        init_tracing();
 
     // Shared state to track handler invocations
     struct TellTestHandler {
@@ -554,8 +602,10 @@ async fn test_streaming_tell_no_response() {
             correlation_id: Option<u16>,
         ) -> ActorMessageFuture<'_> {
             self.message_received.store(true, Ordering::SeqCst);
-            self.correlation_was_none.store(correlation_id.is_none(), Ordering::SeqCst);
-            self.payload_size.store(payload.len() as u32, Ordering::SeqCst);
+            self.correlation_was_none
+                .store(correlation_id.is_none(), Ordering::SeqCst);
+            self.payload_size
+                .store(payload.len() as u32, Ordering::SeqCst);
 
             info!(
                 "📨 TellTestHandler received {} bytes, correlation_id={:?}",
@@ -619,7 +669,10 @@ async fn test_streaming_tell_no_response() {
     let test_actor_id: u64 = 12345;
 
     info!("📤 Sending {} byte streaming tell...", payload_size);
-    conn.connection.as_ref().unwrap().stream_large_message(&payload, test_type_hash, test_actor_id)
+    conn.connection
+        .as_ref()
+        .unwrap()
+        .stream_large_message(&payload, test_type_hash, test_actor_id)
         .await
         .expect("stream_large_message should succeed");
 
@@ -646,6 +699,7 @@ async fn test_streaming_tell_no_response() {
     info!("   - correlation_id was None: true (fire-and-forget)");
     info!("   - No response sent (tell semantics)");
 
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    });
 }

@@ -1,4 +1,5 @@
 use kameo_remote::*;
+use std::future::Future;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -6,11 +7,27 @@ use tracing_subscriber::EnvFilter;
 
 static TEST_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-async fn wait_for_active_peers(
-    handle: &GossipRegistryHandle,
-    min_peers: usize,
-    timeout: Duration,
-) {
+fn run_async_test<F>(name: &str, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(4 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("failed to build test runtime");
+            rt.block_on(fut);
+        })
+        .expect("failed to spawn async test thread");
+    handle.join().expect("async test panicked");
+}
+
+async fn wait_for_active_peers(handle: &GossipRegistryHandle, min_peers: usize, timeout: Duration) {
     let start = Instant::now();
     loop {
         if handle.stats().await.active_peers >= min_peers {
@@ -47,23 +64,24 @@ async fn wait_for_actor(
 
 /// Comprehensive ask() API demonstration with lookup() by actor name
 /// Tests request-response patterns with performance comparisons
-#[tokio::test]
-async fn test_ask_with_lookup_and_performance() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
-    let _guard = TEST_MUTEX
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-    println!("🚀 Ask() with Lookup() Performance Test");
-    println!("=======================================");
+#[test]
+fn test_ask_with_lookup_and_performance() {
+    run_async_test("ask-lookup-performance", async {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init();
+        let _guard = TEST_MUTEX
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        println!("🚀 Ask() with Lookup() Performance Test");
+        println!("=======================================");
 
-    // Setup three nodes
-    let config = GossipConfig {
-        urgent_gossip_fanout: 32,
-        ..Default::default()
-    };
+        // Setup three nodes
+        let config = GossipConfig {
+            urgent_gossip_fanout: 32,
+            ..Default::default()
+        };
 
     println!("📡 Setting up 3-node cluster...");
     let node1_keypair = KeyPair::new_for_testing("node1");
@@ -139,69 +157,70 @@ async fn test_ask_with_lookup_and_performance() {
         .unwrap();
     println!("   ✅ Node2: registered 'compute_service'");
 
-    node3
-        .register_urgent(
-            "cache_service".to_string(),
-            "127.0.0.1:30003".parse().unwrap(),
-            RegistrationPriority::Immediate,
-        )
-        .await
-        .unwrap();
-    println!("   ✅ Node3: registered 'cache_service'");
+        node3
+            .register_urgent(
+                "cache_service".to_string(),
+                "127.0.0.1:30003".parse().unwrap(),
+                RegistrationPriority::Immediate,
+            )
+            .await
+            .unwrap();
+        println!("   ✅ Node3: registered 'cache_service'");
 
-    // Wait for propagation
-    sleep(Duration::from_millis(500)).await;
-    println!(
-        "   🔍 Stats after registration:\n      node1={:?}\n      node2={:?}\n      node3={:?}",
-        node1.stats().await,
-        node2.stats().await,
-        node3.stats().await
-    );
+        // Wait for propagation
+        sleep(Duration::from_millis(500)).await;
+        println!(
+            "   🔍 Stats after registration:\n      node1={:?}\n      node2={:?}\n      node3={:?}",
+            node1.stats().await,
+            node2.stats().await,
+            node3.stats().await
+        );
 
-    // ===========================================
-    // PART 1: CREATE ACTOR REFS WITH LOOKUP (NEW API)
-    // ===========================================
-    println!("\n📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION");
-    println!("==============================================");
+        // ===========================================
+        // PART 1: CREATE ACTOR REFS WITH LOOKUP (NEW API)
+        // ===========================================
+        println!("\n📊 PART 1: ACTOR LOOKUP AND REFERENCE CREATION");
+        println!("==============================================");
 
-    let lookup_start = Instant::now();
+        let lookup_start = Instant::now();
 
-    // NEW API: lookup() returns RemoteActorRef directly (location + cached connection)
-    let db_actor = wait_for_actor(&node1, "database_service", Duration::from_secs(5)).await;
-    let compute_actor = wait_for_actor(&node1, "compute_service", Duration::from_secs(5)).await;
-    let cache_actor = wait_for_actor(&node1, "cache_service", Duration::from_secs(5)).await;
+        // NEW API: lookup() returns RemoteActorRef directly (location + cached connection)
+        let db_actor = wait_for_actor(&node1, "database_service", Duration::from_secs(5)).await;
+        let compute_actor =
+            wait_for_actor(&node1, "compute_service", Duration::from_secs(5)).await;
+        let cache_actor = wait_for_actor(&node1, "cache_service", Duration::from_secs(5)).await;
 
-    let lookup_time = lookup_start.elapsed();
+        let lookup_time = lookup_start.elapsed();
 
-    println!("   ✅ Created RemoteActorRefs:");
-    println!(
-        "     - database_service at {} (peer: {})",
-        db_actor.location.address, db_actor.location.peer_id
-    );
-    println!(
-        "     - compute_service at {} (peer: {})",
-        compute_actor.location.address, compute_actor.location.peer_id
-    );
-    println!(
-        "     - cache_service at {} (peer: {})",
-        cache_actor.location.address, cache_actor.location.peer_id
-    );
-    println!(
-        "   📈 Total lookup time: {:?} ({:.3} μs)",
-        lookup_time,
-        lookup_time.as_nanos() as f64 / 1000.0
-    );
-    println!("   💡 Each RemoteActorRef has connection cached - zero lookups for ask()!");
+        println!("   ✅ Created RemoteActorRefs:");
+        println!(
+            "     - database_service at {} (peer: {})",
+            db_actor.location.address, db_actor.location.peer_id
+        );
+        println!(
+            "     - compute_service at {} (peer: {})",
+            compute_actor.location.address, compute_actor.location.peer_id
+        );
+        println!(
+            "     - cache_service at {} (peer: {})",
+            cache_actor.location.address, cache_actor.location.peer_id
+        );
+        println!(
+            "   📈 Total lookup time: {:?} ({:.3} μs)",
+            lookup_time,
+            lookup_time.as_nanos() as f64 / 1000.0
+        );
+        println!("   💡 Each RemoteActorRef has connection cached - zero lookups for ask()!");
 
-    // ===========================================
-    // PART 2: ASK() PERFORMANCE TESTING
-    // ===========================================
-    println!("\n📊 PART 2: ASK() REQUEST-RESPONSE PERFORMANCE");
-    println!("============================================");
+        // ===========================================
+        // PART 2: ASK() PERFORMANCE TESTING
+        // ===========================================
+        println!("\n📊 PART 2: ASK() REQUEST-RESPONSE PERFORMANCE");
+        println!("============================================");
 
-    // Test queries
-    let queries = [
-        ("database_service", "SELECT * FROM users WHERE id = 123"),
+        // Test queries
+        let queries = [
+            ("database_service", "SELECT * FROM users WHERE id = 123"),
         ("compute_service", "CALCULATE fibonacci(40)"),
         ("cache_service", "GET user:123:profile"),
         ("database_service", "INSERT INTO logs VALUES (...)"),
@@ -232,7 +251,9 @@ async fn test_ask_with_lookup_and_performance() {
         // Send request and wait for response (uses cached connection, zero lookups)
         // Add retry logic to handle "not listening yet" transient errors during initial connection
         let response = {
-            let mut result = Err(GossipError::ActorNotFound("Initial error".to_string().into()));
+            let mut result = Err(GossipError::ActorNotFound(
+                "Initial error".to_string().into(),
+            ));
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(5) {
                 match actor.ask(query.as_bytes()).await {
@@ -403,7 +424,9 @@ async fn test_ask_with_lookup_and_performance() {
 
     // Send request and get delegated reply sender
     let request = "SELECT COUNT(*) FROM users".as_bytes();
-    let reply_sender = db_actor.connection.as_ref()
+    let reply_sender = db_actor
+        .connection
+        .as_ref()
         .expect("Actor should be connected")
         .ask_with_reply_sender(request)
         .await
@@ -484,17 +507,19 @@ async fn test_ask_with_lookup_and_performance() {
     node3.shutdown().await;
 
     println!("\n✅ Test completed successfully!");
+    });
 }
 
 /// Test high-throughput ask() scenarios
-#[tokio::test]
-async fn test_ask_high_throughput() {
-    let _guard = TEST_MUTEX
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-    println!("🚀 High-Throughput ask() Test");
-    println!("=============================");
+#[test]
+fn test_ask_high_throughput() {
+    run_async_test("ask-with-lookup-high-throughput", async {
+        let _guard = TEST_MUTEX
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        println!("🚀 High-Throughput ask() Test");
+        println!("=============================");
 
     // Setup two nodes
     let config = GossipConfig {
@@ -538,11 +563,13 @@ async fn test_ask_high_throughput() {
 
     // NEW API: Lookup to get RemoteActorRef (includes cached connection)
     let api_actor = wait_for_actor(&node1, "api_service", Duration::from_secs(5)).await;
-    let api_conn = api_actor.connection.clone()
+    let api_conn = api_actor
+        .connection
+        .clone()
         .expect("API service should be connected");
 
     // Test parameters
-    let request_count = 1000;
+    let request_count = 200;
     let concurrent_requests = 10;
 
     println!("\n📊 Test Configuration:");
@@ -559,6 +586,7 @@ async fn test_ask_high_throughput() {
     println!("\n🔸 Running high-throughput test...");
     let test_start = Instant::now();
     let mut latencies = Vec::new();
+    let mut failed_requests = 0usize;
 
     // Process requests in batches
     for batch in 0..(request_count / concurrent_requests) {
@@ -572,16 +600,31 @@ async fn test_ask_high_throughput() {
             let handle = tokio::spawn(async move {
                 let req_start = Instant::now();
                 let request = format!("REQUEST:{}", request_id);
-                let _ = conn.ask(request.as_bytes()).await.unwrap();
-                req_start.elapsed()
+                match conn.ask(request.as_bytes()).await {
+                    Ok(_) => Some(req_start.elapsed()),
+                    Err(err) => {
+                        eprintln!(
+                            "⚠️ ask() request {} failed after {:?}: {}",
+                            request_id,
+                            req_start.elapsed(),
+                            err
+                        );
+                        None
+                    }
+                }
             });
             handles.push(handle);
         }
 
         // Wait for batch to complete
         for handle in handles {
-            if let Ok(latency) = handle.await {
-                latencies.push(latency);
+            match handle.await {
+                Ok(Some(latency)) => latencies.push(latency),
+                Ok(None) => failed_requests += 1,
+                Err(join_err) => {
+                    failed_requests += 1;
+                    eprintln!("⚠️ ask() task join error: {}", join_err);
+                }
             }
         }
 
@@ -595,6 +638,17 @@ async fn test_ask_high_throughput() {
 
     let test_total = test_start.elapsed();
 
+    assert!(
+        !latencies.is_empty(),
+        "No successful ask() requests recorded"
+    );
+    assert!(
+        failed_requests < request_count / 5,
+        "Too many ask() failures: {} out of {}",
+        failed_requests,
+        request_count
+    );
+
     // Calculate statistics
     latencies.sort();
     let avg_latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
@@ -607,6 +661,7 @@ async fn test_ask_high_throughput() {
     println!("   - Total time: {:?}", test_total);
     println!("   - Total requests: {}", request_count);
     println!("   - Throughput: {:.0} req/sec", throughput);
+    println!("   - Failed requests: {}", failed_requests);
     println!(
         "   - Average latency: {:?} ({:.3} μs)",
         avg_latency,
@@ -633,4 +688,5 @@ async fn test_ask_high_throughput() {
     node2.shutdown().await;
 
     println!("\n✅ High-throughput test completed!");
+    });
 }

@@ -1,9 +1,30 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
+
+fn run_async_test<F>(name: &str, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(4 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            rt.block_on(fut);
+        })
+        .expect("failed to spawn lifecycle test thread");
+    handle.join().expect("lifecycle test panicked");
+}
 
 /// Test that connection mappings remain valid after multiple gossip rounds.
 ///
@@ -13,13 +34,14 @@ use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
 ///
 /// The key aspect tested is that get_connection() continues to work after many gossip
 /// rounds, which requires the address mappings to remain consistent.
-#[tokio::test]
-async fn test_connection_survives_multiple_gossip_rounds() {
-    // Initialize tracing
-    let _ = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(
-            EnvFilter::from_default_env().add_directive("kameo_remote=info".parse().unwrap()),
-        ))
+#[test]
+fn test_connection_survives_multiple_gossip_rounds() {
+    run_async_test("connection-lifecycle-gossip", async {
+        // Initialize tracing
+        let _ = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(
+                EnvFilter::from_default_env().add_directive("kameo_remote=info".parse().unwrap()),
+            ))
         .try_init();
 
     // Create two nodes with SHORT gossip interval to trigger many rounds quickly
@@ -53,13 +75,19 @@ async fn test_connection_survives_multiple_gossip_rounds() {
 
     // Connect A -> B (single direction is sufficient for this test)
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.expect("Failed to connect A -> B");
+    peer_b
+        .connect(&addr_b)
+        .await
+        .expect("Failed to connect A -> B");
 
     // Wait for connection to stabilize
     sleep(Duration::from_millis(200)).await;
 
     // Initial verification - connection should be available
-    handle_a.lookup_address(addr_b).await.expect("Initial connection failed");
+    handle_a
+        .lookup_address(addr_b)
+        .await
+        .expect("Initial connection failed");
     info!("Initial connection established");
 
     // Wait for multiple gossip rounds (which trigger FullSync/FullSyncResponse)
@@ -71,27 +99,31 @@ async fn test_connection_survives_multiple_gossip_rounds() {
     // After many gossip rounds, connection should STILL be available
     // This is the critical test - without the fix, get_connection would fail
     // because the address mappings would be corrupted
-    handle_a.lookup_address(addr_b).await
+    handle_a
+        .lookup_address(addr_b)
+        .await
         .expect("Connection should still be available after gossip rounds - fix verified!");
 
-    info!("Connection still available after gossip rounds - PASS");
+        info!("Connection still available after gossip rounds - PASS");
 
-    // Cleanup
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        // Cleanup
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    });
 }
 
 /// Test that addr_to_peer_id mappings are preserved after reindexing
 ///
 /// This specifically tests the fix for the bug where FullSync removes
 /// the ephemeral address mapping before reindex, causing orphaned entries.
-#[tokio::test]
-async fn test_addr_mappings_preserved_after_fullsync() {
-    let _ = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(
-            EnvFilter::from_default_env().add_directive("kameo_remote=debug".parse().unwrap()),
-        ))
-        .try_init();
+#[test]
+fn test_addr_mappings_preserved_after_fullsync() {
+    run_async_test("connection-lifecycle-fullsync", async {
+        let _ = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(
+                EnvFilter::from_default_env().add_directive("kameo_remote=debug".parse().unwrap()),
+            ))
+            .try_init();
 
     let addr_a: SocketAddr = "127.0.0.1:7930".parse().unwrap();
     let addr_b: SocketAddr = "127.0.0.1:7924".parse().unwrap();
@@ -127,9 +159,12 @@ async fn test_addr_mappings_preserved_after_fullsync() {
     sleep(Duration::from_millis(500)).await;
 
     // Verify initial state
-    let conn = handle_a.lookup_address(addr_b).await.expect("Initial connection");
+    let conn = handle_a
+        .lookup_address(addr_b)
+        .await
+        .expect("Initial connection");
     let response = conn.ask(b"ECHO:test").await.expect("Initial ask");
-    assert_eq!(response, b"ECHOED:test");
+    assert_eq!(response.as_ref(), b"ECHOED:test");
 
     // Now let many gossip rounds happen
     for round in 0..20 {
@@ -146,12 +181,18 @@ async fn test_addr_mappings_preserved_after_fullsync() {
                         info!("Round {} message delivered successfully", round);
                     }
                     Err(e) => {
-                        panic!("Round {} ask failed: {} - address mappings likely corrupted!", round, e);
+                        panic!(
+                            "Round {} ask failed: {} - address mappings likely corrupted!",
+                            round, e
+                        );
                     }
                 }
             }
             Err(e) => {
-                panic!("Round {} connection lost: {} - address mappings corrupted!", round, e);
+                panic!(
+                    "Round {} connection lost: {} - address mappings corrupted!",
+                    round, e
+                );
             }
         }
     }
@@ -160,6 +201,7 @@ async fn test_addr_mappings_preserved_after_fullsync() {
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;
+    });
 }
 
 /// Test rapid reconnection doesn't leave orphaned address entries.
@@ -167,13 +209,15 @@ async fn test_addr_mappings_preserved_after_fullsync() {
 /// This test verifies that after a node disconnects and a new node binds to the
 /// same address, the connection mappings are correctly updated without orphaned
 /// entries that would prevent proper routing.
-#[tokio::test]
-async fn test_reconnect_cleanup() {
-    let _ = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(
-            EnvFilter::from_default_env().add_directive("kameo_remote=info".parse().unwrap()),
-        ))
-        .try_init();
+#[test]
+fn test_reconnect_cleanup() {
+    run_async_test("connection-lifecycle-reconnect", async {
+        let _ = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(
+                EnvFilter::from_default_env()
+                    .add_directive("kameo_remote=info".parse().unwrap()),
+            ))
+            .try_init();
 
     let addr_a: SocketAddr = "127.0.0.1:7935".parse().unwrap();
     let addr_b: SocketAddr = "127.0.0.1:7936".parse().unwrap();
@@ -203,7 +247,10 @@ async fn test_reconnect_cleanup() {
     sleep(Duration::from_millis(200)).await;
 
     // Verify initial connection available
-    handle_a.lookup_address(addr_b).await.expect("Initial connection should work");
+    handle_a
+        .lookup_address(addr_b)
+        .await
+        .expect("Initial connection should work");
     info!("Initial connection established");
 
     // Disconnect by shutting down B
@@ -224,7 +271,7 @@ async fn test_reconnect_cleanup() {
         Some(GossipConfig {
             gossip_interval: Duration::from_secs(300),
             ..Default::default()
-        })
+        }),
     )
     .await
     .unwrap();
@@ -237,11 +284,14 @@ async fn test_reconnect_cleanup() {
 
     // The critical test: verify get_connection works for the NEW peer
     // This would fail if old address mappings weren't cleaned up properly
-    handle_a.lookup_address(addr_b).await
+    handle_a
+        .lookup_address(addr_b)
+        .await
         .expect("Reconnection should work - address mappings correctly updated");
 
-    info!("Reconnection successful - no orphaned address entries");
+        info!("Reconnection successful - no orphaned address entries");
 
-    handle_a.shutdown().await;
-    handle_b2.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b2.shutdown().await;
+    });
 }

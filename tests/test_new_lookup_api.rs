@@ -6,12 +6,39 @@
 //! - The old API (get_connection()) is NOT accessible from the Kameo layer
 
 use kameo_remote::*;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::time::sleep;
 
-#[tokio::test]
-async fn test_new_lookup_api_returns_actor_ref() {
+const LOOKUP_API_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const LOOKUP_API_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const LOOKUP_API_WORKERS: usize = 4;
+
+fn run_lookup_api_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("new-lookup-test-{}", name))
+        .stack_size(LOOKUP_API_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(LOOKUP_API_WORKERS)
+                .thread_stack_size(LOOKUP_API_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build lookup API test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn lookup API test thread");
+
+    handle.join().expect("lookup API test panicked");
+}
+
+async fn test_new_lookup_api_returns_actor_ref_inner() {
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
         ..Default::default()
@@ -39,9 +66,7 @@ async fn test_new_lookup_api_returns_actor_ref() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register an actor on node B
@@ -60,13 +85,22 @@ async fn test_new_lookup_api_returns_actor_ref() {
     // NEW API: lookup() returns RemoteActorRef
     // ========================================
     let remote_actor = handle_a.lookup("test_service").await;
-    assert!(remote_actor.is_some(), "lookup() should return Some(RemoteActorRef)");
+    assert!(
+        remote_actor.is_some(),
+        "lookup() should return Some(RemoteActorRef)"
+    );
 
     let remote_actor = remote_actor.unwrap();
 
     // Verify RemoteActorRef has both location and connection
-    println!("✅ RemoteActorRef.location.address: {}", remote_actor.location.address);
-    println!("✅ RemoteActorRef.location.peer_id: {}", remote_actor.location.peer_id);
+    println!(
+        "✅ RemoteActorRef.location.address: {}",
+        remote_actor.location.address
+    );
+    println!(
+        "✅ RemoteActorRef.location.peer_id: {}",
+        remote_actor.location.peer_id
+    );
     if let Some(conn) = &remote_actor.connection {
         println!("✅ RemoteActorRef.connection.addr: {}", conn.addr);
     } else {
@@ -116,8 +150,14 @@ async fn test_new_lookup_api_returns_actor_ref() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_old_api_not_accessible() {
+#[test]
+fn test_new_lookup_api_returns_actor_ref() {
+    run_lookup_api_test("returns-actor-ref", || {
+        test_new_lookup_api_returns_actor_ref_inner()
+    });
+}
+
+async fn test_old_api_not_accessible_inner() {
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
         ..Default::default()
@@ -145,9 +185,7 @@ async fn test_old_api_not_accessible() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
@@ -180,8 +218,14 @@ async fn test_old_api_not_accessible() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_multiple_lookups_return_different_refs() {
+#[test]
+fn test_old_api_not_accessible() {
+    run_lookup_api_test("old-api-not-accessible", || {
+        test_old_api_not_accessible_inner()
+    });
+}
+
+async fn test_multiple_lookups_return_different_refs_inner() {
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
         ..Default::default()
@@ -208,9 +252,7 @@ async fn test_multiple_lookups_return_different_refs() {
     .unwrap();
 
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor
@@ -262,8 +304,14 @@ async fn test_multiple_lookups_return_different_refs() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_lookup_caches_connection_for_zero_lookup_sending() {
+#[test]
+fn test_multiple_lookups_return_different_refs() {
+    run_lookup_api_test("multiple-lookups", || {
+        test_multiple_lookups_return_different_refs_inner()
+    });
+}
+
+async fn test_lookup_caches_connection_for_zero_lookup_sending_inner() {
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
         ..Default::default()
@@ -290,9 +338,7 @@ async fn test_lookup_caches_connection_for_zero_lookup_sending() {
     .unwrap();
 
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     handle_b
@@ -324,4 +370,11 @@ async fn test_lookup_caches_connection_for_zero_lookup_sending() {
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;
+}
+
+#[test]
+fn test_lookup_caches_connection_for_zero_lookup_sending() {
+    run_lookup_api_test("lookup-caches-connection", || {
+        test_lookup_caches_connection_for_zero_lookup_sending_inner()
+    });
 }

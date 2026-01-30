@@ -1,7 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
-use futures::future::BoxFuture;
-use futures::stream::{FuturesUnordered, StreamExt};
+
 use kameo_remote::registry::RegistryMessage;
 use kameo_remote::{wire_type, GossipConfig, GossipRegistryHandle, NodeId, SecretKey};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -9,7 +8,9 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::task::JoinSet;
 
 struct CountingAlloc;
 
@@ -51,7 +52,7 @@ static GLOBAL: CountingAlloc = CountingAlloc;
 /// Console tell/ask client (TLS).
 ///
 /// Usage:
-///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub [tell_count] [ask_count] [ask_concurrency] [--typed]
+///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub [tell_count] [ask_count] [ask_concurrency] [--typed] [--direct]
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -69,6 +70,8 @@ async fn main() -> Result<()> {
     let ask_count: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(100);
     let ask_concurrency: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(50);
     let run_typed = args.iter().any(|arg| arg == "--typed");
+    let use_direct = args.iter().any(|arg| arg == "--direct");
+    let use_direct_timeout = args.iter().any(|arg| arg == "--direct-timeout");
 
     println!("🔐 Console Tell/Ask Client (TLS)");
     println!("================================\n");
@@ -84,12 +87,12 @@ async fn main() -> Result<()> {
     println!("Client NodeId: {}", client_node_id.fmt_short());
     println!("Client key: {}\n", client_key_path);
 
-    let registry = GossipRegistryHandle::new_with_tls(
-        "0.0.0.0:0".parse()?,
-        client_secret,
-        Some(GossipConfig::default()),
-    )
-    .await?;
+    let mut config = GossipConfig::default();
+    config.ask_inflight_limit = ask_concurrency.max(1);
+    let registry =
+        GossipRegistryHandle::new_with_tls("0.0.0.0:0".parse()?, client_secret, Some(config))
+            .await?;
+    let ask_timeout = registry.registry.config.response_timeout;
 
     let server_addr = "127.0.0.1:29200".parse()?;
     registry
@@ -131,7 +134,27 @@ async fn main() -> Result<()> {
         &ask_msg,
         Vec::new(),
     )?);
-    let response = conn.ask(&ask_bytes).await?;
+
+    let response = if use_direct {
+        // DirectAsk fast path: bypass RegistryMessage overhead
+        let payload = Bytes::from(b"ask:ping".to_vec());
+        if use_direct_timeout {
+            conn.connection_ref()
+                .unwrap()
+                .ask_direct(payload, ask_timeout)
+                .await?
+                .to_vec()
+        } else {
+            conn.connection_ref()
+                .unwrap()
+                .ask_direct_no_timeout(payload)
+                .await?
+                .to_vec()
+        }
+    } else {
+        // Regular ask through RegistryMessage (slow path)
+        conn.ask(&ask_bytes).await?.to_vec()
+    };
 
     println!("✅ Ask response: {:?}", String::from_utf8_lossy(&response));
 
@@ -180,41 +203,90 @@ async fn main() -> Result<()> {
     }
 
     if ask_count > 0 {
+        let ask_label = if use_direct {
+            if use_direct_timeout {
+                " [DirectAsk TIMEOUT]"
+            } else {
+                " [DirectAsk FAST PATH]"
+            }
+        } else {
+            " [RegistryMessage SLOW PATH]"
+        };
         println!(
-            "\n🔸 Ask benchmark (count = {}, concurrency = {})",
-            ask_count, ask_concurrency
+            "\n🔸 Ask benchmark (count = {}, workers = {}){}",
+            ask_count, ask_concurrency, ask_label
         );
-        let before = alloc_snapshot();
-        let ask_payload = ask_bytes.clone();
-        let mut in_flight: FuturesUnordered<BoxFuture<'static, Result<Duration, anyhow::Error>>> =
-            FuturesUnordered::new();
-        let ask_start = Instant::now();
-        let mut remaining = ask_count;
+        let ask_payload = if use_direct {
+            Bytes::from(b"ask:ping".to_vec())
+        } else {
+            ask_bytes.clone()
+        };
 
-        let initial = ask_concurrency.min(remaining);
-        for _ in 0..initial {
+        // CONCURRENT WORKERS (one in-flight per worker) without per-request task allocations.
+        let worker_count = ask_concurrency.min(ask_count).max(1);
+        let per_worker = ask_count / worker_count;
+        let remainder = ask_count % worker_count;
+        let barrier = Arc::new(tokio::sync::Barrier::new(worker_count + 1));
+        let mut join_set = JoinSet::new();
+        for i in 0..worker_count {
+            let count = per_worker + if i < remainder { 1 } else { 0 };
             let conn_clone = conn.clone();
             let payload = ask_payload.clone();
-            in_flight.push(Box::pin(async move {
-                let start = Instant::now();
-                let _ = conn_clone.ask(&payload).await?;
-                Ok::<Duration, anyhow::Error>(start.elapsed())
-            }));
-            remaining -= 1;
+            let use_direct_clone = use_direct;
+            let use_direct_timeout_clone = use_direct_timeout;
+            let ask_timeout_clone = ask_timeout;
+            let barrier_clone = barrier.clone();
+            join_set.spawn(async move {
+                barrier_clone.wait().await;
+                let mut latencies = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let start = Instant::now();
+                    if use_direct_clone {
+                        if use_direct_timeout_clone {
+                            let _ = conn_clone
+                                .connection_ref()
+                                .unwrap()
+                                .ask_direct(payload.clone(), ask_timeout_clone)
+                                .await?;
+                        } else {
+                            let _ = conn_clone
+                                .connection_ref()
+                                .unwrap()
+                                .ask_direct_no_timeout(payload.clone())
+                                .await?;
+                        }
+                    } else {
+                        let _ = conn_clone.ask(&payload).await?;
+                    }
+                    latencies.push(start.elapsed());
+                }
+                Ok::<Vec<Duration>, anyhow::Error>(latencies)
+            });
         }
 
+        // Snapshot allocations after worker tasks are spawned to exclude harness setup.
+        let before = alloc_snapshot();
+        let ask_start = Instant::now();
+        barrier.wait().await;
+
         let mut ask_latencies = Vec::with_capacity(ask_count);
-        while let Some(result) = in_flight.next().await {
-            ask_latencies.push(result?);
-            if remaining > 0 {
-                let conn_clone = conn.clone();
-                let payload = ask_payload.clone();
-                in_flight.push(Box::pin(async move {
-                    let start = Instant::now();
-                    let _ = conn_clone.ask(&payload).await?;
-                    Ok::<Duration, anyhow::Error>(start.elapsed())
-                }));
-                remaining -= 1;
+        let bench_timeout = Duration::from_secs(10);
+        let join_result = tokio::time::timeout(bench_timeout, async {
+            while let Some(result) = join_set.join_next().await {
+                ask_latencies.extend(result??);
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "ask benchmark timed out after {}s",
+                    bench_timeout.as_secs()
+                ))
             }
         }
 

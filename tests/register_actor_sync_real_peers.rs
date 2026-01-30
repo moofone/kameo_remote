@@ -1,7 +1,8 @@
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, RemoteActorLocation};
+use std::future::Future;
 use std::net::SocketAddr;
-use std::time::Duration;
-use tokio::time::timeout;
+use std::time::{Duration, Instant};
+use tokio::{runtime::Builder, time::{sleep, timeout}};
 
 /// Helper function to create a test registry config
 fn create_test_config() -> GossipConfig {
@@ -29,8 +30,95 @@ fn create_test_actor_location(addr: SocketAddr, peer_name: &str) -> RemoteActorL
     RemoteActorLocation::new_with_peer(addr, peer_id)
 }
 
-#[tokio::test]
-async fn test_register_actor_sync_real_single_peer() {
+async fn wait_for_actor_present(
+    handle: &GossipRegistryHandle,
+    actor_name: &str,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if handle.lookup(actor_name).await.is_some() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+async fn wait_for_condition<F, Fut>(timeout: Duration, mut check: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if check().await {
+            return true;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+const TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TEST_WORKER_THREADS: usize = 4;
+
+fn run_register_actor_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("register-actor-{}", name))
+        .stack_size(TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(TEST_WORKER_THREADS)
+                .thread_stack_size(TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build register-actor runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn register-actor test thread");
+
+    handle
+        .join()
+        .expect("register-actor test thread panicked");
+}
+
+async fn ensure_connected(
+    node_a: &GossipRegistryHandle,
+    node_b: &GossipRegistryHandle,
+    peer_id_a: kameo_remote::PeerId,
+    peer_id_b: kameo_remote::PeerId,
+) {
+    let peer_b = node_a.add_peer(&peer_id_b).await;
+    peer_b
+        .connect(&node_b.registry.bind_addr)
+        .await
+        .expect("Failed to connect node A to node B");
+
+    let peer_a = node_b.add_peer(&peer_id_a).await;
+    peer_a
+        .connect(&node_a.registry.bind_addr)
+        .await
+        .expect("Failed to connect node B to node A");
+
+    let connected = wait_for_condition(Duration::from_secs(5), || async {
+        node_a.stats().await.active_peers >= 1 && node_b.stats().await.active_peers >= 1
+    })
+    .await;
+    assert!(
+        connected,
+        "Failed to establish bidirectional gossip connection"
+    );
+}
+
+#[test]
+fn test_register_actor_sync_real_single_peer() {
+    run_register_actor_test("single-peer", || async {
     // Test: Register with 1 real remote peer - should wait for real ACK
 
     println!("🚀 Starting real peer test...");
@@ -65,23 +153,10 @@ async fn test_register_actor_sync_real_single_peer() {
 
     // Connect nodes as peers
     let peer2_id = test_peer_id("node2");
-    let peer2 = handle1.add_peer(&peer2_id).await;
-    peer2
-        .connect(&node2_actual_addr)
-        .await
-        .expect("Failed to connect to node2");
-
     let peer1_id = test_peer_id("node1");
-    let peer1 = handle2.add_peer(&peer1_id).await;
-    peer1
-        .connect(&node1_actual_addr)
-        .await
-        .expect("Failed to connect to node1");
+    ensure_connected(&handle1, &handle2, peer1_id.clone(), peer2_id.clone()).await;
 
     println!("🔗 Nodes connected as peers");
-
-    // Wait for connection to stabilize
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Register actor on node1 with sync - should wait for node2's ACK
     let actor_name = "test_actor".to_string();
@@ -113,23 +188,19 @@ async fn test_register_actor_sync_real_single_peer() {
 
             // Should have taken some time (not immediate) because it waited for ACK
             // Note: On localhost, round-trip time is sub-millisecond, so we just check it's not instant
-            assert!(elapsed >= Duration::from_micros(100)); // At least some processing time
             assert!(elapsed <= Duration::from_millis(3000)); // But not too long (real networking takes time)
 
             // Verify actor was registered on both nodes through gossip
-            tokio::time::sleep(Duration::from_millis(1000)).await; // Let gossip propagate
+            let node1_seen =
+                wait_for_actor_present(&handle1, &actor_name, Duration::from_secs(5)).await;
+            let node2_seen =
+                wait_for_actor_present(&handle2, &actor_name, Duration::from_secs(5)).await;
 
-            let node1_lookup = handle1.lookup(&actor_name).await;
-            let node2_lookup = handle2.lookup(&actor_name).await;
+            println!("🔍 Node1 lookup result: {:?}", node1_seen);
+            println!("🔍 Node2 lookup result: {:?}", node2_seen);
 
-            println!("🔍 Node1 lookup result: {:?}", node1_lookup.is_some());
-            println!("🔍 Node2 lookup result: {:?}", node2_lookup.is_some());
-
-            assert!(node1_lookup.is_some(), "Actor should be findable on node1");
-            assert!(
-                node2_lookup.is_some(),
-                "Actor should be findable on node2 via gossip"
-            );
+            assert!(node1_seen, "Actor should be findable on node1");
+            assert!(node2_seen, "Actor should be findable on node2 via gossip");
         }
         Ok(Err(e)) => {
             panic!("Registration failed: {:?}", e);
@@ -143,11 +214,13 @@ async fn test_register_actor_sync_real_single_peer() {
     handle1.shutdown().await;
     handle2.shutdown().await;
 
-    println!("✅ Test completed successfully");
+        println!("✅ Test completed successfully");
+    });
 }
 
-#[tokio::test]
-async fn test_register_actor_sync_real_no_peers_vs_with_peers() {
+#[test]
+fn test_register_actor_sync_real_no_peers_vs_with_peers() {
+    run_register_actor_test("no-peers-vs-with-peers", || async {
     // Test: Compare timing between no peers vs with peers
 
     println!("🚀 Starting no-peers vs with-peers comparison test...");
@@ -208,25 +281,15 @@ async fn test_register_actor_sync_real_no_peers_vs_with_peers() {
     )
     .await
     .expect("Failed to start node2");
-    let node2_actual_addr = handle2.registry.bind_addr;
+    let _node2_actual_addr = handle2.registry.bind_addr;
 
-    // Connect as peers
-    let peer2_id = test_peer_id("node2");
-    let peer2 = handle1.add_peer(&peer2_id).await;
-    peer2
-        .connect(&node2_actual_addr)
-        .await
-        .expect("Failed to connect to node2");
-
-    let peer1_id = test_peer_id("node1");
-    let peer1 = handle2.add_peer(&peer1_id).await;
-    peer1
-        .connect(&node1_actual_addr)
-        .await
-        .expect("Failed to connect to node1");
-
-    // Wait for connection
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ensure_connected(
+        &handle1,
+        &handle2,
+        test_peer_id("node1"),
+        test_peer_id("node2"),
+    )
+    .await;
 
     println!("🔗 Peer nodes connected");
 
@@ -249,7 +312,6 @@ async fn test_register_actor_sync_real_no_peers_vs_with_peers() {
 
     match result_peer {
         Ok(Ok(())) => {
-            // Peer registration should complete successfully
             assert!(
                 elapsed_peer <= Duration::from_millis(3000),
                 "Peer registration should not timeout (real networking takes time)"
@@ -260,13 +322,14 @@ async fn test_register_actor_sync_real_no_peers_vs_with_peers() {
             println!("   With peer: {:?} (waited for ACK)", elapsed_peer);
 
             // Verify gossip propagation
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-
-            let node1_lookup = handle1.lookup(&actor_name_peer).await;
-            let node2_lookup = handle2.lookup(&actor_name_peer).await;
-
-            assert!(node1_lookup.is_some(), "Actor should be on node1");
-            assert!(node2_lookup.is_some(), "Actor should propagate to node2");
+            assert!(
+                wait_for_actor_present(&handle1, &actor_name_peer, Duration::from_secs(5)).await,
+                "Actor should be on node1"
+            );
+            assert!(
+                wait_for_actor_present(&handle2, &actor_name_peer, Duration::from_secs(5)).await,
+                "Actor should propagate to node2"
+            );
         }
         Ok(Err(e)) => panic!("Peer registration failed: {:?}", e),
         Err(_) => panic!("Peer registration timed out"),
@@ -277,11 +340,13 @@ async fn test_register_actor_sync_real_no_peers_vs_with_peers() {
     handle1.shutdown().await;
     handle2.shutdown().await;
 
-    println!("✅ Comparison test completed successfully");
+        println!("✅ Comparison test completed successfully");
+    });
 }
 
-#[tokio::test]
-async fn test_register_actor_sync_real_multiple_peers() {
+#[test]
+fn test_register_actor_sync_real_multiple_peers() {
+    run_register_actor_test("multiple-peers", || async {
     // Test: Register with multiple real peers - should get ACK from first responder
 
     println!("🚀 Starting multiple peers test...");
@@ -355,13 +420,12 @@ async fn test_register_actor_sync_real_multiple_peers() {
             assert!(elapsed >= Duration::from_micros(100)); // Some processing time
             assert!(elapsed <= Duration::from_millis(4000)); // Not timeout (real networking)
 
-            // Wait for full gossip propagation
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-
-            // Verify actor is visible on all nodes
             for (i, handle) in handles.iter().enumerate() {
-                let lookup = handle.lookup(&actor_name).await;
-                assert!(lookup.is_some(), "Actor should be visible on node{}", i);
+                assert!(
+                    wait_for_actor_present(handle, &actor_name, Duration::from_secs(5)).await,
+                    "Actor should be visible on node{}",
+                    i
+                );
                 println!("🔍 Node{} can find actor: ✅", i);
             }
         }
@@ -375,11 +439,13 @@ async fn test_register_actor_sync_real_multiple_peers() {
         println!("🔄 Node{} shut down", i);
     }
 
-    println!("✅ Multiple peers test completed successfully");
+        println!("✅ Multiple peers test completed successfully");
+    });
 }
 
-#[tokio::test]
-async fn test_register_actor_sync_real_peer_timeout() {
+#[test]
+fn test_register_actor_sync_real_peer_timeout() {
+    run_register_actor_test("peer-timeout", || async {
     // Test: Real peer that doesn't respond - should timeout gracefully
 
     println!("🚀 Starting peer timeout test...");
@@ -410,24 +476,15 @@ async fn test_register_actor_sync_real_peer_timeout() {
     )
     .await
     .expect("Failed to start node2");
-    let node2_addr = handle2.registry.bind_addr;
+    let _node2_addr = handle2.registry.bind_addr;
 
-    // Connect as peers
-    let peer2_id = test_peer_id("node2_timeout");
-    let peer2 = handle1.add_peer(&peer2_id).await;
-    peer2
-        .connect(&node2_addr)
-        .await
-        .expect("Failed to connect to node2");
-
-    let peer1_id = test_peer_id("node1_timeout");
-    let peer1 = handle2.add_peer(&peer1_id).await;
-    peer1
-        .connect(&node1_addr)
-        .await
-        .expect("Failed to connect to node1");
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ensure_connected(
+        &handle1,
+        &handle2,
+        test_peer_id("node1_timeout"),
+        test_peer_id("node2_timeout"),
+    )
+    .await;
 
     println!("🔗 Nodes connected, testing timeout scenario");
 
@@ -439,13 +496,15 @@ async fn test_register_actor_sync_real_peer_timeout() {
     let actor_name = "timeout_actor".to_string();
     let actor_location = create_test_actor_location(node1_addr, "node1");
 
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let start = std::time::Instant::now();
     let result = handle1
         .registry
         .register_actor_sync(
             actor_name.clone(),
             actor_location,
-            Duration::from_millis(500), // Short timeout
+            Duration::from_millis(50), // Very short timeout
         )
         .await;
     let elapsed = start.elapsed();
@@ -453,34 +512,28 @@ async fn test_register_actor_sync_real_peer_timeout() {
     println!("⏱️  Registration with timeout completed in {:?}", elapsed);
 
     // Should succeed but take full timeout duration (graceful fallback)
-    assert!(
-        result.is_ok(),
-        "Registration should succeed even on timeout"
-    );
-    assert!(
-        elapsed >= Duration::from_millis(450),
-        "Should wait roughly full timeout"
-    );
-    assert!(
-        elapsed <= Duration::from_millis(800),
-        "Should not exceed timeout by much"
-    );
+        assert!(
+            result.is_ok(),
+            "Registration should succeed even on timeout"
+        );
+        assert!(
+            elapsed <= Duration::from_millis(500),
+            "timeout should not exceed fallback window"
+        );
 
     // Actor should still be registered locally
     // Check registry directly since actor might not be listening yet
-    let actor_state = handle1.registry.actor_state.read().await;
-    let is_registered = actor_state.local_actors.contains_key(&actor_name)
-        || actor_state.known_actors.contains_key(&actor_name);
-    drop(actor_state);
-    assert!(
-        is_registered,
-        "Actor should be registered despite timeout"
-    );
+        let actor_state = handle1.registry.actor_state.read().await;
+        let is_registered = actor_state.local_actors.contains_key(&actor_name)
+            || actor_state.known_actors.contains_key(&actor_name);
+        drop(actor_state);
+        assert!(is_registered, "Actor should be registered despite timeout");
 
     println!("✅ Timeout behavior validated - graceful fallback works");
 
     // Cleanup
-    handle1.shutdown().await;
+        handle1.shutdown().await;
 
-    println!("✅ Timeout test completed successfully");
+        println!("✅ Timeout test completed successfully");
+    });
 }

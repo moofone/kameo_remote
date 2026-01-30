@@ -1,7 +1,35 @@
 use kameo_remote::{wire_type, GossipConfig, GossipRegistryHandle, KeyPair};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::time::sleep;
+
+const TYPED_TLS_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TYPED_TLS_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TYPED_TLS_WORKERS: usize = 4;
+
+fn run_typed_tls_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("typed-tls-test-{}", name))
+        .stack_size(TYPED_TLS_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(TYPED_TLS_WORKERS)
+                .thread_stack_size(TYPED_TLS_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build typed TLS test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn typed TLS test thread");
+
+    handle.join().expect("typed TLS test panicked");
+}
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
 struct Ping {
@@ -10,8 +38,9 @@ struct Ping {
 
 wire_type!(Ping, "kameo.remote.PingTLS");
 
-#[tokio::test]
-async fn test_typed_ask_over_tls_with_pooled_path() {
+#[test]
+fn test_typed_ask_over_tls_with_pooled_path() {
+    run_typed_tls_test("typed-ask-pooled", || async {
     std::env::set_var("KAMEO_REMOTE_TYPED_ECHO", "1");
 
     let addr_a: SocketAddr = "127.0.0.1:9011".parse().unwrap();
@@ -47,10 +76,12 @@ async fn test_typed_ask_over_tls_with_pooled_path() {
     handle_b.shutdown().await;
 
     std::env::remove_var("KAMEO_REMOTE_TYPED_ECHO");
+    });
 }
 
-#[tokio::test]
-async fn test_typed_tell_over_tls_with_pooled_path() {
+#[test]
+fn test_typed_tell_over_tls_with_pooled_path() {
+    run_typed_tls_test("typed-tell-pooled", || async {
     use tokio::time::{Duration, Instant};
 
     std::env::set_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE", "1");
@@ -118,4 +149,5 @@ async fn test_typed_tell_over_tls_with_pooled_path() {
     handle_b.shutdown().await;
 
     std::env::remove_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE");
+    });
 }

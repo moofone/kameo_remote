@@ -5,6 +5,8 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
+pub type DynError = Box<dyn std::error::Error + Send + Sync>;
+
 static CRYPTO_INIT: Once = Once::new();
 
 fn init_crypto() {
@@ -16,14 +18,12 @@ fn init_crypto() {
 }
 
 #[allow(dead_code)]
-pub async fn create_tls_node(
-    mut config: GossipConfig,
-) -> Result<GossipRegistryHandle, Box<dyn std::error::Error>> {
+pub async fn create_tls_node(mut config: GossipConfig) -> Result<GossipRegistryHandle, DynError> {
     init_crypto();
     let secret_key = SecretKey::generate();
     let private_bytes = secret_key.to_bytes();
-    let key_pair = KeyPair::from_private_key_bytes(&private_bytes)
-        .map_err(Box::<dyn std::error::Error>::from)?;
+    let key_pair =
+        KeyPair::from_private_key_bytes(&private_bytes).map_err(|e| -> DynError { Box::new(e) })?;
     config.key_pair = Some(key_pair);
     let node = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, secret_key, Some(config))
         .await?;
@@ -34,7 +34,7 @@ pub async fn create_tls_node(
 pub async fn connect_bidirectional(
     a: &GossipRegistryHandle,
     b: &GossipRegistryHandle,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), DynError> {
     let addr_a = a.registry.bind_addr;
     let addr_b = b.registry.bind_addr;
     let peer_id_a = a.registry.peer_id.clone();
@@ -52,7 +52,8 @@ pub async fn connect_bidirectional(
     // Wait for peers to be fully registered in gossip state
     // This is necessary because add_peer is now async/spawned to avoid deadlocks
     let connected = wait_for_condition(Duration::from_secs(10), || async {
-        a.registry.get_stats().await.active_peers >= 1 && b.registry.get_stats().await.active_peers >= 1
+        a.registry.get_stats().await.active_peers >= 1
+            && b.registry.get_stats().await.active_peers >= 1
     })
     .await;
     assert!(connected, "Peers failed to connect in bidirectional setup");
@@ -90,6 +91,19 @@ pub async fn wait_for_actor(node: &GossipRegistryHandle, actor: &str, timeout: D
     wait_for_condition(
         timeout,
         || async move { node.lookup(actor).await.is_some() },
+    )
+    .await
+}
+
+#[allow(dead_code)]
+pub async fn wait_for_actor_absent(
+    node: &GossipRegistryHandle,
+    actor: &str,
+    timeout: Duration,
+) -> bool {
+    wait_for_condition(
+        timeout,
+        || async move { node.lookup(actor).await.is_none() },
     )
     .await
 }

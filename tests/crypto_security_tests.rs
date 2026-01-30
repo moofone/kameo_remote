@@ -1,6 +1,35 @@
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, PeerId};
+use std::future::Future;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::time::timeout;
+
+const TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TEST_WORKER_THREADS: usize = 4;
+
+fn run_security_test<F>(future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name("crypto-security-test".into())
+        .stack_size(TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let rt = Builder::new_multi_thread()
+                .worker_threads(TEST_WORKER_THREADS)
+                .thread_stack_size(TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build crypto security test runtime");
+            rt.block_on(future);
+        })
+        .expect("failed to spawn crypto security test thread");
+
+    handle
+        .join()
+        .expect("crypto security test thread panicked unexpectedly");
+}
 
 /// Test cryptographic security features
 ///
@@ -157,98 +186,100 @@ async fn test_peer_id_conversions() {
     println!("   ✅ PeerId conversions working correctly");
 }
 
-#[tokio::test]
-async fn test_key_mismatch_connection_rejection() {
-    println!("🚫 Testing connection rejection with mismatched keys...");
+#[test]
+fn test_key_mismatch_connection_rejection() {
+    run_security_test(async {
+        println!("🚫 Testing connection rejection with mismatched keys...");
 
-    // Create server with specific keypair
-    let server_keypair = KeyPair::new_for_testing("1");
-    let server_peer_id = server_keypair.peer_id();
-    let server_addr = "127.0.0.1:29101".parse().unwrap();
+        // Create server with specific keypair
+        let server_keypair = KeyPair::new_for_testing("1");
+        let server_peer_id = server_keypair.peer_id();
+        let server_addr = "127.0.0.1:29101".parse().unwrap();
 
-    let server_config = GossipConfig {
-        key_pair: Some(server_keypair.clone()),
-        ..Default::default()
-    };
+        let server_config = GossipConfig {
+            key_pair: Some(server_keypair.clone()),
+            ..Default::default()
+        };
 
-    let server_registry =
-        GossipRegistryHandle::new_with_keypair(server_addr, server_keypair, Some(server_config))
-            .await
-            .expect("Should create server registry");
+        let server_registry =
+            GossipRegistryHandle::new_with_keypair(server_addr, server_keypair, Some(server_config))
+                .await
+                .expect("Should create server registry");
 
-    println!("   🖥️  Server started with PeerId: {}", server_peer_id);
+        println!("   🖥️  Server started with PeerId: {}", server_peer_id);
 
-    // Create client with different keypair
-    let client_keypair = KeyPair::new_for_testing("2"); // Different seed!
-    let client_peer_id = client_keypair.peer_id();
-    let client_addr = "127.0.0.1:29102".parse().unwrap();
+        // Create client with different keypair
+        let client_keypair = KeyPair::new_for_testing("2"); // Different seed!
+        let client_peer_id = client_keypair.peer_id();
+        let client_addr = "127.0.0.1:29102".parse().unwrap();
 
-    let client_config = GossipConfig {
-        key_pair: Some(client_keypair.clone()),
-        ..Default::default()
-    };
+        let client_config = GossipConfig {
+            key_pair: Some(client_keypair.clone()),
+            ..Default::default()
+        };
 
-    let client_registry =
-        GossipRegistryHandle::new_with_keypair(client_addr, client_keypair, Some(client_config))
-            .await
-            .expect("Should create client registry");
+        let client_registry =
+            GossipRegistryHandle::new_with_keypair(client_addr, client_keypair, Some(client_config))
+                .await
+                .expect("Should create client registry");
 
-    println!("   💻 Client started with PeerId: {}", client_peer_id);
-    assert_ne!(
-        server_peer_id, client_peer_id,
-        "Client and server should have different PeerIds"
-    );
+        println!("   💻 Client started with PeerId: {}", client_peer_id);
+        assert_ne!(
+            server_peer_id, client_peer_id,
+            "Client and server should have different PeerIds"
+        );
 
-    // Test 1: Client tries to connect using the correct server PeerId
-    println!("   🔗 Test 1: Client connecting with correct server PeerId...");
-    let correct_peer = client_registry.add_peer(&server_peer_id).await;
-    match timeout(Duration::from_secs(5), correct_peer.connect(&server_addr)).await {
-        Ok(Ok(())) => println!("      ✅ Connection with correct PeerId succeeded"),
-        Ok(Err(e)) => println!("      ⚠️  Connection with correct PeerId failed: {} (this might be expected if auth is implemented)", e),
-        Err(_) => println!("      ⏰ Connection with correct PeerId timed out"),
-    }
+        // Test 1: Client tries to connect using the correct server PeerId
+        println!("   🔗 Test 1: Client connecting with correct server PeerId...");
+        let correct_peer = client_registry.add_peer(&server_peer_id).await;
+        match timeout(Duration::from_secs(5), correct_peer.connect(&server_addr)).await {
+            Ok(Ok(())) => println!("      ✅ Connection with correct PeerId succeeded"),
+            Ok(Err(e)) => println!("      ⚠️  Connection with correct PeerId failed: {} (this might be expected if auth is implemented)", e),
+            Err(_) => println!("      ⏰ Connection with correct PeerId timed out"),
+        }
 
-    // Test 2: Client tries to connect using wrong PeerId (should fail)
-    println!("   🔗 Test 2: Client connecting with wrong PeerId...");
-    let wrong_keypair = KeyPair::new_for_testing("99"); // Completely different
-    let wrong_peer_id = wrong_keypair.peer_id();
+        // Test 2: Client tries to connect using wrong PeerId (should fail)
+        println!("   🔗 Test 2: Client connecting with wrong PeerId...");
+        let wrong_keypair = KeyPair::new_for_testing("99"); // Completely different
+        let wrong_peer_id = wrong_keypair.peer_id();
 
-    let wrong_peer = client_registry.add_peer(&wrong_peer_id).await;
-    match timeout(Duration::from_secs(5), wrong_peer.connect(&server_addr)).await {
-        Ok(Ok(())) => {
-            println!("      ⚠️  WARNING: Connection with wrong PeerId succeeded (this is a security issue - PeerId validation not enforced!)");
-            // TODO: This should fail! PeerId mismatch should be rejected during TLS handshake
-            // For now, we just log this as a known security issue
-        },
-        Ok(Err(e)) => println!(
-            "      ✅ Connection with wrong PeerId correctly failed: {}",
-            e
-        ),
-        Err(_) => println!("      ✅ Connection with wrong PeerId timed out (expected)"),
-    }
+        let wrong_peer = client_registry.add_peer(&wrong_peer_id).await;
+        match timeout(Duration::from_secs(5), wrong_peer.connect(&server_addr)).await {
+            Ok(Ok(())) => {
+                println!("      ⚠️  WARNING: Connection with wrong PeerId succeeded (this is a security issue - PeerId validation not enforced!)");
+                // TODO: This should fail! PeerId mismatch should be rejected during TLS handshake
+                // For now, we just log this as a known security issue
+            }
+            Ok(Err(e)) => println!(
+                "      ✅ Connection with wrong PeerId correctly failed: {}",
+                e
+            ),
+            Err(_) => println!("      ✅ Connection with wrong PeerId timed out (expected)"),
+        }
 
-    // Test 3: Verify that we can detect the mismatch at the PeerId level
-    println!("   🔍 Test 3: PeerId comparison verification...");
-    assert_ne!(
-        server_peer_id, wrong_peer_id,
-        "Server and wrong PeerIds should be different"
-    );
-    assert_ne!(
-        client_peer_id, server_peer_id,
-        "Client and server PeerIds should be different"
-    );
-    assert_ne!(
-        client_peer_id, wrong_peer_id,
-        "Client and wrong PeerIds should be different"
-    );
+        // Test 3: Verify that we can detect the mismatch at the PeerId level
+        println!("   🔍 Test 3: PeerId comparison verification...");
+        assert_ne!(
+            server_peer_id, wrong_peer_id,
+            "Server and wrong PeerIds should be different"
+        );
+        assert_ne!(
+            client_peer_id, server_peer_id,
+            "Client and server PeerIds should be different"
+        );
+        assert_ne!(
+            client_peer_id, wrong_peer_id,
+            "Client and wrong PeerIds should be different"
+        );
 
-    println!("      ✅ PeerId mismatches correctly detected");
+        println!("      ✅ PeerId mismatches correctly detected");
 
-    // Cleanup
-    server_registry.shutdown().await;
-    client_registry.shutdown().await;
+        // Cleanup
+        server_registry.shutdown().await;
+        client_registry.shutdown().await;
 
-    println!("   ✅ Key mismatch rejection test completed");
+        println!("   ✅ Key mismatch rejection test completed");
+    });
 }
 
 #[tokio::test]

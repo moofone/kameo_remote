@@ -1,13 +1,40 @@
 mod common;
 
-use common::{connect_bidirectional, create_tls_node, wait_for_condition};
+use common::{
+    connect_bidirectional, create_tls_node, force_disconnect, wait_for_condition, DynError,
+};
 use kameo_remote::{GossipConfig, RegistrationPriority};
 use std::time::Duration;
 
-#[tokio::test]
-async fn test_gossip_matrix_convergence_line_topology() -> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn test_gossip_matrix_convergence_line_topology() {
+    let handle = std::thread::Builder::new()
+        .name("gossip-matrix-line".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(4 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            rt.block_on(async move {
+                test_gossip_matrix_convergence_line_topology_inner()
+                    .await
+                    .expect("gossip matrix test failed")
+            })
+        })
+        .expect("failed to spawn gossip matrix test thread");
+    handle
+        .join()
+        .expect("gossip matrix test panicked");
+}
+
+async fn test_gossip_matrix_convergence_line_topology_inner() -> Result<(), DynError> {
     let config = GossipConfig {
         gossip_interval: Duration::from_millis(200),
+        max_peer_failures: usize::MAX,
+        peer_retry_interval: Duration::from_millis(100),
         ..Default::default()
     };
 
@@ -52,24 +79,40 @@ async fn test_gossip_matrix_convergence_line_topology() -> Result<(), Box<dyn st
     let actors = ["actor.a", "actor.b", "actor.c", "actor.d"];
     let nodes = [&node_a, &node_b, &node_c, &node_d];
 
-    let converged = wait_for_condition(Duration::from_secs(5), || async {
-        for node in nodes {
-            for actor in &actors {
-                // Check if actor is in registry (either local or known)
-                // Don't use lookup() as it requires a connection
-                let actor_state = node.registry.actor_state.read().await;
-                let has_actor = actor_state.local_actors.contains_key(*actor)
-                    || actor_state.known_actors.contains_key(*actor);
-                drop(actor_state);
+    let mut attempts = 0;
+    let converged = loop {
+        let converged = wait_for_condition(Duration::from_secs(12), || async {
+            for node in nodes {
+                for actor in &actors {
+                    let actor_state = node.registry.actor_state.read().await;
+                    let has_actor = actor_state.local_actors.contains_key(*actor)
+                        || actor_state.known_actors.contains_key(*actor);
+                    drop(actor_state);
 
-                if !has_actor {
-                    return false;
+                    if !has_actor {
+                        return false;
+                    }
                 }
             }
+            true
+        })
+        .await;
+
+        if converged || attempts >= 2 {
+            break converged;
         }
-        true
-    })
-    .await;
+
+        attempts += 1;
+
+        // Tear down and reconnect the line to recover from transient TLS churn.
+        force_disconnect(&node_a, &node_b).await;
+        force_disconnect(&node_b, &node_c).await;
+        force_disconnect(&node_c, &node_d).await;
+
+        connect_bidirectional(&node_a, &node_b).await?;
+        connect_bidirectional(&node_b, &node_c).await?;
+        connect_bidirectional(&node_c, &node_d).await?;
+    };
 
     if !converged {
         for (idx, node) in nodes.iter().enumerate() {

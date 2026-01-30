@@ -48,7 +48,9 @@ pub fn resolve_peer_addr(
                 // Use TCP source IP with bind_addr port
                 debug!(
                     "sender_bind_addr {} has unspecified IP, using TCP source IP {} with port {}",
-                    bind_addr, tcp_source_addr.ip(), bind_addr.port()
+                    bind_addr,
+                    tcp_source_addr.ip(),
+                    bind_addr.port()
                 );
                 return SocketAddr::new(tcp_source_addr.ip(), bind_addr.port());
             }
@@ -161,7 +163,7 @@ pub enum RegistryMessage {
         local_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         known_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         sender_peer_id: crate::PeerId,                    // Peer's unique identifier
-        sender_bind_addr: Option<String>,                 // Sender's listening address (optional for backwards compat)
+        sender_bind_addr: Option<String>, // Sender's listening address (optional for backwards compat)
         sequence: u64,
         wall_clock_time: u64,
     },
@@ -170,7 +172,7 @@ pub enum RegistryMessage {
         local_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         known_actors: Vec<(String, RemoteActorLocation)>, // Use Vec for rkyv serialization
         sender_peer_id: crate::PeerId,                    // Peer's unique identifier
-        sender_bind_addr: Option<String>,                 // Sender's listening address (optional for backwards compat)
+        sender_bind_addr: Option<String>, // Sender's listening address (optional for backwards compat)
         sequence: u64,
         wall_clock_time: u64,
     },
@@ -236,9 +238,9 @@ pub struct RegistryStats {
 /// Peer information with failure tracking and delta state
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
-    pub address: SocketAddr,              // Listening address (resolved from DNS or direct IP)
+    pub address: SocketAddr, // Listening address (resolved from DNS or direct IP)
     pub peer_address: Option<SocketAddr>, // Actual connection address (may be NATed)
-    pub node_id: Option<crate::NodeId>,   // NodeId for TLS verification (may be learned on connect)
+    pub node_id: Option<crate::NodeId>, // NodeId for TLS verification (may be learned on connect)
     /// DNS name for this peer (e.g., "data-feeder-kameo:9400").
     /// When set, the address will be re-resolved via DNS on reconnection attempts.
     /// This handles Kubernetes pod restarts where the IP changes but DNS stays the same.
@@ -451,7 +453,8 @@ pub struct GossipRegistry {
     // Separated lockable state
     pub actor_state: Arc<RwLock<ActorState>>,
     pub gossip_state: Arc<Mutex<GossipState>>,
-    pub connection_pool: Arc<Mutex<ConnectionPool>>,
+    // Connection pool is internally lock-free (DashMap-based), no external locking needed
+    pub connection_pool: Arc<ConnectionPool>,
     pub peer_capabilities: Arc<DashMap<SocketAddr, crate::handshake::PeerCapabilities>>,
     pub peer_capabilities_by_node: Arc<DashMap<crate::NodeId, crate::handshake::PeerCapabilities>>,
     pub peer_capability_addr_to_node: Arc<DashMap<SocketAddr, crate::NodeId>>,
@@ -590,7 +593,7 @@ impl GossipRegistry {
                 ),
                 mesh_formation_time_ms: None,
             })),
-            connection_pool: Arc::new(Mutex::new(connection_pool)),
+            connection_pool: Arc::new(connection_pool),
             peer_capabilities: peer_capabilities.clone(),
             peer_capabilities_by_node: Arc::new(DashMap::new()),
             peer_capability_addr_to_node: Arc::new(DashMap::new()),
@@ -727,7 +730,7 @@ impl GossipRegistry {
         if let Some(ref handler) = *handler_guard {
             debug!(
                 actor_id = %actor_id,
-                type_hash = %format!("{:08x}", type_hash),
+                type_hash = type_hash,
                 payload_len = payload.len(),
                 "forwarding actor message to handler"
             );
@@ -737,7 +740,7 @@ impl GossipRegistry {
         } else {
             warn!(
                 actor_id = %actor_id,
-                type_hash = %format!("{:08x}", type_hash),
+                type_hash = type_hash,
                 "no actor message handler registered - message dropped"
             );
             Ok(None)
@@ -779,7 +782,7 @@ impl GossipRegistry {
     // /// Add bootstrap peers with their expected node names
     // pub async fn add_bootstrap_peers_with_names(&self, bootstrap_peers: Vec<crate::PeerConfig>) {
     //     let mut gossip_state = self.gossip_state.lock().await;
-    //     let pool = self.connection_pool.lock().await;
+    //     let pool = &self.connection_pool;
     //     let current_time = current_timestamp();
 
     //     for peer_config in bootstrap_peers {
@@ -885,12 +888,12 @@ impl GossipRegistry {
             // This is critical for TLS connections to work (get_connection_to_peer needs this mapping)
             if let Some(id) = node_id {
                 let peer_id = id.to_peer_id();
-                
+
                 let mut conn_to_abort = None;
 
                 // Check if we need to close an existing connection to a different address
                 {
-                    let pool = self.connection_pool.lock().await;
+                    let pool = &self.connection_pool;
                     if let Some(old_addr) = pool.peer_id_to_addr.get(&peer_id).map(|e| *e.value()) {
                         if old_addr != peer_addr {
                             info!(
@@ -899,7 +902,7 @@ impl GossipRegistry {
                                 new_addr = %peer_addr,
                                 "Closing old connection for peer due to address change"
                             );
-                            
+
                             // Remove connection and abort tasks
                             if let Some((_, conn)) = pool.connections_by_peer.remove(&peer_id) {
                                 pool.connections_by_addr.remove(&conn.addr);
@@ -909,7 +912,7 @@ impl GossipRegistry {
                         }
                     }
                 }
-                
+
                 // Abort tasks outside the lock to avoid potential deadlocks
                 if let Some(conn) = conn_to_abort {
                     conn.abort_tasks();
@@ -924,7 +927,7 @@ impl GossipRegistry {
 
     /// Configure a peer by peer ID and its expected connection address
     pub async fn configure_peer(&self, peer_id: crate::PeerId, connect_addr: SocketAddr) {
-        let pool = self.connection_pool.lock().await;
+        let pool = &self.connection_pool;
         info!(peer_id = %peer_id, addr = %connect_addr, "Configured peer");
         pool.peer_id_to_addr.insert(peer_id.clone(), connect_addr);
         pool.addr_to_peer_id.insert(connect_addr, peer_id.clone());
@@ -1018,7 +1021,7 @@ impl GossipRegistry {
         // PRE-CHECK: Verify no collisions in connection pool BEFORE any migration
         // This prevents inconsistent state if we migrate gossip_state but pool has collision
         {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
             if pool.addr_to_peer_id.contains_key(&new_addr) {
                 if let Some(existing_peer_id) = pool.addr_to_peer_id.get(&new_addr) {
                     if let Some(old_peer_id) = pool.addr_to_peer_id.get(&peer_addr) {
@@ -1118,7 +1121,7 @@ impl GossipRegistry {
         let mut needs_reconnect: Option<crate::PeerId> = None;
 
         {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
 
             // Get peer_id for this address
             if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
@@ -1132,7 +1135,8 @@ impl GossipRegistry {
                 if let Some((_, connection)) = pool.connections_by_addr.remove(&peer_addr) {
                     if connection.is_connected() {
                         // Connection is alive - migrate it to new address
-                        pool.connections_by_addr.insert(new_addr, connection.clone());
+                        pool.connections_by_addr
+                            .insert(new_addr, connection.clone());
                         // Also update connections_by_peer to point to the same connection
                         pool.connections_by_peer.insert(peer_id.clone(), connection);
                         debug!(
@@ -1221,7 +1225,7 @@ impl GossipRegistry {
 
     /// Connect to a configured peer by peer ID
     pub async fn connect_to_peer(&self, peer_id: &crate::PeerId) -> Result<()> {
-        let mut pool = self.connection_pool.lock().await;
+        let pool = &self.connection_pool;
         pool.get_connection_to_peer(peer_id).await?;
         info!(peer_id = %peer_id, "Connected to peer");
         Ok(())
@@ -1358,7 +1362,8 @@ impl GossipRegistry {
             };
 
             if priority.should_trigger_immediate_gossip() {
-                gossip_state.urgent_changes.push(change);
+                gossip_state.urgent_changes.push(change.clone());
+                gossip_state.pending_changes.push(change);
                 true
             } else {
                 gossip_state.pending_changes.push(change);
@@ -1432,7 +1437,8 @@ impl GossipRegistry {
                 };
 
                 if location.priority.should_trigger_immediate_gossip() {
-                    gossip_state.urgent_changes.push(change);
+                    gossip_state.urgent_changes.push(change.clone());
+                    gossip_state.pending_changes.push(change);
                     true
                 } else {
                     gossip_state.pending_changes.push(change);
@@ -1609,6 +1615,18 @@ impl GossipRegistry {
                         location,
                         priority: _,
                     } => {
+                        // Ignore stale self-announcements coming back from peers. Once we
+                        // unregister a local actor, remote nodes may still temporarily think we
+                        // host it and echo that state back. Re-accepting it here would resurrect
+                        // the actor in our known_actors map and re-advertise it indefinitely.
+                        if location.peer_id == self.peer_id {
+                            debug!(
+                                actor_name = %name,
+                                "skipping remote actor update - change references this node as the host"
+                            );
+                            continue;
+                        }
+
                         // Don't override local actors - early exit
                         if actor_state.local_actors.contains_key(name.as_str()) {
                             debug!(
@@ -1795,7 +1813,7 @@ impl GossipRegistry {
         let peer_actor_changes = peer_actors_added.len() + peer_actors_removed.len();
 
         if let Some(sender_addr) = {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
             pool.peer_id_to_addr
                 .get(&sender_peer_id)
                 .map(|entry| *entry)
@@ -1832,8 +1850,24 @@ impl GossipRegistry {
 
     /// Determine whether to use delta or full sync for a peer
     fn should_use_delta_state(&self, gossip_state: &GossipState, peer_info: &PeerInfo) -> bool {
-        // For small clusters (≤ 5 total nodes), always use full sync to ensure
-        // proper transitive propagation in star topologies
+        // Prefer full sync for brand new peers unless we already have committed state changes that
+        // must be delivered (e.g. removals). In that case, we can safely bootstrap them with a delta
+        // starting from sequence zero because create_delta_from_state includes the entire registry
+        // snapshot when since_sequence == 0.
+        if peer_info.last_sequence == 0 {
+            if gossip_state.gossip_sequence == 0 {
+                return false;
+            }
+            debug!(
+                peer = %peer_info.address,
+                committed_sequence = gossip_state.gossip_sequence,
+                "peer has no recorded sequence but committed changes exist; using delta bootstrap"
+            );
+        }
+
+        // For small clusters (≤ threshold total nodes) we normally prefer full sync
+        // for robustness, but if we have committed changes the peer hasn't seen yet
+        // we must still send deltas so removals/updates propagate promptly.
         let healthy_peers = gossip_state
             .peers
             .values()
@@ -1841,16 +1875,22 @@ impl GossipRegistry {
             .count();
         let total_healthy_nodes = healthy_peers + 1;
         if total_healthy_nodes <= self.config.small_cluster_threshold {
-            debug!(
-                "using full sync for small cluster of {} healthy nodes",
-                total_healthy_nodes
-            );
-            return false;
-        }
+            if gossip_state.gossip_sequence <= peer_info.last_sequence {
+                debug!(
+                    total_healthy_nodes,
+                    peer_last_sequence = peer_info.last_sequence,
+                    current_sequence = gossip_state.gossip_sequence,
+                    "using full sync for small cluster with no new changes"
+                );
+                return false;
+            }
 
-        // Use full sync for new peers or if delta history is insufficient
-        if peer_info.last_sequence == 0 {
-            return false;
+            debug!(
+                total_healthy_nodes,
+                peer_last_sequence = peer_info.last_sequence,
+                current_sequence = gossip_state.gossip_sequence,
+                "small cluster override: pending changes exist, allowing delta"
+            );
         }
 
         // Force full sync periodically
@@ -1858,14 +1898,25 @@ impl GossipRegistry {
             return false;
         }
 
-        // Check if we have the required delta history
+        // Check if we have the required delta history.
+        // For peers that have never seen a delta (last_sequence == 0), we can still bootstrap them
+        // because create_delta_from_state includes the full snapshot when since_sequence == 0.
         let oldest_available = gossip_state
             .delta_history
             .first()
             .map(|d| d.sequence)
             .unwrap_or(gossip_state.gossip_sequence);
 
-        peer_info.last_sequence >= oldest_available
+        if peer_info.last_sequence > 0 && peer_info.last_sequence < oldest_available {
+            debug!(
+                peer_last_sequence = peer_info.last_sequence,
+                oldest_available,
+                "peer is too far behind for available delta history; using full sync"
+            );
+            return false;
+        }
+
+        true
     }
 
     /// Create a delta containing changes since the specified sequence
@@ -2203,6 +2254,26 @@ impl GossipRegistry {
                     .await
                 };
 
+                match &message {
+                    RegistryMessage::DeltaGossip { .. } => {
+                        debug!(
+                            peer = %peer_addr,
+                            current_sequence,
+                            peer_last_sequence = peer_info.last_sequence,
+                            "📤 sending delta gossip"
+                        );
+                    }
+                    RegistryMessage::FullSync { .. } => {
+                        debug!(
+                            peer = %peer_addr,
+                            current_sequence,
+                            peer_last_sequence = peer_info.last_sequence,
+                            "📤 sending full sync"
+                        );
+                    }
+                    _ => {}
+                }
+
                 tasks.push(GossipTask {
                     peer_addr,
                     message,
@@ -2539,12 +2610,37 @@ impl GossipRegistry {
             }
         }
 
-        // Update peer-to-actors mapping for failure tracking
-        {
+        // Update peer-to-actors mapping for failure tracking and detect actors the peer
+        // no longer advertises so we can prune stale entries deterministically.
+        let removed_peer_actors = {
             let mut gossip_state = self.gossip_state.lock().await;
-            gossip_state
+            match gossip_state
                 .peer_to_actors
-                .insert(sender_addr, peer_actors.clone());
+                .insert(sender_addr, peer_actors.clone())
+            {
+                Some(previous) => previous
+                    .difference(&peer_actors)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            }
+        };
+
+        if !removed_peer_actors.is_empty() {
+            let mut actor_state = self.actor_state.write().await;
+            for actor_name in removed_peer_actors {
+                if actor_state.local_actors.contains_key(&actor_name) {
+                    continue;
+                }
+
+                if actor_state.known_actors.remove(&actor_name).is_some() {
+                    info!(
+                        actor_name = %actor_name,
+                        peer = %sender_addr,
+                        "removed stale actor after peer full sync omitted it"
+                    );
+                }
+            }
         }
 
         debug!(
@@ -2589,7 +2685,7 @@ impl GossipRegistry {
 
         // Clean up connection pool
         {
-            let mut connection_pool = self.connection_pool.lock().await;
+            let connection_pool = &self.connection_pool;
             connection_pool.cleanup_stale_connections();
         }
 
@@ -2799,7 +2895,7 @@ impl GossipRegistry {
 
         // Close all connections in the pool
         {
-            let mut connection_pool = self.connection_pool.lock().await;
+            let connection_pool = &self.connection_pool;
             connection_pool.close_all_connections();
         }
 
@@ -2827,7 +2923,7 @@ impl GossipRegistry {
         &self,
         addr: SocketAddr,
     ) -> Result<crate::connection_pool::ConnectionHandle> {
-        self.connection_pool.lock().await.get_connection(addr).await
+        self.connection_pool.get_connection(addr).await
     }
 
     /// Get a connection handle directly from the pool without mutex lock
@@ -2838,10 +2934,7 @@ impl GossipRegistry {
         addr: SocketAddr,
     ) -> Option<crate::connection_pool::ConnectionHandle> {
         // Best-effort: avoid await by using try_lock; return None if busy or not connected.
-        self.connection_pool
-            .try_lock()
-            .ok()
-            .and_then(|mut pool| pool.get_existing_connection(addr))
+        self.connection_pool.get_existing_connection(addr)
     }
 
     pub async fn is_shutdown(&self) -> bool {
@@ -2872,7 +2965,7 @@ impl GossipRegistry {
         // IMMEDIATELY mark the connection as failed and remove from pool
         // Use disconnect_connection_by_peer_id when possible to clean up ALL address aliases
         {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
             // Try to find peer_id for proper cleanup of all aliases
             if let Some(peer_id) = pool.get_peer_id_by_addr(&failed_peer_addr) {
                 if let Some(_conn) = pool.disconnect_connection_by_peer_id(&peer_id) {
@@ -2969,7 +3062,7 @@ impl GossipRegistry {
 
         // First, find the peer address from the node ID
         let failed_peer_addr = {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
 
             // Try to find the address from our node ID mapping
             let addr_opt = pool.peer_id_to_addr.get(failed_peer_id).map(|entry| *entry);
@@ -2992,7 +3085,7 @@ impl GossipRegistry {
         // Use disconnect_connection_by_peer_id to clean up ALL address aliases
         // (ephemeral port + bind address mappings created during reindex)
         {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
 
             if let Some(_conn) = pool.disconnect_connection_by_peer_id(failed_peer_id) {
                 info!(
@@ -3137,7 +3230,7 @@ impl GossipRegistry {
         for peer in peers_to_query {
             if let Ok(data) = rkyv::to_bytes::<rkyv::rancor::Error>(&query_msg) {
                 // Try to send through existing connection
-                let mut pool = self.connection_pool.lock().await;
+                let pool = &self.connection_pool;
                 if let Ok(conn) = pool.get_connection(peer).await {
                     // Create message buffer with length header using buffer pool
                     let buffer = pool.create_message_buffer(&data);
@@ -3203,7 +3296,7 @@ impl GossipRegistry {
 
                             // Check if we have an active connection to this peer
                             let has_active_connection = {
-                                let pool = self.connection_pool.lock().await;
+                                let pool = &self.connection_pool;
                                 pool.has_connection(peer_addr)
                             };
 
@@ -3573,7 +3666,7 @@ impl GossipRegistry {
             crate::connection_pool::ConnectionHandle,
             Vec<Vec<u8>>,
         )> = {
-            let mut pool_guard = self.connection_pool.lock().await;
+            let pool_guard = &self.connection_pool;
             let mut connections_buffers = Vec::new();
 
             for peer_addr in &critical_peers {
@@ -3602,6 +3695,7 @@ impl GossipRegistry {
         // Send to all peers concurrently with pre-established connections and buffers
         let mut join_handles = Vec::new();
 
+        let mut had_failure = false;
         for (peer_addr, conn, buffers) in peer_connections_buffers {
             let handle: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async move {
                 // Measure pure network send time
@@ -3630,10 +3724,28 @@ impl GossipRegistry {
 
         // Wait for all sends to complete
         for handle in join_handles {
-            if let Err(e) = handle.await {
-                warn!("immediate gossip task failed: {}", e);
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!("immediate gossip send failed: {}", e);
+                    had_failure = true;
+                }
+                Err(e) => {
+                    warn!("immediate gossip task failed: {}", e);
+                    had_failure = true;
+                }
             }
         }
+
+        let mut gossip_state = self.gossip_state.lock().await;
+        if had_failure {
+            warn!(
+                "immediate gossip encountered send failures - scheduling retry via regular gossip"
+            );
+        }
+        gossip_state
+            .pending_changes
+            .extend(urgent_changes_for_retry);
 
         Ok(())
     }
@@ -4056,7 +4168,8 @@ impl GossipRegistry {
                 for peer_gossip in &peers {
                     if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
                         // Conservative merge: only update if newer
-                        if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address) {
+                        if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address)
+                        {
                             // Only update if the incoming info is newer
                             if peer_gossip.last_success > existing.last_success {
                                 existing.last_success = peer_gossip.last_success;
@@ -4070,13 +4183,17 @@ impl GossipRegistry {
                             }
                         } else {
                             // New peer, add to cache
-                            gossip_state.known_peers.put(peer_info.address, peer_info.clone());
+                            gossip_state
+                                .known_peers
+                                .put(peer_info.address, peer_info.clone());
                         }
 
                         // Also update dns_name in active peers (gossip_state.peers)
                         // This ensures existing connected peers get DNS refresh capability
                         if peer_info.dns_name.is_some() {
-                            if let Some(active_peer) = gossip_state.peers.get_mut(&peer_info.address) {
+                            if let Some(active_peer) =
+                                gossip_state.peers.get_mut(&peer_info.address)
+                            {
                                 if active_peer.dns_name.is_none() {
                                     active_peer.dns_name = peer_info.dns_name;
                                     debug!(
@@ -4098,7 +4215,9 @@ impl GossipRegistry {
                         // This ensures existing connected peers get DNS refresh capability
                         // but we don't add them to known_peers
                         if peer_info.dns_name.is_some() {
-                            if let Some(active_peer) = gossip_state.peers.get_mut(&peer_info.address) {
+                            if let Some(active_peer) =
+                                gossip_state.peers.get_mut(&peer_info.address)
+                            {
                                 if active_peer.dns_name.is_none() {
                                     active_peer.dns_name = peer_info.dns_name;
                                     debug!(
@@ -4271,7 +4390,7 @@ impl GossipRegistry {
     /// Check if we have an active connection to a peer
     /// Used for "local connection wins" - we trust our direct connection over gossip reports
     pub async fn has_active_connection(&self, addr: &SocketAddr) -> bool {
-        let pool = self.connection_pool.lock().await;
+        let pool = &self.connection_pool;
         pool.has_connection(addr)
     }
 
@@ -4293,7 +4412,7 @@ impl GossipRegistry {
         }
 
         // Update peer_discovery
-        let should_track_mesh_time = 
+        let should_track_mesh_time =
             self.config.mesh_formation_target > 0 && gossip_state.mesh_formation_time_ms.is_none();
 
         if let Some(ref mut discovery) = gossip_state.peer_discovery {
@@ -4319,7 +4438,7 @@ impl GossipRegistry {
         // don't mark it as failed based on gossip reports from other nodes.
         // We trust our direct connection over third-party reports.
         {
-            let pool = self.connection_pool.lock().await;
+            let pool = &self.connection_pool;
             if pool.has_connection(&addr) {
                 debug!(
                     addr = %addr,
@@ -4386,7 +4505,7 @@ impl GossipRegistry {
 
     /// Check if we already have a connection to a peer by peer ID
     pub async fn has_connection_to_peer(&self, peer_id: &crate::PeerId) -> bool {
-        let pool = self.connection_pool.lock().await;
+        let pool = &self.connection_pool;
         pool.has_connection_by_peer_id(peer_id)
     }
 }
@@ -4720,7 +4839,9 @@ mod tests {
         // Verify urgent change was created (not cleared since immediate propagation is disabled)
         let gossip_state = registry.gossip_state.lock().await;
         assert_eq!(gossip_state.urgent_changes.len(), 1);
-        assert_eq!(gossip_state.pending_changes.len(), 0);
+        // Urgent registrations also live in pending_changes so the next scheduled gossip round still
+        // carries them even when immediate propagation is disabled.
+        assert_eq!(gossip_state.pending_changes.len(), 1);
     }
 
     #[tokio::test]

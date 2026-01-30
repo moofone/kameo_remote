@@ -1,9 +1,38 @@
 use kameo_remote::*;
+use std::future::Future;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::{runtime::Builder, time::sleep};
 
-#[tokio::test]
-async fn debug_timing_variations() {
+const TIMING_DEBUG_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+const TIMING_DEBUG_WORKER_STACK_SIZE: usize = 4 * 1024 * 1024;
+const TIMING_DEBUG_WORKERS: usize = 2;
+
+fn run_timing_debug_test<F, Fut>(test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name("timing-debug-test".into())
+        .stack_size(TIMING_DEBUG_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let rt = Builder::new_multi_thread()
+                .worker_threads(TIMING_DEBUG_WORKERS)
+                .thread_stack_size(TIMING_DEBUG_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build timing_debug runtime");
+            rt.block_on(test());
+        })
+        .expect("failed to spawn timing_debug test thread");
+    handle
+        .join()
+        .expect("timing_debug test thread panicked unexpectedly");
+}
+
+#[test]
+fn debug_timing_variations() {
+    run_timing_debug_test(|| async {
     println!("🔍 Debugging Timing Variations");
 
     // Setup two nodes with bootstrap completion
@@ -70,4 +99,5 @@ async fn debug_timing_variations() {
 
     node1.shutdown().await;
     node2.shutdown().await;
+    });
 }
