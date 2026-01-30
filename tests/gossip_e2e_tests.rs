@@ -1,8 +1,15 @@
 use kameo_remote::{GossipConfig, GossipRegistryHandle, RegistrationPriority, SecretKey};
 
+use std::future::Future;
 use std::sync::Once;
 use std::time::{Duration, Instant};
+use tokio::runtime::Builder;
 use tokio::time::sleep;
+
+const TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TEST_WORKER_THREADS: usize = 4;
+type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 static CRYPTO_INIT: Once = Once::new();
 
@@ -14,9 +21,29 @@ fn init_crypto() {
     });
 }
 
-async fn create_node(
-    config: GossipConfig,
-) -> Result<GossipRegistryHandle, Box<dyn std::error::Error>> {
+fn run_gossip_test<F, R>(future: F) -> R
+where
+    F: Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("gossip-e2e-test".into())
+        .stack_size(TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let rt = Builder::new_multi_thread()
+                .worker_threads(TEST_WORKER_THREADS)
+                .thread_stack_size(TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build gossip e2e runtime");
+            rt.block_on(future)
+        })
+        .expect("failed to spawn gossip e2e thread")
+        .join()
+        .expect("gossip e2e test thread panicked unexpectedly")
+}
+
+async fn create_node(config: GossipConfig) -> Result<GossipRegistryHandle, DynError> {
     init_crypto();
     let secret_key = SecretKey::generate();
     let node = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, secret_key, Some(config))
@@ -67,113 +94,118 @@ async fn wait_for_exchange(
     false
 }
 
-#[tokio::test]
-async fn test_full_sync_for_small_cluster() -> Result<(), Box<dyn std::error::Error>> {
-    let config = GossipConfig {
-        gossip_interval: Duration::from_millis(200),
-        small_cluster_threshold: 10,
-        ..Default::default()
-    };
+#[test]
+fn test_full_sync_for_small_cluster() -> Result<(), DynError> {
+    run_gossip_test(async {
+        let config = GossipConfig {
+            gossip_interval: Duration::from_millis(200),
+            small_cluster_threshold: 10,
+            ..Default::default()
+        };
 
-    let node_a = create_node(config.clone()).await?;
-    let node_b = create_node(config.clone()).await?;
-    connect_pair(&node_a, &node_b).await;
+        let node_a = create_node(config.clone()).await?;
+        let node_b = create_node(config.clone()).await?;
+        connect_pair(&node_a, &node_b).await;
 
-    node_a
-        .register("actor.fullsync".to_string(), node_a.registry.bind_addr)
-        .await?;
+        node_a
+            .register("actor.fullsync".to_string(), node_a.registry.bind_addr)
+            .await?;
 
-    assert!(
-        wait_for_actor(&node_b, "actor.fullsync", Duration::from_secs(2)).await,
-        "actor should propagate via full sync in small cluster"
-    );
+        assert!(
+            wait_for_actor(&node_b, "actor.fullsync", Duration::from_secs(2)).await,
+            "actor should propagate via full sync in small cluster"
+        );
 
-    let stats_b = node_b.stats().await;
-    assert!(
-        stats_b.full_sync_exchanges > 0,
-        "full sync exchanges should be recorded for small cluster"
-    );
+        let stats_b = node_b.stats().await;
+        assert!(
+            stats_b.full_sync_exchanges > 0,
+            "full sync exchanges should be recorded for small cluster"
+        );
 
-    node_a.shutdown().await;
-    node_b.shutdown().await;
-    Ok(())
+        node_a.shutdown().await;
+        node_b.shutdown().await;
+        Ok(())
+    })
 }
 
-#[tokio::test]
-async fn test_delta_gossip_after_initial_full_sync() -> Result<(), Box<dyn std::error::Error>> {
-    let config = GossipConfig {
-        gossip_interval: Duration::from_millis(200),
-        small_cluster_threshold: 0,
-        full_sync_interval: 1000,
-        ..Default::default()
-    };
+#[test]
+fn test_delta_gossip_after_initial_full_sync() -> Result<(), DynError> {
+    run_gossip_test(async {
+        let config = GossipConfig {
+            gossip_interval: Duration::from_millis(200),
+            small_cluster_threshold: 0,
+            full_sync_interval: 1000,
+            ..Default::default()
+        };
 
-    let node_a = create_node(config.clone()).await?;
-    let node_b = create_node(config.clone()).await?;
-    connect_pair(&node_a, &node_b).await;
+        let node_a = create_node(config.clone()).await?;
+        let node_b = create_node(config.clone()).await?;
+        connect_pair(&node_a, &node_b).await;
 
-    node_a
-        .register("actor.delta.1".to_string(), node_a.registry.bind_addr)
-        .await?;
-    assert!(
-        wait_for_actor(&node_b, "actor.delta.1", Duration::from_secs(2)).await,
-        "initial actor should propagate"
-    );
+        node_a
+            .register("actor.delta.1".to_string(), node_a.registry.bind_addr)
+            .await?;
+        assert!(
+            wait_for_actor(&node_b, "actor.delta.1", Duration::from_secs(2)).await,
+            "initial actor should propagate"
+        );
 
-    let stats_before = node_b.stats().await;
+        let stats_before = node_b.stats().await;
 
-    node_a
-        .register("actor.delta.2".to_string(), node_a.registry.bind_addr)
-        .await?;
-    assert!(
-        wait_for_actor(&node_b, "actor.delta.2", Duration::from_secs(2)).await,
-        "second actor should propagate after initial sync"
-    );
+        node_a
+            .register("actor.delta.2".to_string(), node_a.registry.bind_addr)
+            .await?;
+        assert!(
+            wait_for_actor(&node_b, "actor.delta.2", Duration::from_secs(2)).await,
+            "second actor should propagate after initial sync"
+        );
 
-    assert!(
-        wait_for_exchange(
-            &node_b,
-            stats_before.delta_exchanges,
-            stats_before.full_sync_exchanges,
-            Duration::from_secs(2)
-        )
-        .await,
-        "gossip exchange counters should advance after second update"
-    );
+        assert!(
+            wait_for_exchange(
+                &node_b,
+                stats_before.delta_exchanges,
+                stats_before.full_sync_exchanges,
+                Duration::from_secs(2)
+            )
+            .await,
+            "gossip exchange counters should advance after second update"
+        );
 
-    node_a.shutdown().await;
-    node_b.shutdown().await;
-    Ok(())
+        node_a.shutdown().await;
+        node_b.shutdown().await;
+        Ok(())
+    })
 }
 
-#[tokio::test]
-async fn test_immediate_propagation_for_urgent_registration(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(3),
-        immediate_propagation_enabled: true,
-        urgent_gossip_fanout: 1,
-        ..Default::default()
-    };
+#[test]
+fn test_immediate_propagation_for_urgent_registration() -> Result<(), DynError> {
+    run_gossip_test(async {
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(3),
+            immediate_propagation_enabled: true,
+            urgent_gossip_fanout: 1,
+            ..Default::default()
+        };
 
-    let node_a = create_node(config.clone()).await?;
-    let node_b = create_node(config.clone()).await?;
-    connect_pair(&node_a, &node_b).await;
+        let node_a = create_node(config.clone()).await?;
+        let node_b = create_node(config.clone()).await?;
+        connect_pair(&node_a, &node_b).await;
 
-    node_a
-        .register_with_priority(
-            "actor.immediate".to_string(),
-            node_a.registry.bind_addr,
-            RegistrationPriority::Immediate,
-        )
-        .await?;
+        node_a
+            .register_with_priority(
+                "actor.immediate".to_string(),
+                node_a.registry.bind_addr,
+                RegistrationPriority::Immediate,
+            )
+            .await?;
 
-    assert!(
-        wait_for_actor(&node_b, "actor.immediate", Duration::from_secs(1)).await,
-        "urgent registration should propagate before normal gossip interval"
-    );
+        assert!(
+            wait_for_actor(&node_b, "actor.immediate", Duration::from_secs(1)).await,
+            "urgent registration should propagate before normal gossip interval"
+        );
 
-    node_a.shutdown().await;
-    node_b.shutdown().await;
-    Ok(())
+        node_a.shutdown().await;
+        node_b.shutdown().await;
+        Ok(())
+    })
 }

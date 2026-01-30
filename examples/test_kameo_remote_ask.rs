@@ -52,7 +52,12 @@ async fn main() {
 
     println!("Sending ask request...");
     let request = b"ECHO:Hello from Node A";
-    let result: kameo_remote::Result<bytes::Bytes> = conn.ask_with_timeout(bytes::Bytes::copy_from_slice(request), Duration::from_secs(2)).await;
+    let result: kameo_remote::Result<bytes::Bytes> = conn
+        .ask_with_timeout(
+            bytes::Bytes::copy_from_slice(request),
+            Duration::from_secs(2),
+        )
+        .await;
     match result {
         Ok(response) => {
             println!("✅ Got response: {:?}", String::from_utf8_lossy(&response));

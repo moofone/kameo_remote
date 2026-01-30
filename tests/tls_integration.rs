@@ -1,9 +1,66 @@
 use kameo_remote::{GossipRegistryHandle, SecretKey};
-use std::time::Duration;
+use std::future::Future;
+use std::time::{Duration, Instant};
+use tokio::runtime::Builder;
+
+const TLS_TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const TLS_TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const TLS_TEST_WORKERS: usize = 4;
+
+fn run_tls_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("tls-test-{}", name))
+        .stack_size(TLS_TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(TLS_TEST_WORKERS)
+                .thread_stack_size(TLS_TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build TLS test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn TLS test thread");
+
+    handle.join().expect("TLS test panicked");
+}
+
+async fn wait_for_actor(handle: &GossipRegistryHandle, name: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if handle.lookup(name).await.is_some() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+async fn wait_for_peers(
+    a: &GossipRegistryHandle,
+    b: &GossipRegistryHandle,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        let stats_a = a.registry.get_stats().await;
+        let stats_b = b.registry.get_stats().await;
+        if stats_a.active_peers >= 1 && stats_b.active_peers >= 1 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
 
 /// Test mutual authentication between two TLS-enabled nodes
-#[tokio::test]
-async fn test_mutual_authentication() {
+#[test]
+fn test_mutual_authentication() {
+    run_tls_test("mutual-authentication", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -13,8 +70,6 @@ async fn test_mutual_authentication() {
         .with_env_filter("kameo_remote=debug")
         .try_init()
         .ok();
-
-
 
     // Generate keypairs for both nodes
     let secret_key_a = SecretKey::generate();
@@ -30,15 +85,21 @@ async fn test_mutual_authentication() {
     };
 
     // Create TLS-enabled registries
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, Some(config.clone()))
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(config.clone()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, Some(config))
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(config),
+    )
+    .await
+    .expect("Failed to create registry B");
 
     // Get their addresses
     let addr_a = registry_a.registry.bind_addr;
@@ -54,17 +115,21 @@ async fn test_mutual_authentication() {
         .add_peer_with_node_id(addr_a, Some(node_id_a))
         .await;
 
-    // Manually trigger immediate connection for robustness
-    {
-    registry_b.lookup_peer(&node_id_a.to_peer_id())
+    // Manually trigger connection from the lexicographically smaller NodeId to avoid duplicate TLS dials.
+    let (dialer, target_peer_id, other_registry) = if node_id_a.as_bytes() <= node_id_b.as_bytes() {
+        (&registry_a, node_id_b.to_peer_id(), &registry_b)
+    } else {
+        (&registry_b, node_id_a.to_peer_id(), &registry_a)
+    };
+
+    let _primary_peer_ref = dialer
+        .lookup_peer(&target_peer_id)
         .await
-        .expect("Failed to connect B to A manually");
-    }
-    {
-    registry_a.lookup_peer(&node_id_b.to_peer_id())
-        .await
-        .expect("Failed to connect A to B manually");
-    }
+        .expect("Failed to establish TLS connection between peers");
+
+    // Wait until both registries report the connection as active.
+    let connected = wait_for_peers(dialer, other_registry, Duration::from_secs(5)).await;
+    assert!(connected, "TLS peers failed to connect");
 
     // Register an actor on A
     registry_a
@@ -72,16 +137,9 @@ async fn test_mutual_authentication() {
         .await
         .expect("Failed to register actor");
 
-    // Wait for gossip to propagate
-    // With instant first gossip, we still need time for:
-    // - First gossip round to be sent
-    // - FullSyncResponse to come back
-    // - Actor registry to be updated
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-
-    // Verify B can find the actor
-    let location = registry_b.lookup("test_actor").await;
-    assert!(location.is_some(), "Actor should be found on registry B");
+    // Wait for gossip to propagate with a deterministic helper instead of a fixed sleep
+    let propagated = wait_for_actor(&registry_b, "test_actor", Duration::from_secs(6)).await;
+    assert!(propagated, "Actor should be found on registry B");
 
     // Both registries should be connected with TLS
     let stats_a = registry_a.registry.get_stats().await;
@@ -97,11 +155,13 @@ async fn test_mutual_authentication() {
         stats_b.active_peers >= 1,
         "Registry B should have at least 1 connected peer"
     );
+    });
 }
 
 /// Test that impersonation is prevented - wrong NodeId rejects connection
-#[tokio::test]
-async fn test_impersonation_prevention() {
+#[test]
+fn test_impersonation_prevention() {
+    run_tls_test("impersonation-prevention", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -111,8 +171,6 @@ async fn test_impersonation_prevention() {
         .with_env_filter("kameo_remote=info")
         .try_init()
         .ok();
-
-
 
     // Generate keypairs
     let secret_key_a = SecretKey::generate();
@@ -132,10 +190,13 @@ async fn test_impersonation_prevention() {
     };
 
     // Create registries
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, Some(config.clone()))
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(config.clone()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
     let registry_imposter = GossipRegistryHandle::new_with_tls(
         "127.0.0.1:0".parse().unwrap(),
@@ -161,10 +222,7 @@ async fn test_impersonation_prevention() {
 
     // Register an actor on imposter
     registry_imposter
-        .register(
-            "secret_actor".to_string(),
-            addr_imposter,
-        )
+        .register("secret_actor".to_string(), addr_imposter)
         .await
         .expect("Failed to register actor");
 
@@ -185,11 +243,13 @@ async fn test_impersonation_prevention() {
         stats_a.active_peers, 0,
         "Should have no connected peers due to NodeId mismatch"
     );
+    });
 }
 
 /// Test that nodes can communicate bidirectionally over TLS
-#[tokio::test]
-async fn test_bidirectional_tls_communication() {
+#[test]
+fn test_bidirectional_tls_communication() {
+    run_tls_test("bidirectional-tls-communication", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -199,8 +259,6 @@ async fn test_bidirectional_tls_communication() {
         .with_env_filter("kameo_remote=debug")
         .try_init()
         .ok();
-
-
 
     let secret_key_a = SecretKey::generate();
     let node_id_a = secret_key_a.public();
@@ -215,15 +273,21 @@ async fn test_bidirectional_tls_communication() {
     };
 
     // Create registries
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, Some(config.clone()))
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(config.clone()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, Some(config))
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(config),
+    )
+    .await
+    .expect("Failed to create registry B");
 
     let addr_a = registry_a.registry.bind_addr;
     let addr_b = registry_b.registry.bind_addr;
@@ -259,11 +323,13 @@ async fn test_bidirectional_tls_communication() {
 
     assert!(location_b_on_a.is_some(), "A should know about B's actor");
     assert!(location_a_on_b.is_some(), "B should know about A's actor");
+    });
 }
 
 /// Test multiple nodes with TLS in a chain topology
-#[tokio::test]
-async fn test_multi_node_tls_chain() {
+#[test]
+fn test_multi_node_tls_chain() {
+    run_tls_test("multi-node-tls-chain", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -273,8 +339,6 @@ async fn test_multi_node_tls_chain() {
         .with_env_filter("kameo_remote=info")
         .try_init()
         .ok();
-
-
 
     // Create 3 nodes in a chain: A -> B -> C
     let secret_key_a = SecretKey::generate();
@@ -292,20 +356,29 @@ async fn test_multi_node_tls_chain() {
         ..Default::default()
     };
 
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, Some(config.clone()))
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(config.clone()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, Some(config.clone()))
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(config.clone()),
+    )
+    .await
+    .expect("Failed to create registry B");
 
-    let registry_c =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_c, Some(config))
-            .await
-            .expect("Failed to create registry C");
+    let registry_c = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_c,
+        Some(config),
+    )
+    .await
+    .expect("Failed to create registry C");
 
     let _addr_a = registry_a.registry.bind_addr;
     let addr_b = registry_b.registry.bind_addr;
@@ -355,11 +428,13 @@ async fn test_multi_node_tls_chain() {
 
     assert!(a_knows_b.is_some(), "A should know about B's actor");
     assert!(c_knows_b.is_some(), "C should know about B's actor");
+    });
 }
 
 /// Test that TLS connections handle disconnection and reconnection
-#[tokio::test]
-async fn test_tls_reconnection() {
+#[test]
+fn test_tls_reconnection() {
+    run_tls_test("tls-reconnection", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -369,8 +444,6 @@ async fn test_tls_reconnection() {
         .with_env_filter("kameo_remote=info")
         .try_init()
         .ok();
-
-
 
     let secret_key_a = SecretKey::generate();
     let node_id_a = secret_key_a.public();
@@ -417,10 +490,7 @@ async fn test_tls_reconnection() {
 
     // Register an actor on A
     registry_a
-        .register(
-            "persistent_actor".to_string(),
-            addr_a,
-        )
+        .register("persistent_actor".to_string(), addr_a)
         .await
         .unwrap();
 
@@ -448,9 +518,13 @@ async fn test_tls_reconnection() {
     // This is acceptable behavior with fast gossip interval
 
     // Restart B with same key (but different port since old one might be in TIME_WAIT)
-    let registry_b_new = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, Some(config))
-        .await
-        .expect("Failed to recreate registry B");
+    let registry_b_new = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(config),
+    )
+    .await
+    .expect("Failed to recreate registry B");
 
     let addr_b_new = registry_b_new.registry.bind_addr;
 
@@ -462,9 +536,10 @@ async fn test_tls_reconnection() {
 
     // Manually trigger immediate connection to new address for robustness
     {
-    registry_a.lookup_peer(&node_id_b.to_peer_id())
-        .await
-        .expect("Failed to connect A to new B address manually");
+        registry_a
+            .lookup_peer(&node_id_b.to_peer_id())
+            .await
+            .expect("Failed to connect A to new B address manually");
     }
 
     // Wait for reconnection and gossip propagation
@@ -497,11 +572,13 @@ async fn test_tls_reconnection() {
         "A should have reconnected to B (active_peers={})",
         stats.active_peers
     );
+    });
 }
 
 /// Test DNS name encoding and decoding for NodeIds
-#[tokio::test]
-async fn test_node_id_dns_encoding() {
+#[test]
+fn test_node_id_dns_encoding() {
+    run_tls_test("node-id-dns-encoding", || async {
     use kameo_remote::tls::name;
 
     // Test with various NodeIds
@@ -530,12 +607,14 @@ async fn test_node_id_dns_encoding() {
     assert!(name::decode("invalid.name").is_none());
     assert!(name::decode("").is_none());
     assert!(name::decode("not-base32.kameo.invalid").is_none());
+    });
 }
 
 /// Test that instant startup gossip works even with very long gossip interval
 /// This proves nodes discover each other through initial FullSync handshake, not periodic gossip
-#[tokio::test]
-async fn test_instant_gossip_with_long_interval() {
+#[test]
+fn test_instant_gossip_with_long_interval() {
+    run_tls_test("instant-gossip-long-interval", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -559,10 +638,13 @@ async fn test_instant_gossip_with_long_interval() {
     let node_id_b = secret_key_b.public();
 
     // Start node A and register an actor
-    let registry_a =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_a, Some(config.clone()))
-            .await
-            .expect("Failed to create registry A");
+    let registry_a = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_a,
+        Some(config.clone()),
+    )
+    .await
+    .expect("Failed to create registry A");
 
     let addr_a = registry_a.registry.bind_addr;
 
@@ -572,13 +654,19 @@ async fn test_instant_gossip_with_long_interval() {
         .await
         .expect("Failed to register actor on A");
 
-    tracing::info!("✅ Node A started and registered 'early_actor' at {}", addr_a);
+    tracing::info!(
+        "✅ Node A started and registered 'early_actor' at {}",
+        addr_a
+    );
 
     // Start node B (which will connect to A)
-    let registry_b =
-        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), secret_key_b, Some(config))
-            .await
-            .expect("Failed to create registry B");
+    let registry_b = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        secret_key_b,
+        Some(config),
+    )
+    .await
+    .expect("Failed to create registry B");
 
     let addr_b = registry_b.registry.bind_addr;
 
@@ -592,9 +680,10 @@ async fn test_instant_gossip_with_long_interval() {
 
     // Manually trigger immediate connection since add_peer is passive and gossip interval is 20s
     {
-    registry_b.lookup_peer(&node_id_a.to_peer_id())
-        .await
-        .expect("Failed to connect B to A");
+        registry_b
+            .lookup_peer(&node_id_a.to_peer_id())
+            .await
+            .expect("Failed to connect B to A");
     }
 
     // Connect A to B for bidirectional communication
@@ -620,7 +709,9 @@ async fn test_instant_gossip_with_long_interval() {
     );
 
     tracing::info!("✅ SUCCESS: B discovered A's actor through instant startup gossip!");
-    tracing::info!("   This proves initial handshake works immediately, even with 20s gossip interval");
+    tracing::info!(
+        "   This proves initial handshake works immediately, even with 20s gossip interval"
+    );
 
     // Verify connection was established
     let stats_b = registry_b.registry.get_stats().await;
@@ -632,11 +723,13 @@ async fn test_instant_gossip_with_long_interval() {
     tracing::info!("✅ All assertions passed with 20-second gossip interval!");
     tracing::info!("   IMPORTANT: This proves that nodes discover each other through");
     tracing::info!("   the initial FullSync handshake, NOT through periodic gossip!");
+    });
 }
 
 /// Test certificate generation and basic validation
-#[tokio::test]
-async fn test_certificate_generation() {
+#[test]
+fn test_certificate_generation() {
+    run_tls_test("certificate-generation", || async {
     // Install the crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -661,4 +754,5 @@ async fn test_certificate_generation() {
         let _connector = tls_config.connector();
         let _acceptor = tls_config.acceptor();
     }
+    });
 }

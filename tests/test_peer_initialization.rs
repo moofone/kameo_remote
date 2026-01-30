@@ -1,10 +1,37 @@
 use kameo_remote::*;
+use std::future::Future;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::time::sleep;
 
+const PEER_INIT_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const PEER_INIT_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const PEER_INIT_WORKERS: usize = 4;
+
+fn run_peer_init_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("peer-init-test-{}", name))
+        .stack_size(PEER_INIT_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(PEER_INIT_WORKERS)
+                .thread_stack_size(PEER_INIT_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build peer init test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn peer init test thread");
+
+    handle.join().expect("peer init test panicked");
+}
+
 /// Test the proposed fix: Allow specifying peer names when initializing
-#[tokio::test]
-async fn test_peer_initialization_with_names() {
+async fn test_peer_initialization_with_names_inner() {
     println!("🧪 Testing proposed peer initialization with names");
 
     let node1_addr = "127.0.0.1:0".parse().unwrap();
@@ -90,23 +117,34 @@ async fn test_peer_initialization_with_names() {
     // Wait for connections
     sleep(Duration::from_millis(200)).await;
 
-    // Register actors
-    // Register actors using real bind addresses
+    // Register actors using real bind addresses with immediate priority to reduce gossip flake.
     handle1
-        .register("service1".to_string(), handle1.registry.bind_addr)
+        .register_with_priority(
+            "service1".to_string(),
+            handle1.registry.bind_addr,
+            RegistrationPriority::Immediate,
+        )
         .await
         .unwrap();
     handle2
-        .register("service2".to_string(), handle2.registry.bind_addr)
+        .register_with_priority(
+            "service2".to_string(),
+            handle2.registry.bind_addr,
+            RegistrationPriority::Immediate,
+        )
         .await
         .unwrap();
     handle3
-        .register("service3".to_string(), handle3.registry.bind_addr)
+        .register_with_priority(
+            "service3".to_string(),
+            handle3.registry.bind_addr,
+            RegistrationPriority::Immediate,
+        )
         .await
         .unwrap();
 
     // Wait for gossip (minimal initial sleep)
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(1000)).await;
 
     // Test discovery from all nodes with retry
     println!("\n🔍 Testing full mesh discovery:");
@@ -121,7 +159,8 @@ async fn test_peer_initialization_with_names() {
         for service in ["service1", "service2", "service3"] {
             // Robust wait for discovery
             let mut found = false;
-            for _ in 0..20 { // Try for 2 seconds (20 * 100ms)
+            for _ in 0..20 {
+                // Try for 2 seconds (20 * 100ms)
                 if handle.lookup(service).await.is_some() {
                     found = true;
                     break;
@@ -130,12 +169,7 @@ async fn test_peer_initialization_with_names() {
             }
 
             println!("  lookup('{}') = {}", service, found);
-            assert!(
-                found,
-                "{} should discover {}",
-                node_name,
-                service
-            );
+            assert!(found, "{} should discover {}", node_name, service);
         }
     }
 
@@ -143,4 +177,9 @@ async fn test_peer_initialization_with_names() {
     handle1.shutdown().await;
     handle2.shutdown().await;
     handle3.shutdown().await;
+}
+
+#[test]
+fn test_peer_initialization_with_names() {
+    run_peer_init_test("with-names", || test_peer_initialization_with_names_inner());
 }

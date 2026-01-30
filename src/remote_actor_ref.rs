@@ -69,7 +69,10 @@ impl RemoteActorRef {
     /// Create a new RemoteActorRef from location and connection
     /// Note: This creates a RemoteActorRef without a registry reference (cannot auto-reconnect)
     /// Prefer using `with_registry()` which is called by `lookup()`
-    pub fn new(location: RemoteActorLocation, connection: crate::connection_pool::ConnectionHandle) -> Self {
+    pub fn new(
+        location: RemoteActorLocation,
+        connection: crate::connection_pool::ConnectionHandle,
+    ) -> Self {
         Self {
             location,
             connection: Some(Arc::new(connection)),
@@ -101,6 +104,16 @@ impl RemoteActorRef {
         self.registry.strong_count() > 0
     }
 
+    /// Get a reference to the underlying connection handle for advanced use cases.
+    ///
+    /// This provides access to low-level operations like `ask_direct()` which
+    /// bypass the RegistryMessage overhead for maximum performance.
+    ///
+    /// Returns None if no connection is established yet.
+    pub fn connection_ref(&self) -> Option<&Arc<crate::connection_pool::ConnectionHandle>> {
+        self.connection.as_ref()
+    }
+
     /// Send a fire-and-forget message to the remote actor.
     ///
     /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
@@ -120,8 +133,12 @@ impl RemoteActorRef {
         }
 
         // Get connection reference
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::GossipError::ActorNotFound(format!(
+                "'{}' - not listening yet",
+                self.location.address
+            ))
+        })?;
 
         // Direct call - ZERO LOCKS
         // ConnectionHandle.tell() uses internal lock-free operations
@@ -131,7 +148,10 @@ impl RemoteActorRef {
     /// Send a fire-and-forget message using TellMessage
     ///
     /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
-    pub async fn tell_message<'a>(&self, message: crate::connection_pool::TellMessage<'a>) -> crate::Result<()> {
+    pub async fn tell_message<'a>(
+        &self,
+        message: crate::connection_pool::TellMessage<'a>,
+    ) -> crate::Result<()> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
             if registry.shutdown.load(Ordering::Relaxed) {
@@ -141,8 +161,12 @@ impl RemoteActorRef {
             return Err(crate::GossipError::Shutdown);
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::GossipError::ActorNotFound(format!(
+                "'{}' - not listening yet",
+                self.location.address
+            ))
+        })?;
 
         conn.tell(message).await
     }
@@ -150,10 +174,11 @@ impl RemoteActorRef {
     /// Send a request and wait for a response.
     ///
     /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
+    /// ZERO-COPY: Returns Bytes instead of Vec<u8> to avoid allocation.
     /// ConnectionHandle internally uses lock-free stream operations.
     ///
     /// Returns error if registry has shut down or no connection is available.
-    pub async fn ask(&self, request: &[u8]) -> crate::Result<Vec<u8>> {
+    pub async fn ask(&self, request: &[u8]) -> crate::Result<bytes::Bytes> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
             if registry.shutdown.load(Ordering::Relaxed) {
@@ -163,8 +188,12 @@ impl RemoteActorRef {
             return Err(crate::GossipError::Shutdown);
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::GossipError::ActorNotFound(format!(
+                "'{}' - not listening yet",
+                self.location.address
+            ))
+        })?;
 
         // Direct call - ZERO LOCKS
         conn.ask(request).await
@@ -188,8 +217,12 @@ impl RemoteActorRef {
             return Err(crate::GossipError::Shutdown);
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::GossipError::ActorNotFound(format!(
+                "'{}' - not listening yet",
+                self.location.address
+            ))
+        })?;
 
         conn.ask_with_timeout_bytes(request, timeout).await
     }
@@ -207,8 +240,12 @@ impl RemoteActorRef {
             return Err(crate::GossipError::Shutdown);
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::GossipError::ActorNotFound(format!(
+                "'{}' - not listening yet",
+                self.location.address
+            ))
+        })?;
 
         conn.ask_with_reply_to(request).await
     }
@@ -264,12 +301,15 @@ impl RemoteActorRef {
             return Err(crate::GossipError::Shutdown);
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| crate::GossipError::ActorNotFound(format!("'{}' - not listening yet", self.location.address)))?;
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            crate::GossipError::ActorNotFound(format!(
+                "'{}' - not listening yet",
+                self.location.address
+            ))
+        })?;
 
         // Direct call - ZERO LOCKS
-        conn
-            .ask_streaming_bytes(payload, type_hash, actor_id, timeout)
+        conn.ask_streaming_bytes(payload, type_hash, actor_id, timeout)
             .await
     }
 

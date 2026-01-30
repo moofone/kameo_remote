@@ -67,8 +67,8 @@ async fn main() {
         );
 
         // Check connections
-        let pool_a = handle_a.registry.connection_pool.lock().await;
-        let pool_b = handle_b.registry.connection_pool.lock().await;
+        let pool_a = &handle_a.registry.connection_pool;
+        let pool_b = &handle_b.registry.connection_pool;
 
         println!("Node A connections: {}", pool_a.connection_count());
         println!("Node B connections: {}", pool_b.connection_count());

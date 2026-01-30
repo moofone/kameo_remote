@@ -63,7 +63,7 @@ async fn test_ask_response_with_correlation() {
     // Test 1: Simple ask/response
     info!("Test 1: Simple ask/response");
     {
-        let pool = registry_b.connection_pool.lock().await;
+        let pool = &registry_b.connection_pool;
         let conn = pool.connections_by_addr.get(&addr_a).unwrap();
         
         // Send ask request
@@ -95,7 +95,7 @@ async fn test_ask_response_with_correlation() {
     // Test 2: Multiple concurrent asks
     info!("\nTest 2: Multiple concurrent asks");
     {
-        let pool = registry_a.connection_pool.lock().await;
+        let pool = &registry_a.connection_pool;
         let conn = pool.connections_by_addr.get(&addr_b).unwrap().clone();
         drop(pool);
         
@@ -132,7 +132,7 @@ async fn test_ask_response_with_correlation() {
     // Test 3: Correlation ID uniqueness
     info!("\nTest 3: Correlation ID tracking");
     {
-        let pool = registry_a.connection_pool.lock().await;
+        let pool = &registry_a.connection_pool;
         let conn = pool.connections_by_addr.values().next().unwrap();
         
         // Send multiple asks rapidly to test correlation ID allocation
@@ -188,7 +188,7 @@ async fn test_ask_error_cases() {
     // Test 1: Ask with no connection
     info!("Test 1: Ask with no connection");
     {
-        let pool = registry.connection_pool.lock().await;
+        let pool = &registry.connection_pool;
         assert!(pool.connections_by_addr.is_empty(), "Should have no connections");
     }
     
@@ -253,7 +253,7 @@ async fn test_ask_performance() {
     
     // Warm up
     {
-        let pool = registry_a.connection_pool.lock().await;
+        let pool = &registry_a.connection_pool;
         let conn = pool.connections_by_addr.values().next().unwrap();
         for _ in 0..100 {
             let _ = conn.ask_with_reply_to(b"warmup").await;
@@ -263,7 +263,7 @@ async fn test_ask_performance() {
     info!("Starting performance test...");
     
     // Performance test
-    let pool = registry_a.connection_pool.lock().await;
+    let pool = &registry_a.connection_pool;
     let conn = pool.connections_by_addr.values().next().unwrap().clone();
     drop(pool);
     

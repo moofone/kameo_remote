@@ -9,14 +9,43 @@
 //! - Connection cleanup on drop
 
 use kameo_remote::*;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::runtime::Builder;
 use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 
+const REMOTE_REF_TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const REMOTE_REF_TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const REMOTE_REF_TEST_WORKERS: usize = 4;
+
+fn run_remote_actor_ref_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("remote-ref-test-{}", name))
+        .stack_size(REMOTE_REF_TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(REMOTE_REF_TEST_WORKERS)
+                .thread_stack_size(REMOTE_REF_TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build remote actor ref test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn remote actor ref test thread");
+
+    handle
+        .join()
+        .expect("remote actor ref resource management test panicked");
+}
+
 #[cfg(feature = "test-helpers")]
-#[tokio::test]
-async fn test_remote_actor_ref_detects_shutdown() {
+async fn test_remote_actor_ref_detects_shutdown_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -48,9 +77,7 @@ async fn test_remote_actor_ref_detects_shutdown() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor on node B
@@ -96,8 +123,15 @@ async fn test_remote_actor_ref_detects_shutdown() {
     println!("✅ Shutdown detection works correctly");
 }
 
-#[tokio::test]
-async fn test_concurrent_remote_actor_ref_usage() {
+#[cfg(feature = "test-helpers")]
+#[test]
+fn test_remote_actor_ref_detects_shutdown() {
+    run_remote_actor_ref_test("detects-shutdown", || {
+        test_remote_actor_ref_detects_shutdown_inner()
+    });
+}
+
+async fn test_concurrent_remote_actor_ref_usage_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -129,9 +163,7 @@ async fn test_concurrent_remote_actor_ref_usage() {
 
     // Connect nodes
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor
@@ -147,7 +179,8 @@ async fn test_concurrent_remote_actor_ref_usage() {
     sleep(Duration::from_millis(100)).await;
 
     // Get RemoteActorRef
-    let remote_actor: kameo_remote::RemoteActorRef = handle_a.lookup("concurrent_service").await.unwrap();
+    let remote_actor: kameo_remote::RemoteActorRef =
+        handle_a.lookup("concurrent_service").await.unwrap();
 
     // Clone it multiple times (simulating concurrent use)
     let actor1 = remote_actor.clone();
@@ -172,8 +205,14 @@ async fn test_concurrent_remote_actor_ref_usage() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_weak_registry_ref_prevents_cycles() {
+#[test]
+fn test_concurrent_remote_actor_ref_usage() {
+    run_remote_actor_ref_test("concurrent-usage", || {
+        test_concurrent_remote_actor_ref_usage_inner()
+    });
+}
+
+async fn test_weak_registry_ref_prevents_cycles_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -205,9 +244,7 @@ async fn test_weak_registry_ref_prevents_cycles() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor on node B
@@ -223,7 +260,8 @@ async fn test_weak_registry_ref_prevents_cycles() {
     sleep(Duration::from_millis(100)).await;
 
     // Get RemoteActorRef from node A (looks up remote actor on node B)
-    let remote_actor: kameo_remote::RemoteActorRef = handle_a.lookup("weak_test_service").await.unwrap();
+    let remote_actor: kameo_remote::RemoteActorRef =
+        handle_a.lookup("weak_test_service").await.unwrap();
 
     // Verify registry is alive
     assert!(remote_actor.is_registry_alive(), "Registry should be alive");
@@ -246,8 +284,14 @@ async fn test_weak_registry_ref_prevents_cycles() {
     println!("✅ Weak reference allows cleanup (operations return Shutdown error)");
 }
 
-#[tokio::test]
-async fn test_remote_actor_ref_clone_independence() {
+#[test]
+fn test_weak_registry_ref_prevents_cycles() {
+    run_remote_actor_ref_test("weak-registry-ref", || {
+        test_weak_registry_ref_prevents_cycles_inner()
+    });
+}
+
+async fn test_remote_actor_ref_clone_independence_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -279,9 +323,7 @@ async fn test_remote_actor_ref_clone_independence() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor
@@ -316,8 +358,14 @@ async fn test_remote_actor_ref_clone_independence() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_remote_actor_ref_location_metadata() {
+#[test]
+fn test_remote_actor_ref_clone_independence() {
+    run_remote_actor_ref_test("clone-independence", || {
+        test_remote_actor_ref_clone_independence_inner()
+    });
+}
+
+async fn test_remote_actor_ref_location_metadata_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -349,9 +397,7 @@ async fn test_remote_actor_ref_location_metadata() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor with metadata
@@ -368,12 +414,19 @@ async fn test_remote_actor_ref_location_metadata() {
     sleep(Duration::from_millis(100)).await;
 
     // Get RemoteActorRef
-    let remote_actor: kameo_remote::RemoteActorRef = handle_a.lookup("metadata_service").await.unwrap();
+    let remote_actor: kameo_remote::RemoteActorRef =
+        handle_a.lookup("metadata_service").await.unwrap();
 
     // Verify location metadata is accessible
     // Note: address includes port (e.g., "127.0.0.1:8935:0")
-    assert!(!remote_actor.location.address.is_empty(), "Actor address should be preserved");
-    assert_eq!(remote_actor.location.peer_id, peer_id_b, "Peer ID should match");
+    assert!(
+        !remote_actor.location.address.is_empty(),
+        "Actor address should be preserved"
+    );
+    assert_eq!(
+        remote_actor.location.peer_id, peer_id_b,
+        "Peer ID should match"
+    );
 
     // Debug output should show useful info
     println!("RemoteActorRef location: {:?}", remote_actor.location);
@@ -384,9 +437,15 @@ async fn test_remote_actor_ref_location_metadata() {
     handle_b.shutdown().await;
 }
 
+#[test]
+fn test_remote_actor_ref_location_metadata() {
+    run_remote_actor_ref_test("location-metadata", || {
+        test_remote_actor_ref_location_metadata_inner()
+    });
+}
+
 #[cfg(feature = "test-helpers")]
-#[tokio::test]
-async fn test_connection_reuse_across_lookups() {
+async fn test_connection_reuse_across_lookups_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -418,9 +477,7 @@ async fn test_connection_reuse_across_lookups() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor
@@ -456,8 +513,15 @@ async fn test_connection_reuse_across_lookups() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_remote_actor_ref_debug_output() {
+#[cfg(feature = "test-helpers")]
+#[test]
+fn test_connection_reuse_across_lookups() {
+    run_remote_actor_ref_test("connection-reuse", || {
+        test_connection_reuse_across_lookups_inner()
+    });
+}
+
+async fn test_remote_actor_ref_debug_output_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -489,9 +553,7 @@ async fn test_remote_actor_ref_debug_output() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor
@@ -506,7 +568,8 @@ async fn test_remote_actor_ref_debug_output() {
 
     sleep(Duration::from_millis(100)).await;
 
-    let remote_actor: kameo_remote::RemoteActorRef = handle_a.lookup("debug_service").await.unwrap();
+    let remote_actor: kameo_remote::RemoteActorRef =
+        handle_a.lookup("debug_service").await.unwrap();
 
     // Debug output should be useful
     let debug_str = format!("{:?}", remote_actor);
@@ -526,8 +589,14 @@ async fn test_remote_actor_ref_debug_output() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_remote_actor_ref_with_timeout() {
+#[test]
+fn test_remote_actor_ref_debug_output() {
+    run_remote_actor_ref_test("debug-output", || {
+        test_remote_actor_ref_debug_output_inner()
+    });
+}
+
+async fn test_remote_actor_ref_with_timeout_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -559,9 +628,7 @@ async fn test_remote_actor_ref_with_timeout() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register actor
@@ -576,11 +643,15 @@ async fn test_remote_actor_ref_with_timeout() {
 
     sleep(Duration::from_millis(100)).await;
 
-    let remote_actor: kameo_remote::RemoteActorRef = handle_a.lookup("timeout_service").await.unwrap();
+    let remote_actor: kameo_remote::RemoteActorRef =
+        handle_a.lookup("timeout_service").await.unwrap();
 
     // Test ask with timeout
     let result = remote_actor
-        .ask_with_timeout(bytes::Bytes::from_static(b"ping"), Duration::from_millis(100))
+        .ask_with_timeout(
+            bytes::Bytes::from_static(b"ping"),
+            Duration::from_millis(100),
+        )
         .await;
 
     assert!(result.is_ok(), "ask_with_timeout should succeed");
@@ -590,8 +661,14 @@ async fn test_remote_actor_ref_with_timeout() {
     handle_b.shutdown().await;
 }
 
-#[tokio::test]
-async fn test_multiple_remote_actor_refs_same_actor() {
+#[test]
+fn test_remote_actor_ref_with_timeout() {
+    run_remote_actor_ref_test("with-timeout", || {
+        test_remote_actor_ref_with_timeout_inner()
+    });
+}
+
+async fn test_multiple_remote_actor_refs_same_actor_inner() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
@@ -623,9 +700,7 @@ async fn test_multiple_remote_actor_refs_same_actor() {
 
     // Connect
     let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&handle_b.registry.bind_addr)
-        .await
-        .unwrap();
+    peer_b.connect(&handle_b.registry.bind_addr).await.unwrap();
     sleep(Duration::from_millis(100)).await;
 
     // Register single actor
@@ -654,4 +729,11 @@ async fn test_multiple_remote_actor_refs_same_actor() {
 
     handle_a.shutdown().await;
     handle_b.shutdown().await;
+}
+
+#[test]
+fn test_multiple_remote_actor_refs_same_actor() {
+    run_remote_actor_ref_test("multiple-refs", || {
+        test_multiple_remote_actor_refs_same_actor_inner()
+    });
 }

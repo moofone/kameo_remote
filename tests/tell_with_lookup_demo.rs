@@ -1,11 +1,40 @@
 use kameo_remote::*;
+use std::future::Future;
 use std::time::{Duration, Instant};
+use tokio::runtime::Builder;
 use tokio::time::sleep;
+
+const LOOKUP_TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
+const LOOKUP_TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const LOOKUP_TEST_WORKERS: usize = 4;
+
+fn run_lookup_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(format!("tell-lookup-test-{}", name))
+        .stack_size(LOOKUP_TEST_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(LOOKUP_TEST_WORKERS)
+                .thread_stack_size(LOOKUP_TEST_WORKER_STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("failed to build tell_with_lookup test runtime");
+            runtime.block_on(test());
+        })
+        .expect("failed to spawn tell_with_lookup test thread");
+
+    handle.join().expect("tell_with_lookup test panicked");
+}
 
 /// Comprehensive TellMessage API demonstration with lookup() by actor name
 /// Tests individual, sequential, and batch message sending with performance comparisons
-#[tokio::test]
-async fn test_tell_with_lookup_and_performance_comparison() {
+#[test]
+fn test_tell_with_lookup_and_performance_comparison() {
+    run_lookup_test("tell-lookup-performance", || async {
     println!("🚀 TellMessage with Lookup() Performance Test");
     println!("=============================================");
 
@@ -577,6 +606,7 @@ async fn test_tell_with_lookup_and_performance_comparison() {
     node3.shutdown().await;
 
     println!("\n✅ Test completed successfully!");
+    });
 }
 
 /// Test error handling when actors are not found

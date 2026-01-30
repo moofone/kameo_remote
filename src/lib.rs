@@ -704,7 +704,7 @@ impl Peer {
 
         // First configure the address for this peer
         {
-            let pool = self.registry.connection_pool.lock().await;
+            let pool = &self.registry.connection_pool;
             pool.peer_id_to_addr.insert(self.peer_id.clone(), *addr);
             pool.reindex_connection_addr(&self.peer_id, *addr);
         }
@@ -896,7 +896,7 @@ impl Peer {
 
     /// Check if this peer is currently connected
     pub async fn is_connected(&self) -> bool {
-        let pool = self.registry.connection_pool.lock().await;
+        let pool = &self.registry.connection_pool;
 
         // Check if we have a connection by peer ID
         if let Some(conn) = pool.get_connection_by_peer_id(&self.peer_id) {
@@ -908,7 +908,7 @@ impl Peer {
 
     /// Disconnect from this peer
     pub async fn disconnect(&self) -> Result<()> {
-        let mut pool = self.registry.connection_pool.lock().await;
+        let pool = &self.registry.connection_pool;
 
         if let Some(conn) = pool.get_connection_by_peer_id(&self.peer_id) {
             // Mark connection as disconnected
@@ -960,7 +960,7 @@ impl Peer {
 
             // Check if we have a connection to this peer
             {
-                let pool = self.registry.connection_pool.lock().await;
+                let pool = &self.registry.connection_pool;
                 if pool.get_connection_by_peer_id(&self.peer_id).is_some() {
                     break;
                 }
@@ -1029,6 +1029,10 @@ pub enum MessageType {
     StreamResponseData = 0x14,
     /// End of streaming RESPONSE transfer
     StreamResponseEnd = 0x15,
+    /// Fast-path direct ask (bypasses actor message handler)
+    DirectAsk = 0x20,
+    /// Fast-path direct response
+    DirectResponse = 0x21,
 }
 
 impl MessageType {
@@ -1046,6 +1050,8 @@ impl MessageType {
             0x13 => Some(MessageType::StreamResponseStart),
             0x14 => Some(MessageType::StreamResponseData),
             0x15 => Some(MessageType::StreamResponseEnd),
+            0x20 => Some(MessageType::DirectAsk),
+            0x21 => Some(MessageType::DirectResponse),
             _ => None,
         }
     }

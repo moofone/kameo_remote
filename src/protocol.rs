@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use tracing::{debug, info, warn};
@@ -83,10 +79,10 @@ impl StreamingState {
     ) -> Result<Option<(Bytes, u16)>> {
         // If stream doesn't exist, we might have missed the start frame or it was cleaned up
         if !self.active_streams.contains_key(&header.stream_id) {
-             return Err(GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Received chunk for unknown stream_id={}", header.stream_id),
-                )));
+            return Err(GossipError::Network(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Received chunk for unknown stream_id={}", header.stream_id),
+            )));
         }
 
         let stream = self
@@ -103,16 +99,16 @@ impl StreamingState {
         // With BytesMut, we assume strict TCP ordering and no duplicates.
         // For robustness, we could check if appending would exceed total_size.
         if stream.received_size + chunk_data.len() > stream.total_size as usize {
-             return Err(GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Received chunk overflow for stream_id={}", header.stream_id),
-                )));
+            return Err(GossipError::Network(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Received chunk overflow for stream_id={}", header.stream_id),
+            )));
         }
 
-        // Validate chunk index? 
+        // Validate chunk index?
         // We are assuming ordered delivery. The chunk_index is mostly for manual assembly logic,
         // but with TCP and BytesMut we just append.
-        
+
         // Append chunk
         stream.received_size += chunk_data.len();
         stream.data_accumulator.put_slice(&chunk_data);
@@ -234,8 +230,12 @@ pub(crate) async fn process_read_result(
                 msg
             };
 
-            if let Err(e) =
-                crate::connection_pool::handle_incoming_message(registry.clone(), peer_addr, msg_to_handle).await
+            if let Err(e) = crate::connection_pool::handle_incoming_message(
+                registry.clone(),
+                peer_addr,
+                msg_to_handle,
+            )
+            .await
             {
                 warn!(error = %e, "Failed to process gossip message");
             }
@@ -267,9 +267,22 @@ pub(crate) async fn process_read_result(
                 } else {
                     None
                 };
-                let _ = handler
+                // Handle the actor message and send response if it's an ask
+                if let Ok(Some(response)) = handler
                     .handle_actor_message(&actor_id_str, type_hash, &payload, correlation)
-                    .await;
+                    .await
+                {
+                    // Only send response for asks (non-zero correlation_id)
+                    if correlation_id != 0 {
+                        send_streaming_response(
+                            registry,
+                            peer_addr,
+                            correlation_id,
+                            bytes::Bytes::from(response),
+                        )
+                        .await;
+                    }
+                }
             }
         }
         MessageReadResult::Streaming {
@@ -284,8 +297,8 @@ pub(crate) async fn process_read_result(
                     if msg_type == crate::MessageType::StreamStart as u8
                         || msg_type == crate::MessageType::StreamResponseStart as u8 =>
                 {
-                    if let Err(e) = streaming_state
-                        .start_stream_with_correlation(stream_header, correlation_id)
+                    if let Err(e) =
+                        streaming_state.start_stream_with_correlation(stream_header, correlation_id)
                     {
                         warn!(error = %e, "Failed to start streaming for stream_id={}", stream_header.stream_id);
                     }
@@ -294,25 +307,19 @@ pub(crate) async fn process_read_result(
                     if msg_type == crate::MessageType::StreamData as u8
                         || msg_type == crate::MessageType::StreamResponseData as u8 =>
                 {
-                     // Ensure stream is started (auto-start)
-                    if let Err(e) = streaming_state
-                        .start_stream_with_correlation(stream_header, correlation_id)
+                    // Ensure stream is started (auto-start)
+                    if let Err(e) =
+                        streaming_state.start_stream_with_correlation(stream_header, correlation_id)
                     {
-                        debug!(error = %e, "Auto-starting stream for data chunk: stream_id={}", stream_header.stream_id);
+                        let _ = e;
                     }
-                    
+
                     if let Ok(Some((complete_data, corr_id))) =
                         streaming_state.add_chunk_with_correlation(stream_header, chunk_data)
                     {
                         if msg_type == crate::MessageType::StreamResponseData as u8 {
-                            debug!(stream_id = stream_header.stream_id, correlation_id = corr_id, "✅ STREAMING RESPONSE: Assembled complete response via data chunk");
-                            handle_response_message(
-                                registry,
-                                peer_addr,
-                                corr_id,
-                                complete_data,
-                            )
-                            .await;
+                            handle_response_message(registry, peer_addr, corr_id, complete_data)
+                                .await;
                         } else {
                             handle_assembled_message(
                                 registry,
@@ -331,7 +338,7 @@ pub(crate) async fn process_read_result(
                     if let Ok(Some((complete_data, corr_id))) =
                         streaming_state.finalize_stream_with_correlation(stream_header.stream_id)
                     {
-                         handle_assembled_message(
+                        handle_assembled_message(
                             registry,
                             peer_addr,
                             stream_header.actor_id,
@@ -349,18 +356,10 @@ pub(crate) async fn process_read_result(
                     {
                         if corr_id != 0 {
                             // This is a response to an ask - deliver it to the correlation tracker
-                            debug!(stream_id = stream_header.stream_id, correlation_id = corr_id, response_len = complete_data.len(),
-                                  "📨 STREAMING RESPONSE: Delivering complete streaming response to correlation tracker");
-                            handle_response_message(
-                                registry,
-                                peer_addr,
-                                corr_id,
-                                complete_data,
-                            )
-                            .await;
+                            handle_response_message(registry, peer_addr, corr_id, complete_data)
+                                .await;
                         } else {
-                            debug!(stream_id = stream_header.stream_id,
-                                  "Ignoring streaming response with correlation_id=0 (tell responses should not exist)");
+                            // Ignore streaming response with correlation_id=0
                         }
                     }
                 }
@@ -370,16 +369,68 @@ pub(crate) async fn process_read_result(
             }
         }
         MessageReadResult::Raw(_payload) => {
-             #[cfg(any(test, feature = "test-helpers", debug_assertions))]
+            #[cfg(any(test, feature = "test-helpers", debug_assertions))]
             {
                 if std::env::var("KAMEO_REMOTE_TYPED_TELL_CAPTURE").is_ok() {
                     crate::test_helpers::record_raw_payload(_payload.clone());
                 }
             }
-            debug!(peer_addr = %peer_addr, "Ignoring raw message payload");
+            ()
+        }
+        MessageReadResult::DirectAsk {
+            correlation_id,
+            payload,
+        } => {
+            // Fast-path DirectAsk - bypasses handler and RegistryMessage overhead
+            // Wire format from sender: [type:1][correlation_id:2][payload_len:4][payload:N]
+            // But 'payload' here contains only the [payload:N] part
+            // For benchmarking: echo the payload back immediately using DirectResponse
+            let header =
+                crate::framing::write_direct_response_header(correlation_id, payload.len());
+
+            // Send DirectResponse using connection pool
+            let pool = &registry.connection_pool;
+            if let Some(conn) = pool.get_connection_by_addr(&peer_addr) {
+                if let Some(ref stream_handle) = conn.stream_handle {
+                    let mut attempts = 0u32;
+                    loop {
+                        match stream_handle
+                            .write_direct_response_inline(header, payload.clone())
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(crate::GossipError::Network(err))
+                                if err.kind() == std::io::ErrorKind::WouldBlock =>
+                            {
+                                // Backpressure: wait for buffer space instead of dropping responses.
+                                attempts += 1;
+                                if attempts % 8 == 0 {
+                                    tokio::task::yield_now().await;
+                                }
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!(peer = %peer_addr, error = %e, correlation_id, "Failed to send DirectResponse");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        MessageReadResult::DirectResponse {
+            correlation_id,
+            payload,
+        } => {
+            // Fast-path DirectResponse
+            // The payload is the raw response data (no length prefix)
+            // Wire format from sender: [type:1][correlation_id:2][payload_len:4][payload:N]
+            // But 'payload' here contains only the [payload:N] part
+            // Deliver to correlation tracker - zero-copy using the payload directly
+            handle_response_message(registry, peer_addr, correlation_id, payload).await;
         }
     }
-    
+
     Ok(())
 }
 
@@ -397,17 +448,13 @@ async fn handle_assembled_message(
     if let Some(handler) = &*registry.actor_message_handler.lock().await {
         let actor_id_str = actor_id.to_string();
         if let Ok(Some(response)) = handler
-            .handle_actor_message(
-                &actor_id_str,
-                type_hash,
-                &complete_data,
-                correlation_opt,
-            )
+            .handle_actor_message(&actor_id_str, type_hash, &complete_data, correlation_opt)
             .await
         {
             // Only send response for asks (non-zero correlation_id)
             if corr_id != 0 {
-                send_streaming_response(registry, peer_addr, corr_id, response).await;
+                send_streaming_response(registry, peer_addr, corr_id, bytes::Bytes::from(response))
+                    .await;
             }
         }
     }
