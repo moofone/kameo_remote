@@ -145,20 +145,18 @@ impl RemoteActorRef {
         conn.tell(message).await
     }
 
-    /// Send a fire-and-forget message using TellMessage
-    ///
-    /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
-    pub async fn tell_message<'a>(
-        &self,
-        message: crate::connection_pool::TellMessage<'a>,
-    ) -> crate::Result<()> {
-        // Check if registry has been shut down
+    /// Send multiple fire-and-forget messages in one batch
+    pub async fn tell_batch(&self, messages: &[&[u8]]) -> crate::Result<()> {
         if let Some(registry) = self.registry.upgrade() {
             if registry.shutdown.load(Ordering::Relaxed) {
                 return Err(crate::GossipError::Shutdown);
             }
         } else {
             return Err(crate::GossipError::Shutdown);
+        }
+
+        if messages.is_empty() {
+            return Ok(());
         }
 
         let conn = self.connection.as_ref().ok_or_else(|| {
@@ -168,7 +166,11 @@ impl RemoteActorRef {
             ))
         })?;
 
-        conn.tell(message).await
+        if messages.len() == 1 {
+            conn.tell(messages[0]).await
+        } else {
+            conn.tell_batch(messages).await
+        }
     }
 
     /// Send a request and wait for a response.
