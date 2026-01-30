@@ -17,3 +17,8 @@ reports/
 # Test and benchmark outputs
 benches/output/
 
+# Test output files in root directory
+test_output*.log
+test_output*.txt
+validation_output*.log
+
