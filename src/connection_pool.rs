@@ -937,7 +937,7 @@ impl LockFreeStreamHandle {
                                 // Write header portion if needed
                                 if offset < cmd.header.len() {
                                     let h_rem = cmd.header.len() - offset;
-                                    if let Err(_) = writer.write_all(&cmd.header[offset..]).await {
+                                    if (writer.write_all(&cmd.header[offset..]).await).is_err() {
                                         return;
                                     }
                                     bytes_written_counter.fetch_add(h_rem, Ordering::Relaxed);
@@ -947,7 +947,7 @@ impl LockFreeStreamHandle {
                                     offset -= cmd.header.len();
                                 }
                                 // Write payload portion
-                                if let Err(_) = writer.write_all(&cmd.payload[offset..]).await {
+                                if (writer.write_all(&cmd.payload[offset..]).await).is_err() {
                                     return;
                                 }
                                 bytes_written_counter
@@ -970,7 +970,7 @@ impl LockFreeStreamHandle {
                         };
                         let chunk_count = chunks.len().min(MAX_IOV);
                         for (idx, chunk) in chunks.iter().take(MAX_IOV).enumerate() {
-                            slice_storage[idx].write(std::io::IoSlice::new(&chunk));
+                            slice_storage[idx].write(std::io::IoSlice::new(chunk));
                         }
                         let slices = unsafe {
                             std::slice::from_raw_parts(
@@ -1061,7 +1061,7 @@ impl LockFreeStreamHandle {
                                     };
 
                                     for chunk in &write_chunks {
-                                        iov[idx].write(IoSlice::new(&chunk));
+                                        iov[idx].write(IoSlice::new(chunk));
                                         idx += 1;
                                         if idx == MAX_IOV {
                                             let slices = unsafe {
@@ -1159,7 +1159,7 @@ impl LockFreeStreamHandle {
                                     };
 
                                     for chunk in &write_chunks {
-                                        iov[idx].write(IoSlice::new(&chunk));
+                                        iov[idx].write(IoSlice::new(chunk));
                                         idx += 1;
                                         if idx == MAX_IOV {
                                             let slices = unsafe {
@@ -1237,7 +1237,7 @@ impl LockFreeStreamHandle {
                                     // Use drain to preserve buffer capacity
                                     let mut slices = Vec::with_capacity(write_chunks.len());
                                     for chunk in &write_chunks {
-                                        slices.push(IoSlice::new(&chunk));
+                                        slices.push(IoSlice::new(chunk));
                                     }
                                     match writer.write_vectored(&slices).await {
                                         Ok(bytes_written) => {
@@ -1323,7 +1323,7 @@ impl LockFreeStreamHandle {
                                     // Use drain to preserve buffer capacity
                                     let mut slices = Vec::with_capacity(write_chunks.len());
                                     for chunk in &write_chunks {
-                                        slices.push(IoSlice::new(&chunk));
+                                        slices.push(IoSlice::new(chunk));
                                     }
                                     match writer.write_vectored(&slices).await {
                                         Ok(bytes_written) => {
@@ -1353,7 +1353,7 @@ impl LockFreeStreamHandle {
                                     // Use drain to preserve buffer capacity
                                     let mut slices = Vec::with_capacity(write_chunks.len());
                                     for chunk in &write_chunks {
-                                        slices.push(IoSlice::new(&chunk));
+                                        slices.push(IoSlice::new(chunk));
                                     }
                                     match writer.write_vectored(&slices).await {
                                         Ok(bytes_written) => {
@@ -1422,7 +1422,7 @@ impl LockFreeStreamHandle {
 
                     // Use drain to keep the buffer capacity for reuse
                     for chunk in &write_chunks {
-                        iov[idx].write(IoSlice::new(&chunk));
+                        iov[idx].write(IoSlice::new(chunk));
                         idx += 1;
                         if idx == MAX_IOV {
                             let slices = unsafe {
@@ -1525,7 +1525,7 @@ impl LockFreeStreamHandle {
                                     let total_len: usize = chunks.iter().map(|c| c.len()).sum();
                                     let slices: Vec<std::io::IoSlice> = chunks
                                         .iter()
-                                        .map(|chunk| std::io::IoSlice::new(&chunk))
+                                        .map(|chunk| std::io::IoSlice::new(chunk))
                                         .collect();
                                     match writer.write_vectored(&slices).await {
                                         Ok(n) if n == total_len => {
@@ -1606,7 +1606,7 @@ impl LockFreeStreamHandle {
                                     let total_len: usize = chunks.iter().map(|c| c.len()).sum();
                                     let slices: Vec<std::io::IoSlice> = chunks
                                         .iter()
-                                        .map(|chunk| std::io::IoSlice::new(&chunk))
+                                        .map(|chunk| std::io::IoSlice::new(chunk))
                                         .collect();
                                     match writer.write_vectored(&slices).await {
                                         Ok(n) if n == total_len => {
@@ -2705,9 +2705,9 @@ enum DirectPayloadError {
     PayloadTruncated { expected: usize, available: usize },
 }
 
-fn parse_direct_message_payload<'a>(
-    msg_data: &'a [u8],
-) -> std::result::Result<&'a [u8], DirectPayloadError> {
+fn parse_direct_message_payload(
+    msg_data: &[u8],
+) -> std::result::Result<&[u8], DirectPayloadError> {
     if msg_data.len() < crate::framing::DIRECT_ASK_HEADER_LEN {
         return Err(DirectPayloadError::HeaderTooShort);
     }
@@ -2730,9 +2730,8 @@ fn parse_direct_message_payload<'a>(
 fn deserialize_registry_message(
     payload: &[u8],
 ) -> std::result::Result<crate::registry::RegistryMessage, rkyv::rancor::Error> {
-    let decoded =
-        rkyv::from_bytes::<crate::registry::RegistryMessage, rkyv::rancor::Error>(payload); /* ALLOW_RKYV_FROM_BYTES */
-    decoded
+     /* ALLOW_RKYV_FROM_BYTES */
+    rkyv::from_bytes::<crate::registry::RegistryMessage, rkyv::rancor::Error>(payload)
 }
 
 /// Connection pool for maintaining persistent TCP connections to peers
@@ -5773,7 +5772,7 @@ impl ConnectionPool {
                                                                             == std::io::ErrorKind::WouldBlock =>
                                                                     {
                                                                         attempts += 1;
-                                                                        if attempts % 8 == 0 {
+                                                                        if attempts.is_multiple_of(8) {
                                                                             tokio::task::yield_now().await;
                                                                         }
                                                                         continue;
@@ -6236,14 +6235,9 @@ impl ConnectionPool {
                                                                 .get(&peer_addr)
                                                                 .and_then(|conn| {
                                                                     // If connection has embedded peer_id, use it
-                                                                    if let Some(ref pid) = conn
+                                                                    conn
                                                                         .value()
-                                                                        .embedded_peer_id
-                                                                    {
-                                                                        Some(pid.clone())
-                                                                    } else {
-                                                                        None
-                                                                    }
+                                                                        .embedded_peer_id.clone()
                                                                 })
                                                         });
 
@@ -6765,11 +6759,7 @@ impl ConnectionPool {
                                                                             pool.connections_by_addr.get(&peer_addr)
                                                                                 .and_then(|conn| {
                                                                                     // If connection has embedded peer_id, use it
-                                                                                    if let Some(ref pid) = conn.value().embedded_peer_id {
-                                                                                        Some(pid.clone())
-                                                                                    } else {
-                                                                                        None
-                                                                                    }
+                                                                                    conn.value().embedded_peer_id.clone()
                                                                                 })
                                                                         });
 
@@ -6863,7 +6853,7 @@ impl ConnectionPool {
                                                                                 == std::io::ErrorKind::WouldBlock =>
                                                                         {
                                                                             attempts += 1;
-                                                                            if attempts % 8 == 0 {
+                                                                            if attempts.is_multiple_of(8) {
                                                                                 tokio::task::yield_now().await;
                                                                             }
                                                                             continue;
@@ -7695,7 +7685,7 @@ pub(crate) fn handle_incoming_message(
                             registry.bind_addr,
                             pool.connection_count()
                         );
-                        debug!("FULLSYNC RESPONSE: Pool instance address: {:p}", &*pool);
+                        debug!("FULLSYNC RESPONSE: Pool instance address: {:p}", pool);
 
                         // Log details about each connection
                         for entry in pool.connections_by_addr.iter() {

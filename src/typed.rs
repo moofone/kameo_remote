@@ -421,8 +421,8 @@ where
         let body = &payload[8..];
         let archived = rkyv::access::<T::Archived, rkyv::rancor::Error>(body)?;
         let mut pool = rkyv::de::Pool::new();
-        let mut deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
-        Ok(rkyv::Deserialize::deserialize(archived, &mut deserializer)?)
+        let deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
+        Ok(rkyv::Deserialize::deserialize(archived, deserializer)?)
     }
 
     #[cfg(not(debug_assertions))]

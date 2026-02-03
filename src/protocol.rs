@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     handle::{
@@ -56,8 +56,8 @@ impl StreamingState {
         }
 
         // Only insert if not already exists to avoid resetting progress on duplicate start frames
-        if !self.active_streams.contains_key(&header.stream_id) {
-            let stream = InProgressStream {
+        self.active_streams.entry(header.stream_id).or_insert_with(|| {
+            InProgressStream {
                 stream_id: header.stream_id,
                 total_size: header.total_size,
                 type_hash: header.type_hash,
@@ -66,9 +66,8 @@ impl StreamingState {
                 received_size: 0,
                 data_accumulator: BytesMut::with_capacity(header.total_size as usize),
                 started_at: std::time::Instant::now(),
-            };
-            self.active_streams.insert(header.stream_id, stream);
-        }
+            }
+        });
         Ok(())
     }
 
@@ -375,7 +374,7 @@ pub(crate) async fn process_read_result(
                     crate::test_helpers::record_raw_payload(_payload.clone());
                 }
             }
-            ()
+            
         }
         MessageReadResult::DirectAsk {
             correlation_id,
@@ -404,7 +403,7 @@ pub(crate) async fn process_read_result(
                             {
                                 // Backpressure: wait for buffer space instead of dropping responses.
                                 attempts += 1;
-                                if attempts % 8 == 0 {
+                                if attempts.is_multiple_of(8) {
                                     tokio::task::yield_now().await;
                                 }
                                 continue;

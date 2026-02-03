@@ -134,20 +134,16 @@ fn test_streaming_request_large_payload() {
                 .await
                 .unwrap();
 
-        let handle_b =
-            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-                .await
-                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
         // Set up actor message handler for ask tests
         let handler = Arc::new(AskTestHandler {
             message_received: AtomicBool::new(false),
             payload_size: AtomicU32::new(0),
         });
-        handle_b
-            .registry
-            .set_actor_message_handler(handler)
-            .await;
+        handle_b.registry.set_actor_message_handler(handler).await;
 
         // Connect nodes
         let peer_b = handle_a.add_peer(&peer_id_b).await;
@@ -206,20 +202,16 @@ fn test_streaming_request_zero_copy() {
                 .await
                 .unwrap();
 
-        let handle_b =
-            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-                .await
-                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
         // Set up actor message handler for ask tests
         let handler = Arc::new(AskTestHandler {
             message_received: AtomicBool::new(false),
             payload_size: AtomicU32::new(0),
         });
-        handle_b
-            .registry
-            .set_actor_message_handler(handler)
-            .await;
+        handle_b.registry.set_actor_message_handler(handler).await;
 
         let peer_b = handle_a.add_peer(&peer_id_b).await;
         peer_b.connect(&addr_b).await.unwrap();
@@ -277,10 +269,9 @@ fn test_streaming_response_auto() {
                 .await
                 .unwrap();
 
-        let handle_b =
-            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-                .await
-                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
         let peer_b = handle_a.add_peer(&peer_id_b).await;
         peer_b.connect(&addr_b).await.unwrap();
@@ -333,10 +324,9 @@ fn test_small_payload_uses_ring_buffer() {
                 .await
                 .unwrap();
 
-        let handle_b =
-            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-                .await
-                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
         let peer_b = handle_a.add_peer(&peer_id_b).await;
         peer_b.connect(&addr_b).await.unwrap();
@@ -389,19 +379,15 @@ fn test_streaming_threshold_boundary() {
                 .await
                 .unwrap();
 
-        let handle_b =
-            GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-                .await
-                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
         let handler = Arc::new(AskTestHandler {
             message_received: AtomicBool::new(false),
             payload_size: AtomicU32::new(0),
         });
-        handle_b
-            .registry
-            .set_actor_message_handler(handler)
-            .await;
+        handle_b.registry.set_actor_message_handler(handler).await;
 
         let peer_b = handle_a.add_peer(&peer_id_b).await;
         peer_b.connect(&addr_b).await.unwrap();
@@ -460,72 +446,73 @@ fn test_concurrent_streaming_requests() {
     run_streaming_test("concurrent-streaming-requests", || async {
         init_tracing();
 
-    let addr_a: SocketAddr = "127.0.0.1:7931".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7932".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:7931".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7932".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("concurrent_node_a");
-    let key_pair_b = KeyPair::new_for_testing("concurrent_node_b");
+        let key_pair_a = KeyPair::new_for_testing("concurrent_node_a");
+        let key_pair_b = KeyPair::new_for_testing("concurrent_node_b");
 
-    let peer_id_b = key_pair_b.peer_id();
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
 
-    // Set up actor message handler for ask tests
-    let handler = Arc::new(AskTestHandler {
-        message_received: AtomicBool::new(false),
-        payload_size: AtomicU32::new(0),
-    });
-    handle_b.registry.set_actor_message_handler(handler).await;
-
-    info!("Test: Multiple concurrent streaming requests");
-
-    let conn = Arc::new(handle_a.lookup_address(addr_b).await.unwrap());
-    let results = Arc::new(Mutex::new(Vec::new()));
-
-    // Spawn multiple concurrent streaming requests
-    let mut handles = Vec::new();
-    for i in 0..3 {
-        let conn = conn.clone();
-        let results = results.clone();
-        let handle = tokio::spawn(async move {
-            let payload_size = 1024 * 1024 + i * 100_000; // Varying sizes over 1MB
-            let payload = Bytes::from(create_test_payload(payload_size));
-
-            let response = conn
-                .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(60))
-                .await;
-
-            let mut results = results.lock().await;
-            results.push((i, response.is_ok(), payload_size));
+        // Set up actor message handler for ask tests
+        let handler = Arc::new(AskTestHandler {
+            message_received: AtomicBool::new(false),
+            payload_size: AtomicU32::new(0),
         });
-        handles.push(handle);
-    }
+        handle_b.registry.set_actor_message_handler(handler).await;
 
-    // Wait for all requests to complete
-    for handle in handles {
-        handle.await.unwrap();
-    }
+        info!("Test: Multiple concurrent streaming requests");
 
-    let results = results.lock().await;
-    for (i, success, size) in results.iter() {
-        info!("Request {}: {} bytes, success: {}", i, size, success);
-        assert!(success, "Request {} should succeed", i);
-    }
+        let conn = Arc::new(handle_a.lookup_address(addr_b).await.unwrap());
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        // Spawn multiple concurrent streaming requests
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let conn = conn.clone();
+            let results = results.clone();
+            let handle = tokio::spawn(async move {
+                let payload_size = 1024 * 1024 + i * 100_000; // Varying sizes over 1MB
+                let payload = Bytes::from(create_test_payload(payload_size));
+
+                let response = conn
+                    .ask_streaming_bytes(payload.clone(), 0, 0, Duration::from_secs(60))
+                    .await;
+
+                let mut results = results.lock().await;
+                results.push((i, response.is_ok(), payload_size));
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all requests to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let results = results.lock().await;
+        for (i, success, size) in results.iter() {
+            info!("Request {}: {} bytes, success: {}", i, size, success);
+            assert!(success, "Request {} should succeed", i);
+        }
 
         info!("✅ Concurrent streaming requests test passed");
 
@@ -586,118 +573,119 @@ fn test_streaming_tell_no_response() {
     run_streaming_test("streaming-tell-no-response", || async {
         init_tracing();
 
-    // Shared state to track handler invocations
-    struct TellTestHandler {
-        message_received: AtomicBool,
-        correlation_was_none: AtomicBool,
-        payload_size: AtomicU32,
-    }
-
-    impl ActorMessageHandler for TellTestHandler {
-        fn handle_actor_message(
-            &self,
-            _actor_id: &str,
-            _type_hash: u32,
-            payload: &[u8],
-            correlation_id: Option<u16>,
-        ) -> ActorMessageFuture<'_> {
-            self.message_received.store(true, Ordering::SeqCst);
-            self.correlation_was_none
-                .store(correlation_id.is_none(), Ordering::SeqCst);
-            self.payload_size
-                .store(payload.len() as u32, Ordering::SeqCst);
-
-            info!(
-                "📨 TellTestHandler received {} bytes, correlation_id={:?}",
-                payload.len(),
-                correlation_id
-            );
-
-            // For tells, we return None (no response)
-            Box::pin(async move { Ok(None) })
+        // Shared state to track handler invocations
+        struct TellTestHandler {
+            message_received: AtomicBool,
+            correlation_was_none: AtomicBool,
+            payload_size: AtomicU32,
         }
-    }
 
-    let addr_a: SocketAddr = "127.0.0.1:7941".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:7942".parse().unwrap();
+        impl ActorMessageHandler for TellTestHandler {
+            fn handle_actor_message(
+                &self,
+                _actor_id: &str,
+                _type_hash: u32,
+                payload: &[u8],
+                correlation_id: Option<u16>,
+            ) -> ActorMessageFuture<'_> {
+                self.message_received.store(true, Ordering::SeqCst);
+                self.correlation_was_none
+                    .store(correlation_id.is_none(), Ordering::SeqCst);
+                self.payload_size
+                    .store(payload.len() as u32, Ordering::SeqCst);
 
-    let key_pair_a = KeyPair::new_for_testing("tell_node_a");
-    let key_pair_b = KeyPair::new_for_testing("tell_node_b");
+                info!(
+                    "📨 TellTestHandler received {} bytes, correlation_id={:?}",
+                    payload.len(),
+                    correlation_id
+                );
 
-    let peer_id_b = key_pair_b.peer_id();
+                // For tells, we return None (no response)
+                Box::pin(async move { Ok(None) })
+            }
+        }
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let addr_a: SocketAddr = "127.0.0.1:7941".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:7942".parse().unwrap();
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
+        let key_pair_a = KeyPair::new_for_testing("tell_node_a");
+        let key_pair_b = KeyPair::new_for_testing("tell_node_b");
 
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let peer_id_b = key_pair_b.peer_id();
 
-    // Set up the test handler on node B
-    let handler = Arc::new(TellTestHandler {
-        message_received: AtomicBool::new(false),
-        correlation_was_none: AtomicBool::new(false),
-        payload_size: AtomicU32::new(0),
-    });
-    handle_b
-        .registry
-        .set_actor_message_handler(handler.clone())
-        .await;
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    // Connect nodes
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
-    sleep(Duration::from_millis(100)).await;
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
 
-    info!("Test: Streaming tell (correlation_id=0) - fire-and-forget");
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
+        // Set up the test handler on node B
+        let handler = Arc::new(TellTestHandler {
+            message_received: AtomicBool::new(false),
+            correlation_was_none: AtomicBool::new(false),
+            payload_size: AtomicU32::new(0),
+        });
+        handle_b
+            .registry
+            .set_actor_message_handler(handler.clone())
+            .await;
 
-    // Create a large payload (>1MB to trigger streaming)
-    let payload_size = 1_500_000; // 1.5MB
-    let payload = create_test_payload(payload_size);
+        // Connect nodes
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
 
-    // Send as a streaming tell (correlation_id = 0)
-    // This uses stream_large_message which sends with correlation_id = 0
-    let test_type_hash: u32 = 0x7E11_7E57; // "TELL_TEST" in hex-ish
-    let test_actor_id: u64 = 12345;
+        info!("Test: Streaming tell (correlation_id=0) - fire-and-forget");
 
-    info!("📤 Sending {} byte streaming tell...", payload_size);
-    conn.connection
-        .as_ref()
-        .unwrap()
-        .stream_large_message(&payload, test_type_hash, test_actor_id)
-        .await
-        .expect("stream_large_message should succeed");
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
 
-    // Wait for the message to be processed
-    sleep(Duration::from_millis(500)).await;
+        // Create a large payload (>1MB to trigger streaming)
+        let payload_size = 1_500_000; // 1.5MB
+        let payload = create_test_payload(payload_size);
 
-    // Verify the handler was called correctly
-    assert!(
-        handler.message_received.load(Ordering::SeqCst),
-        "Handler should have received the streaming tell"
-    );
-    assert!(
-        handler.correlation_was_none.load(Ordering::SeqCst),
-        "Handler should have received None for correlation_id (tell, not ask)"
-    );
-    assert_eq!(
-        handler.payload_size.load(Ordering::SeqCst) as usize,
-        payload_size,
-        "Handler should have received the full payload"
-    );
+        // Send as a streaming tell (correlation_id = 0)
+        // This uses stream_large_message which sends with correlation_id = 0
+        let test_type_hash: u32 = 0x7E11_7E57; // "TELL_TEST" in hex-ish
+        let test_actor_id: u64 = 12345;
 
-    info!("✅ Streaming tell test passed:");
-    info!("   - Handler received message: true");
-    info!("   - correlation_id was None: true (fire-and-forget)");
-    info!("   - No response sent (tell semantics)");
+        info!("📤 Sending {} byte streaming tell...", payload_size);
+        conn.connection
+            .as_ref()
+            .unwrap()
+            .stream_large_message(&payload, test_type_hash, test_actor_id)
+            .await
+            .expect("stream_large_message should succeed");
+
+        // Wait for the message to be processed
+        sleep(Duration::from_millis(500)).await;
+
+        // Verify the handler was called correctly
+        assert!(
+            handler.message_received.load(Ordering::SeqCst),
+            "Handler should have received the streaming tell"
+        );
+        assert!(
+            handler.correlation_was_none.load(Ordering::SeqCst),
+            "Handler should have received None for correlation_id (tell, not ask)"
+        );
+        assert_eq!(
+            handler.payload_size.load(Ordering::SeqCst) as usize,
+            payload_size,
+            "Handler should have received the full payload"
+        );
+
+        info!("✅ Streaming tell test passed:");
+        info!("   - Handler received message: true");
+        info!("   - correlation_id was None: true (fire-and-forget)");
+        info!("   - No response sent (tell semantics)");
 
         handle_a.shutdown().await;
         handle_b.shutdown().await;

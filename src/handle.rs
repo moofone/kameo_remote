@@ -29,12 +29,14 @@ fn decode_registry_message(
     payload: &[u8],
 ) -> std::result::Result<RegistryMessage, rkyv::rancor::Error> {
     if is_registry_payload_aligned(payload) {
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(payload) // ALLOW_RKYV_FROM_BYTES
-    } else {
-        let mut aligned = RegistryAlignedVec::with_capacity(payload.len());
-        aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref()) // ALLOW_RKYV_FROM_BYTES
+        let decoded = rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(payload); /* ALLOW_RKYV_FROM_BYTES */
+        return decoded;
     }
+
+    let mut aligned = RegistryAlignedVec::with_capacity(payload.len());
+    aligned.extend_from_slice(payload);
+    let decoded = rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref()); /* ALLOW_RKYV_FROM_BYTES */
+    decoded
 }
 
 #[inline]
