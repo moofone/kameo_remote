@@ -80,7 +80,7 @@ mod tests {
     const ALIGNMENT: usize = 8;
 
     fn is_aligned(offset: usize) -> bool {
-        offset % ALIGNMENT == 0
+        offset.is_multiple_of(ALIGNMENT)
     }
 
     #[test]

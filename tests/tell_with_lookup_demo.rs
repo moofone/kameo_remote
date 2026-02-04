@@ -280,7 +280,7 @@ fn test_tell_with_lookup_and_performance_comparison() {
             };
 
             // Send message using RemoteActorRef (cached connection, zero lookups)
-            actor_ref.tell(*message).await.unwrap();
+            actor_ref.tell(message).await.unwrap();
 
             let send_time = send_start.elapsed();
             individual_send_times.push(send_time);
@@ -322,7 +322,7 @@ fn test_tell_with_lookup_and_performance_comparison() {
                 "storage_service" => &storage_ref,
                 _ => panic!("Unknown actor"),
             };
-            actor_ref.tell(*message).await.unwrap();
+            actor_ref.tell(message).await.unwrap();
         }
 
         let sequential_total = sequential_start.elapsed();

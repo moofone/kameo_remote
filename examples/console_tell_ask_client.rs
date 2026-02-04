@@ -87,8 +87,10 @@ async fn main() -> Result<()> {
     println!("Client NodeId: {}", client_node_id.fmt_short());
     println!("Client key: {}\n", client_key_path);
 
-    let mut config = GossipConfig::default();
-    config.ask_inflight_limit = ask_concurrency.max(1);
+    let config = GossipConfig {
+        ask_inflight_limit: ask_concurrency.max(1),
+        ..Default::default()
+    };
     let registry =
         GossipRegistryHandle::new_with_tls("0.0.0.0:0".parse()?, client_secret, Some(config))
             .await?;

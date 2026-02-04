@@ -2926,17 +2926,6 @@ impl GossipRegistry {
         self.connection_pool.get_connection(addr).await
     }
 
-    /// Get a connection handle directly from the pool without mutex lock
-    /// Only works for already established connections
-    #[allow(dead_code)]
-    pub(crate) fn get_connection_direct(
-        &self,
-        addr: SocketAddr,
-    ) -> Option<crate::connection_pool::ConnectionHandle> {
-        // Best-effort: avoid await by using try_lock; return None if busy or not connected.
-        self.connection_pool.get_existing_connection(addr)
-    }
-
     pub async fn is_shutdown(&self) -> bool {
         let gossip_state = self.gossip_state.lock().await;
         gossip_state.shutdown
@@ -4412,7 +4401,7 @@ impl GossipRegistry {
         }
 
         // Update peer_discovery
-        let should_track_mesh_time = 
+        let should_track_mesh_time =
             self.config.mesh_formation_target > 0 && gossip_state.mesh_formation_time_ms.is_none();
 
         if let Some(ref mut discovery) = gossip_state.peer_discovery {

@@ -227,7 +227,8 @@ fn test_tell_message_api_comprehensive() {
         );
 
         let file_batch_start = Instant::now();
-        let file_batch_refs: Vec<&[u8]> = file_data.iter().map(|(_, data)| data.as_slice()).collect();
+        let file_batch_refs: Vec<&[u8]> =
+            file_data.iter().map(|(_, data)| data.as_slice()).collect();
         conn.tell_batch(&file_batch_refs).await.unwrap();
         let file_batch_total = file_batch_start.elapsed();
 
@@ -665,7 +666,7 @@ fn test_tell_message_high_volume_performance() {
         let batch_start = Instant::now();
         for i in 0..batch_count {
             let batch_data: Vec<&[u8]> = (0..batch_size).map(|_| test_data.as_slice()).collect();
-        conn.tell_batch(&batch_data).await.unwrap();
+            conn.tell_batch(&batch_data).await.unwrap();
             if i % 4 == 0 {
                 println!(
                     "   - Sent batch {}/{} ({} messages)",

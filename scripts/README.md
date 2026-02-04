@@ -13,7 +13,8 @@ stay fully covered.
 | `check_critical_coverage.sh <plan_path>` | Fails if any `CRITICAL_PATH` annotation lacks coverage. Requires `reports/coverage.lcov`. |
 | `analyze_coverage_gaps.sh <plan_path>` | Generates `reports/coverage_gaps_<timestamp>.md` summarizing uncovered lines. |
 | `coverage.sh` | Convenience wrapper around `cargo llvm-cov --workspace --lcov`. |
-| `capture_baseline.sh` / `compare_allocations.sh` | Legacy allocation comparison helpers kept for historical regressions. |
+| `check_forbidden_copy_patterns.sh` | Fails zero-copy guard when forbidden buffering patterns appear in critical files. |
+| `check_no_rkyv_from_bytes.sh` | Prevents accidental runtime calls to `rkyv::from_bytes` outside the annotated safe zones. |
 
 ### Running the full suite
 
@@ -40,16 +41,6 @@ The log is written to `logs/validation_<timestamp>.txt`.
 ```
 
 Both scripts auto-run `scripts/coverage.sh` if `reports/coverage.lcov` is missing.
-
-### Updating allocation baselines
-
-The baseline helpers remain available when we need to refresh allocator guard
-expectations:
-
-```bash
-./scripts/capture_baseline.sh
-./scripts/compare_allocations.sh baselines/baseline_allocations_<timestamp>.txt
-```
 
 ## Definition of done for Sprint 3 tooling
 
