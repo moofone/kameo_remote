@@ -5,7 +5,7 @@
 
 use kameo_remote::{registry::PeerInfoGossip, GossipConfig, GossipRegistryHandle, SecretKey};
 mod common;
-use common::wait_for_active_peers;
+use common::{wait_for_active_peers, wait_for_condition};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Once;
@@ -774,26 +774,50 @@ fn test_partition_heal_behavior() -> Result<(), DynError> {
         node_b.bootstrap_non_blocking(vec![addr_a]).await;
         node_d.bootstrap_non_blocking(vec![addr_c]).await;
 
-        // Wait for partition formation
-        sleep(Duration::from_secs(1)).await;
+        // Wait until both partitions are stable (each node sees at least one peer)
+        let partitions_stable = wait_for_condition(Duration::from_secs(5), || async {
+            let stats_b = node_b.stats().await;
+            let stats_d = node_d.stats().await;
+            stats_b.active_peers >= 1 && stats_d.active_peers >= 1
+        })
+        .await;
+        assert!(
+            partitions_stable,
+            "Initial partitions should stabilize before healing"
+        );
 
         // Heal partition by connecting B to C
         node_b.registry.add_peer(addr_c).await;
         node_c.registry.add_peer(addr_b).await;
         node_b.bootstrap_non_blocking(vec![addr_c]).await;
 
-        // Wait for mesh to reform
-        sleep(Duration::from_secs(2)).await;
+        // Wait for mesh to reform deterministically instead of relying on fixed sleeps
+        let mesh_reformed = wait_for_condition(Duration::from_secs(6), || async {
+            node_b.stats().await.active_peers >= 2
+        })
+        .await;
+        assert!(
+            mesh_reformed,
+            "B should have connections to both partitions after heal"
+        );
 
-        // Verify connectivity increased
+        // Verify connectivity increased and metrics recorded
+        let mesh_metric_recorded = wait_for_condition(Duration::from_secs(6), || async {
+            node_b.stats().await.mesh_formation_time_ms.is_some()
+        })
+        .await;
+        assert!(
+            mesh_metric_recorded,
+            "mesh formation timing should be recorded after heal"
+        );
         let stats_b = node_b.stats().await;
         assert!(
             stats_b.active_peers >= 2,
-            "B should have connections to both partitions after heal"
+            "B should still report at least 2 active peers after heal"
         );
         assert!(
             stats_b.mesh_formation_time_ms.is_some(),
-            "mesh formation timing should be recorded after heal"
+            "mesh formation metric should remain populated at the end of the test"
         );
 
         // Cleanup

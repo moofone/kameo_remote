@@ -2736,8 +2736,7 @@ fn parse_direct_message_payload(msg_data: &[u8]) -> std::result::Result<&[u8], D
 fn deserialize_registry_message(
     payload: &[u8],
 ) -> std::result::Result<crate::registry::RegistryMessage, rkyv::rancor::Error> {
-    /* ALLOW_RKYV_FROM_BYTES */
-    rkyv::from_bytes::<crate::registry::RegistryMessage, rkyv::rancor::Error>(payload)
+    rkyv::from_bytes::<crate::registry::RegistryMessage, rkyv::rancor::Error>(payload) // ALLOW_RKYV_FROM_BYTES
 }
 
 /// Connection pool for maintaining persistent TCP connections to peers
@@ -5846,9 +5845,7 @@ impl ConnectionPool {
                                                             {
                                                                 correlation.complete(
                                                                     correlation_id,
-                                                                    bytes::Bytes::copy_from_slice(
-                                                                        actual_payload,
-                                                                    ), // ALLOW_COPY
+                                                                    bytes::Bytes::copy_from_slice(actual_payload), // ALLOW_COPY
                                                                 );
                                                                 debug!(peer = %peer_addr, correlation_id = correlation_id,
                                                                        "✅ DirectResponse delivered to correlation tracker");
@@ -6055,9 +6052,7 @@ impl ConnectionPool {
                                                                     response_data.len(),
                                                                 );
                                                                     msg.extend_from_slice(&header); // ALLOW_COPY
-                                                                    msg.extend_from_slice(
-                                                                        &response_data,
-                                                                    ); /* ALLOW_COPY */
+                                                                    msg.extend_from_slice(&response_data); // ALLOW_COPY
 
                                                                     // Send response back through stream handle
                                                                     if let Some(ref stream_handle) =
@@ -6261,10 +6256,7 @@ impl ConnectionPool {
                                                             if correlation
                                                                 .has_pending(correlation_id)
                                                             {
-                                                                let response_bytes =
-                                                                    bytes::Bytes::copy_from_slice(
-                                                                        payload,
-                                                                    ); /* ALLOW_COPY */
+                                                                let response_bytes = bytes::Bytes::copy_from_slice(payload); // ALLOW_COPY
                                                                 correlation.complete(
                                                                     correlation_id,
                                                                     response_bytes,
@@ -6818,10 +6810,7 @@ impl ConnectionPool {
                                                 Ok(actual_payload) => {
                                                     // For benchmarking: echo the payload back
                                                     // In production, this would call a configurable handler
-                                                    let response_payload =
-                                                        bytes::Bytes::copy_from_slice(
-                                                            actual_payload,
-                                                        ); /* ALLOW_COPY */
+                                                    let response_payload = bytes::Bytes::copy_from_slice(actual_payload); // ALLOW_COPY
 
                                                     // Send DirectResponse back using cached connection
                                                     if let Some(ref registry) = registry_weak
