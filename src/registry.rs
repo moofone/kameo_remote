@@ -2926,17 +2926,6 @@ impl GossipRegistry {
         self.connection_pool.get_connection(addr).await
     }
 
-    /// Get a connection handle directly from the pool without mutex lock
-    /// Only works for already established connections
-    #[allow(dead_code)]
-    pub(crate) fn get_connection_direct(
-        &self,
-        addr: SocketAddr,
-    ) -> Option<crate::connection_pool::ConnectionHandle> {
-        // Best-effort: avoid await by using try_lock; return None if busy or not connected.
-        self.connection_pool.get_existing_connection(addr)
-    }
-
     pub async fn is_shutdown(&self) -> bool {
         let gossip_state = self.gossip_state.lock().await;
         gossip_state.shutdown
