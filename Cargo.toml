@@ -5,7 +5,6 @@ edition = "2021"
 
 [features]
 test-helpers = []
-io_uring = ["tokio-uring", "io-uring"]
 
 [dependencies]
 async-trait = "0.1"
@@ -22,7 +21,6 @@ serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.12"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1.41"
-uuid = { version = "1.17.0", features = ["serde", "v4"] }
 
 # TLS and cryptographic dependencies
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -30,11 +28,6 @@ tokio-rustls = "0.26"
 data-encoding = "2.5"  # For BASE32 DNS encoding
 zeroize = { version = "1.7", features = ["derive"] }  # For secure key handling
 sha2 = "0.10"  # For deterministic NodeId generation fallback
-
-# Platform-specific dependencies for io_uring support
-[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
-tokio-uring = { version = "0.5", optional = true }
-io-uring = { version = "0.6", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"

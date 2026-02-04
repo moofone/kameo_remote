@@ -1,9 +1,8 @@
 //! Platform abstraction layer for high-performance stream writing
 //!
 //! This module provides a trait-based abstraction over different I/O backends,
-//! allowing optimal performance on each platform:
-//! - Linux 5.1+: io_uring for zero-copy I/O
-//! - Other platforms: Standard tokio async I/O
+//! allowing optimal performance on each platform. Currently all platforms use
+//! the standard Tokio async I/O implementation.
 
 use async_trait::async_trait;
 use std::io::Result;
@@ -52,15 +51,7 @@ pub trait StreamWriter: Send + Sync {
     }
 }
 
-// Platform-specific modules
-#[cfg(all(target_os = "linux", feature = "io_uring", not(target_env = "musl")))]
-pub mod io_uring_writer;
-
 pub mod standard_writer;
 
-// Export the appropriate implementation for the current platform
-#[cfg(all(target_os = "linux", feature = "io_uring", not(target_env = "musl")))]
-pub use io_uring_writer::IoUringStreamWriter as PlatformStreamWriter;
-
-#[cfg(not(all(target_os = "linux", feature = "io_uring", not(target_env = "musl"))))]
+// Export the default implementation
 pub use standard_writer::StandardStreamWriter as PlatformStreamWriter;
