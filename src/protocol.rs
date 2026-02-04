@@ -56,8 +56,9 @@ impl StreamingState {
         }
 
         // Only insert if not already exists to avoid resetting progress on duplicate start frames
-        self.active_streams.entry(header.stream_id).or_insert_with(|| {
-            InProgressStream {
+        self.active_streams
+            .entry(header.stream_id)
+            .or_insert_with(|| InProgressStream {
                 stream_id: header.stream_id,
                 total_size: header.total_size,
                 type_hash: header.type_hash,
@@ -66,8 +67,7 @@ impl StreamingState {
                 received_size: 0,
                 data_accumulator: BytesMut::with_capacity(header.total_size as usize),
                 started_at: std::time::Instant::now(),
-            }
-        });
+            });
         Ok(())
     }
 
@@ -374,7 +374,6 @@ pub(crate) async fn process_read_result(
                     crate::test_helpers::record_raw_payload(_payload.clone());
                 }
             }
-            
         }
         MessageReadResult::DirectAsk {
             correlation_id,

@@ -274,73 +274,6 @@ pub fn typed_payload_parts<T: WireType>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::wire_type;
-
-    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
-    struct TestMsg {
-        value: u64,
-    }
-
-    wire_type!(TestMsg, "typed::TestMsg");
-
-    #[test]
-    fn pooled_payload_buf_semantics() {
-        let msg = TestMsg { value: 42 };
-        let mut payload = encode_typed_pooled(&msg).unwrap();
-        let remaining = payload.remaining();
-        assert!(remaining > 0);
-        assert_eq!(payload.chunk().len(), remaining);
-
-        let advance_by = 1.min(remaining);
-        payload.advance(advance_by);
-        assert_eq!(payload.remaining(), remaining - advance_by);
-    }
-
-    #[test]
-    fn pool_reuse_and_cap_behavior() {
-        let pool = serializer_pool().clone();
-        let initial = pool.inner.lock().unwrap().len();
-
-        let msg = TestMsg { value: 7 };
-        let payload = encode_typed_pooled(&msg).unwrap();
-        drop(payload);
-
-        let after = pool.inner.lock().unwrap().len();
-        assert!(after >= initial.saturating_sub(1));
-
-        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
-        struct BigMsg {
-            data: Vec<u8>,
-        }
-        wire_type!(BigMsg, "typed::BigMsg");
-
-        let big = BigMsg {
-            data: vec![0u8; MAX_POOLED_BUFFER_CAPACITY + 1024],
-        };
-        let big_payload = encode_typed_pooled(&big).unwrap();
-        drop(big_payload);
-
-        let final_len = pool.inner.lock().unwrap().len();
-        assert!(final_len <= after);
-    }
-
-    #[test]
-    fn typed_payload_parts_includes_hash_in_debug() {
-        let msg = TestMsg { value: 1 };
-        let payload = encode_typed_pooled(&msg).unwrap();
-        let (_payload, prefix, total_len) = typed_payload_parts::<TestMsg>(payload);
-
-        #[cfg(debug_assertions)]
-        {
-            assert!(total_len >= 8);
-            assert!(prefix.is_some());
-        }
-    }
-}
-
 /// Zero-copy wrapper for archived payloads that keeps the underlying bytes alive.
 pub struct ArchivedBytes<T> {
     bytes: Bytes,
@@ -496,4 +429,71 @@ macro_rules! wire_type {
             const TYPE_NAME: &'static str = $name;
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire_type;
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
+    struct TestMsg {
+        value: u64,
+    }
+
+    wire_type!(TestMsg, "typed::TestMsg");
+
+    #[test]
+    fn pooled_payload_buf_semantics() {
+        let msg = TestMsg { value: 42 };
+        let mut payload = encode_typed_pooled(&msg).unwrap();
+        let remaining = payload.remaining();
+        assert!(remaining > 0);
+        assert_eq!(payload.chunk().len(), remaining);
+
+        let advance_by = 1.min(remaining);
+        payload.advance(advance_by);
+        assert_eq!(payload.remaining(), remaining - advance_by);
+    }
+
+    #[test]
+    fn pool_reuse_and_cap_behavior() {
+        let pool = serializer_pool().clone();
+        let initial = pool.inner.lock().unwrap().len();
+
+        let msg = TestMsg { value: 7 };
+        let payload = encode_typed_pooled(&msg).unwrap();
+        drop(payload);
+
+        let after = pool.inner.lock().unwrap().len();
+        assert!(after >= initial.saturating_sub(1));
+
+        #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
+        struct BigMsg {
+            data: Vec<u8>,
+        }
+        wire_type!(BigMsg, "typed::BigMsg");
+
+        let big = BigMsg {
+            data: vec![0u8; MAX_POOLED_BUFFER_CAPACITY + 1024],
+        };
+        let big_payload = encode_typed_pooled(&big).unwrap();
+        drop(big_payload);
+
+        let final_len = pool.inner.lock().unwrap().len();
+        assert!(final_len <= after);
+    }
+
+    #[test]
+    fn typed_payload_parts_includes_hash_in_debug() {
+        let msg = TestMsg { value: 1 };
+        let payload = encode_typed_pooled(&msg).unwrap();
+        let (_payload, prefix, total_len) = typed_payload_parts::<TestMsg>(payload);
+
+        #[cfg(debug_assertions)]
+        {
+            assert!(total_len >= 8);
+            assert!(prefix.is_some());
+        }
+    }
 }

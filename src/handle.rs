@@ -1589,131 +1589,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod framing_tests {
-    use super::{read_message_from_tls_reader, MessageReadResult};
-    use crate::{framing, registry::RegistryMessage, MessageType};
-    use tokio::io::AsyncWriteExt;
-
-    async fn read_frame(frame: Vec<u8>) -> MessageReadResult {
-        let (mut writer, mut reader) = tokio::io::duplex(1024);
-        tokio::spawn(async move {
-            writer.write_all(&frame).await.unwrap();
-        });
-        let mut buffer = bytes::BytesMut::with_capacity(1024);
-        read_message_from_tls_reader(&mut reader, &mut buffer, 1024 * 1024)
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn ask_raw_parses_with_padded_header() {
-        let payload_bytes = b"hello";
-        let header = framing::write_ask_response_header(MessageType::Ask, 42, payload_bytes.len());
-        let mut frame = Vec::with_capacity(header.len() + payload_bytes.len());
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(payload_bytes);
-
-        match read_frame(frame).await {
-            MessageReadResult::AskRaw {
-                correlation_id,
-                payload: body,
-            } => {
-                assert_eq!(correlation_id, 42);
-                assert_eq!(body.as_ref(), payload_bytes);
-            }
-            _ => panic!("unexpected result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn response_parses_with_padded_header() {
-        let payload_bytes = b"world";
-        let header =
-            framing::write_ask_response_header(MessageType::Response, 7, payload_bytes.len());
-        let mut frame = Vec::with_capacity(header.len() + payload_bytes.len());
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(payload_bytes);
-
-        match read_frame(frame).await {
-            MessageReadResult::Response {
-                correlation_id,
-                payload: body,
-            } => {
-                assert_eq!(correlation_id, 7);
-                assert_eq!(body.as_ref(), payload_bytes);
-            }
-            _ => panic!("unexpected result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn actor_tell_parses_with_reordered_header() {
-        let payload_bytes = b"actor_payload";
-        let actor_id = 0x0102030405060708u64;
-        let type_hash = 0x11223344u32;
-
-        // Wire format: [len:4][type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
-        let total_len = framing::ACTOR_HEADER_LEN + payload_bytes.len();
-        let mut frame = Vec::with_capacity(framing::LENGTH_PREFIX_LEN + total_len);
-        frame.extend_from_slice(&(total_len as u32).to_be_bytes()); // 4 bytes: length prefix
-        frame.push(MessageType::ActorTell as u8); // 1 byte: message type
-        frame.extend_from_slice(&0u16.to_be_bytes()); // 2 bytes: correlation_id
-        frame.extend_from_slice(&[0u8; 9]); // 9 bytes: reserved (for 32-byte alignment)
-        frame.extend_from_slice(&actor_id.to_be_bytes()); // 8 bytes: actor_id
-        frame.extend_from_slice(&type_hash.to_be_bytes()); // 4 bytes: type_hash
-        frame.extend_from_slice(&(payload_bytes.len() as u32).to_be_bytes()); // 4 bytes: payload_len
-        frame.extend_from_slice(payload_bytes); // N bytes: payload
-
-        match read_frame(frame).await {
-            MessageReadResult::Actor {
-                msg_type,
-                correlation_id,
-                actor_id: parsed_actor_id,
-                type_hash: parsed_type_hash,
-                payload: body,
-            } => {
-                assert_eq!(msg_type, MessageType::ActorTell as u8);
-                assert_eq!(correlation_id, 0);
-                assert_eq!(parsed_actor_id, actor_id);
-                assert_eq!(parsed_type_hash, type_hash);
-                assert_eq!(body.as_ref(), payload_bytes);
-            }
-            _ => panic!("unexpected result"),
-        }
-    }
-
-    #[tokio::test]
-    async fn gossip_registry_payload_deserializes_from_aligned_buffer() {
-        let message = RegistryMessage::ImmediateAck {
-            actor_name: "test_actor".to_string(),
-            success: true,
-        };
-        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message).unwrap();
-        let header = framing::write_gossip_frame_prefix(payload.len());
-        let mut frame = Vec::with_capacity(header.len() + payload.len());
-        frame.extend_from_slice(&header);
-        frame.extend_from_slice(&payload);
-
-        match read_frame(frame).await {
-            MessageReadResult::Gossip(parsed, correlation_id) => {
-                assert!(correlation_id.is_none());
-                match parsed {
-                    RegistryMessage::ImmediateAck {
-                        actor_name,
-                        success,
-                    } => {
-                        assert_eq!(actor_name, "test_actor");
-                        assert!(success);
-                    }
-                    other => panic!("unexpected gossip payload: {:?}", other),
-                }
-            }
-            other => panic!("unexpected result: {:?}", other),
-        }
-    }
-}
-
 /// Zero-copy gossip message sender - eliminates bottlenecks in serialization and connection handling
 async fn send_gossip_message_zero_copy(
     mut task: GossipTask,
@@ -1847,4 +1722,129 @@ async fn send_gossip_message_zero_copy(
     let _tcp_elapsed = tcp_start.elapsed();
     // eprintln!("🔍 TCP_WRITE_TIME: {:?}", tcp_elapsed);
     Ok(())
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::{read_message_from_tls_reader, MessageReadResult};
+    use crate::{framing, registry::RegistryMessage, MessageType};
+    use tokio::io::AsyncWriteExt;
+
+    async fn read_frame(frame: Vec<u8>) -> MessageReadResult {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            writer.write_all(&frame).await.unwrap();
+        });
+        let mut buffer = bytes::BytesMut::with_capacity(1024);
+        read_message_from_tls_reader(&mut reader, &mut buffer, 1024 * 1024)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ask_raw_parses_with_padded_header() {
+        let payload_bytes = b"hello";
+        let header = framing::write_ask_response_header(MessageType::Ask, 42, payload_bytes.len());
+        let mut frame = Vec::with_capacity(header.len() + payload_bytes.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(payload_bytes);
+
+        match read_frame(frame).await {
+            MessageReadResult::AskRaw {
+                correlation_id,
+                payload: body,
+            } => {
+                assert_eq!(correlation_id, 42);
+                assert_eq!(body.as_ref(), payload_bytes);
+            }
+            _ => panic!("unexpected result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn response_parses_with_padded_header() {
+        let payload_bytes = b"world";
+        let header =
+            framing::write_ask_response_header(MessageType::Response, 7, payload_bytes.len());
+        let mut frame = Vec::with_capacity(header.len() + payload_bytes.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(payload_bytes);
+
+        match read_frame(frame).await {
+            MessageReadResult::Response {
+                correlation_id,
+                payload: body,
+            } => {
+                assert_eq!(correlation_id, 7);
+                assert_eq!(body.as_ref(), payload_bytes);
+            }
+            _ => panic!("unexpected result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_tell_parses_with_reordered_header() {
+        let payload_bytes = b"actor_payload";
+        let actor_id = 0x0102030405060708u64;
+        let type_hash = 0x11223344u32;
+
+        // Wire format: [len:4][type:1][correlation_id:2][reserved:9][actor_id:8][type_hash:4][payload_len:4][payload:N]
+        let total_len = framing::ACTOR_HEADER_LEN + payload_bytes.len();
+        let mut frame = Vec::with_capacity(framing::LENGTH_PREFIX_LEN + total_len);
+        frame.extend_from_slice(&(total_len as u32).to_be_bytes()); // 4 bytes: length prefix
+        frame.push(MessageType::ActorTell as u8); // 1 byte: message type
+        frame.extend_from_slice(&0u16.to_be_bytes()); // 2 bytes: correlation_id
+        frame.extend_from_slice(&[0u8; 9]); // 9 bytes: reserved (for 32-byte alignment)
+        frame.extend_from_slice(&actor_id.to_be_bytes()); // 8 bytes: actor_id
+        frame.extend_from_slice(&type_hash.to_be_bytes()); // 4 bytes: type_hash
+        frame.extend_from_slice(&(payload_bytes.len() as u32).to_be_bytes()); // 4 bytes: payload_len
+        frame.extend_from_slice(payload_bytes); // N bytes: payload
+
+        match read_frame(frame).await {
+            MessageReadResult::Actor {
+                msg_type,
+                correlation_id,
+                actor_id: parsed_actor_id,
+                type_hash: parsed_type_hash,
+                payload: body,
+            } => {
+                assert_eq!(msg_type, MessageType::ActorTell as u8);
+                assert_eq!(correlation_id, 0);
+                assert_eq!(parsed_actor_id, actor_id);
+                assert_eq!(parsed_type_hash, type_hash);
+                assert_eq!(body.as_ref(), payload_bytes);
+            }
+            _ => panic!("unexpected result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_registry_payload_deserializes_from_aligned_buffer() {
+        let message = RegistryMessage::ImmediateAck {
+            actor_name: "test_actor".to_string(),
+            success: true,
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&message).unwrap();
+        let header = framing::write_gossip_frame_prefix(payload.len());
+        let mut frame = Vec::with_capacity(header.len() + payload.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&payload);
+
+        match read_frame(frame).await {
+            MessageReadResult::Gossip(parsed, correlation_id) => {
+                assert!(correlation_id.is_none());
+                match parsed {
+                    RegistryMessage::ImmediateAck {
+                        actor_name,
+                        success,
+                    } => {
+                        assert_eq!(actor_name, "test_actor");
+                        assert!(success);
+                    }
+                    other => panic!("unexpected gossip payload: {:?}", other),
+                }
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
 }
