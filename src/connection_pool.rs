@@ -2735,6 +2735,28 @@ fn deserialize_registry_message(
     decoded
 }
 
+/// Result of unified connection registration with atomic tie-breaker logic.
+///
+/// This enum is returned by `register_connection_with_tiebreaker` to indicate
+/// what action the caller should take AFTER the entry lock is released.
+///
+/// IMPORTANT: Caller must handle cleanup based on result:
+/// - `Registered`: Connection was registered successfully, no cleanup needed
+/// - `ExistingKept`: Existing connection was kept, caller should shutdown the new connection
+/// - `Replaced`: Existing connection was replaced, caller should shutdown `old_conn` AFTER this call returns
+#[derive(Debug)]
+pub enum RegistrationResult {
+    /// Connection was registered successfully (first registration for this peer_id)
+    Registered,
+    /// Existing connection was kept (new connection should be dropped by caller)
+    ExistingKept,
+    /// Existing connection was replaced (old_conn returned for caller to cleanup)
+    Replaced {
+        /// The old connection that was replaced - caller should shutdown AFTER lock release
+        old_conn: Arc<LockFreeConnection>,
+    },
+}
+
 /// Connection pool for maintaining persistent TCP connections to peers
 /// All connections are persistent - there is no checkout/checkin
 /// Lock-free connection pool using atomic operations and lock-free data structures
@@ -4425,6 +4447,149 @@ impl ConnectionPool {
 
         self.connection_counter.fetch_add(1, Ordering::AcqRel);
         true
+    }
+
+    /// Register a connection by peer_id with atomic tie-breaker logic.
+    ///
+    /// This is the SINGLE path for all connection registration to ensure consistency.
+    /// Uses DashMap's entry API for atomic peer_id operations.
+    ///
+    /// # Arguments
+    /// * `peer_id` - The peer identifier for this connection
+    /// * `connection` - The connection to register (must have correlation tracker already set)
+    /// * `alt_addr` - Optional ephemeral address for dual-indexing (if different from connection.addr)
+    /// * `is_outbound` - Whether this is an outbound connection (affects tie-breaker decision)
+    /// * `registry` - Reference to GossipRegistry for tie-breaker logic
+    ///
+    /// # Returns
+    /// * `Registered` - Connection was registered successfully, no cleanup needed
+    /// * `ExistingKept` - Existing connection was kept, caller should shutdown the new connection
+    /// * `Replaced` - Existing connection was replaced, caller should shutdown `old_conn` AFTER call returns
+    ///
+    /// # Important
+    /// Caller must handle cleanup based on result:
+    /// - `ExistingKept`: Caller should shutdown the new connection AFTER this call returns
+    /// - `Replaced`: Caller should shutdown `old_conn` AFTER this call returns
+    ///
+    /// Both addr and optional alt_addr (ephemeral) are indexed for lookups.
+    pub fn register_connection_with_tiebreaker(
+        &self,
+        peer_id: crate::PeerId,
+        connection: Arc<LockFreeConnection>,
+        alt_addr: Option<SocketAddr>,
+        is_outbound: bool,
+        registry: &GossipRegistry,
+    ) -> RegistrationResult {
+        use dashmap::mapref::entry::Entry;
+
+        let addr = connection.addr;
+
+        // Do the atomic entry operation first, then update other maps
+        let result = match self.connections_by_peer.entry(peer_id.clone()) {
+            Entry::Occupied(mut existing) => {
+                // Connection already exists - run tie-breaker
+                if registry.should_keep_connection(&peer_id, is_outbound) {
+                    // New connection wins - swap in new, return old for cleanup
+                    let old_conn = existing.insert(connection.clone());
+
+                    debug!(
+                        peer_id = %peer_id,
+                        new_addr = %addr,
+                        old_addr = %old_conn.addr,
+                        is_outbound = is_outbound,
+                        "tie-breaker: new connection wins, replacing existing"
+                    );
+
+                    RegistrationResult::Replaced { old_conn }
+                } else {
+                    // Existing connection wins - reject new
+                    debug!(
+                        peer_id = %peer_id,
+                        addr = %addr,
+                        is_outbound = is_outbound,
+                        "tie-breaker: keeping existing connection, rejecting new"
+                    );
+
+                    RegistrationResult::ExistingKept
+                }
+            }
+            Entry::Vacant(vacant) => {
+                // No existing connection - register new one
+                vacant.insert(connection.clone());
+                self.connection_counter.fetch_add(1, Ordering::AcqRel);
+
+                debug!(
+                    peer_id = %peer_id,
+                    addr = %addr,
+                    is_outbound = is_outbound,
+                    "registered new connection"
+                );
+
+                RegistrationResult::Registered
+            }
+        };
+
+        // Entry lock is now released - update secondary maps
+        // (Not atomic with above, but minimizes inconsistency window)
+        match &result {
+            RegistrationResult::Replaced { old_conn } => {
+                // Remove old address mappings
+                let old_addr = old_conn.addr;
+                self.connections_by_addr.remove(&old_addr);
+                self.addr_to_peer_id.remove(&old_addr);
+
+                // Also remove any other addr_to_peer_id entries for this peer
+                // (may have ephemeral addresses from previous connections)
+                let addrs_to_remove: Vec<SocketAddr> = self
+                    .addr_to_peer_id
+                    .iter()
+                    .filter(|entry| entry.value() == &peer_id && entry.key() != &addr)
+                    .map(|entry| *entry.key())
+                    .collect();
+                for addr_to_remove in &addrs_to_remove {
+                    self.addr_to_peer_id.remove(addr_to_remove);
+                    self.connections_by_addr.remove(addr_to_remove);
+                }
+
+                // Add new address mappings
+                self.connections_by_addr.insert(addr, connection.clone());
+                self.addr_to_peer_id.insert(addr, peer_id.clone());
+                self.peer_id_to_addr.insert(peer_id.clone(), addr);
+
+                // Handle alt_addr (ephemeral) if provided and different
+                if let Some(alt) = alt_addr {
+                    if alt != addr {
+                        self.connections_by_addr.insert(alt, connection.clone());
+                        self.addr_to_peer_id.insert(alt, peer_id.clone());
+                    }
+                }
+
+                // Ensure correlation tracker is registered
+                let _ = self.get_or_create_correlation_tracker(&peer_id);
+            }
+            RegistrationResult::Registered => {
+                // Add address mappings for new connection
+                self.connections_by_addr.insert(addr, connection.clone());
+                self.addr_to_peer_id.insert(addr, peer_id.clone());
+                self.peer_id_to_addr.insert(peer_id.clone(), addr);
+
+                // Handle alt_addr (ephemeral) if provided and different
+                if let Some(alt) = alt_addr {
+                    if alt != addr {
+                        self.connections_by_addr.insert(alt, connection);
+                        self.addr_to_peer_id.insert(alt, peer_id.clone());
+                    }
+                }
+
+                // Set up correlation tracker
+                let _ = self.get_or_create_correlation_tracker(&peer_id);
+            }
+            RegistrationResult::ExistingKept => {
+                // No mappings to update - caller will cleanup rejected connection
+            }
+        }
+
+        result
     }
 
     /// Index an existing connection by an additional address.
@@ -7604,26 +7769,70 @@ pub(crate) fn handle_incoming_message(
                     "📨 INCOMING: Received full sync message on bidirectional connection"
                 );
 
-                // IMPORTANT: Register the incoming connection with the peer_id mapping
-                // This allows bidirectional communication to work properly
+                // Register connection atomically with unified tie-breaker logic
+                // This handles: inbound from dialing peer (we are the receiving side)
+                // NOTE: No contains_key pre-check - let entry API handle atomically
                 {
                     let pool = &registry.connection_pool;
 
-                    // NOTE: Do NOT remove addr_to_peer_id for the ephemeral address here.
-                    // The reindex_connection_addr function preserves both addresses,
-                    // and disconnect_connection_by_peer_id needs both entries to clean up properly.
+                    // Try to find the connection (could be under ephemeral or configured addr)
+                    let conn_opt = pool
+                        .connections_by_addr
+                        .get(&_peer_addr)
+                        .or_else(|| pool.connections_by_addr.get(&sender_socket_addr));
 
-                    pool.peer_id_to_addr
-                        .insert(sender_peer_id.clone(), sender_socket_addr);
-                    pool.addr_to_peer_id
-                        .insert(sender_socket_addr, sender_peer_id.clone());
+                    if let Some(conn) = conn_opt {
+                        let result = pool.register_connection_with_tiebreaker(
+                            sender_peer_id.clone(),
+                            conn.value().clone(),
+                            Some(_peer_addr), // ephemeral address for dual-indexing
+                            false, // We are receiving FullSync, so this is inbound from our perspective
+                            &registry,
+                        );
 
-                    // CRITICAL FIX: Reindex the connection from ephemeral TCP port to bind address
-                    // Without this, get_connection(bind_addr) fails because the connection is
-                    // still indexed under the ephemeral port the peer connected FROM.
-                    // This allows messages to be sent back to the peer using their advertised address.
-                    // Note: reindex_connection_addr already has early-return if already indexed,
-                    // and logs internally when it actually does work.
+                        // Handle cleanup AFTER lock release
+                        match result {
+                            RegistrationResult::Replaced { old_conn } => {
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    "FullSync: new connection replaced existing"
+                                );
+                                if let Some(handle) = old_conn.stream_handle.as_ref() {
+                                    handle.shutdown();
+                                }
+                            }
+                            RegistrationResult::ExistingKept => {
+                                // Our connection lost - the existing connection should be kept
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    "FullSync: existing connection kept, this one will be cleaned up"
+                                );
+                                // Note: The reader loop will eventually exit when we don't respond
+                            }
+                            RegistrationResult::Registered => {
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    addr = %sender_socket_addr,
+                                    "FullSync: registered connection by peer_id"
+                                );
+                            }
+                        }
+                    } else {
+                        // Connection not found - may have been disconnected or not yet indexed
+                        // Fall back to manual registration for backwards compatibility
+                        warn!(
+                            peer_id = %sender_peer_id,
+                            peer_addr = %_peer_addr,
+                            sender_socket_addr = %sender_socket_addr,
+                            "FullSync: connection not found in connections_by_addr, using manual registration"
+                        );
+                        pool.peer_id_to_addr
+                            .insert(sender_peer_id.clone(), sender_socket_addr);
+                        pool.addr_to_peer_id
+                            .insert(sender_socket_addr, sender_peer_id.clone());
+                    }
+
+                    // Also reindex if addresses differ (for backwards compatibility)
                     if sender_socket_addr != _peer_addr {
                         pool.reindex_connection_addr(&sender_peer_id, sender_socket_addr);
                     }
@@ -7856,24 +8065,70 @@ pub(crate) fn handle_incoming_message(
                     )
                     .await;
 
-                // FIX: Update peer_id mappings (mirror the FullSync handler logic)
-                // This prevents stale ephemeral addresses from being reintroduced via resolve_peer_state_addr
+                // Register outbound connection with unified tie-breaker logic
+                // This is when we first learn the peer_id for outbound connections
+                // NOTE: No contains_key check - let entry API handle atomically
                 {
                     let pool = &registry.connection_pool;
 
-                    // NOTE: Do NOT remove addr_to_peer_id for the ephemeral address here.
-                    // The reindex_connection_addr function preserves both addresses,
-                    // and disconnect_connection_by_peer_id needs both entries to clean up properly.
+                    // Get the connection from connections_by_addr (outbound is stored there)
+                    // Try both the actual peer_addr (ephemeral) and sender_socket_addr (bind address)
+                    let conn_opt = pool
+                        .connections_by_addr
+                        .get(&_peer_addr)
+                        .or_else(|| pool.connections_by_addr.get(&sender_socket_addr));
 
-                    pool.peer_id_to_addr
-                        .insert(sender_peer_id.clone(), sender_socket_addr);
-                    pool.addr_to_peer_id
-                        .insert(sender_socket_addr, sender_peer_id.clone());
+                    if let Some(conn) = conn_opt {
+                        let result = pool.register_connection_with_tiebreaker(
+                            sender_peer_id.clone(),
+                            conn.value().clone(),
+                            Some(_peer_addr), // ephemeral address for dual-indexing
+                            true,             // is_outbound = true
+                            &registry,
+                        );
 
-                    // CRITICAL FIX: Reindex the connection from ephemeral TCP port to bind address
-                    // Mirror the FullSync handler fix - allows sending to advertised address
-                    // Note: reindex_connection_addr already has early-return if already indexed,
-                    // and logs internally when it actually does work.
+                        // Handle cleanup AFTER lock release
+                        match result {
+                            RegistrationResult::ExistingKept => {
+                                // An inbound connection should be kept
+                                // Shutdown outbound AFTER releasing entry lock
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    "FullSyncResponse: inbound connection preferred, dropping outbound"
+                                );
+                                if let Some(handle) = conn.value().stream_handle.as_ref() {
+                                    handle.shutdown();
+                                }
+                            }
+                            RegistrationResult::Replaced { old_conn } => {
+                                // Our outbound replaced existing - shutdown old
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    "FullSyncResponse: outbound replaced existing connection"
+                                );
+                                if let Some(handle) = old_conn.stream_handle.as_ref() {
+                                    handle.shutdown();
+                                }
+                            }
+                            RegistrationResult::Registered => {
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    addr = %sender_socket_addr,
+                                    "FullSyncResponse: registered outbound connection by peer_id"
+                                );
+                            }
+                        }
+                    } else {
+                        // Connection not found - may have been disconnected
+                        warn!(
+                            peer_id = %sender_peer_id,
+                            peer_addr = %_peer_addr,
+                            sender_socket_addr = %sender_socket_addr,
+                            "FullSyncResponse: connection not found in connections_by_addr"
+                        );
+                    }
+
+                    // Also reindex if addresses differ (for backwards compatibility)
                     if sender_socket_addr != _peer_addr {
                         pool.reindex_connection_addr(&sender_peer_id, sender_socket_addr);
                     }
