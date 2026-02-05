@@ -25,9 +25,7 @@ fn test_gossip_matrix_convergence_line_topology() {
             })
         })
         .expect("failed to spawn gossip matrix test thread");
-    handle
-        .join()
-        .expect("gossip matrix test panicked");
+    handle.join().expect("gossip matrix test panicked");
 }
 
 async fn test_gossip_matrix_convergence_line_topology_inner() -> Result<(), DynError> {

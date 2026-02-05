@@ -33,7 +33,8 @@ fn decode_registry_message(
     } else {
         let mut aligned = RegistryAlignedVec::with_capacity(payload.len());
         aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref()) // ALLOW_RKYV_FROM_BYTES
+        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref())
+        // ALLOW_RKYV_FROM_BYTES
     }
 }
 

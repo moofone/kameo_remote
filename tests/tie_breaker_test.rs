@@ -62,8 +62,14 @@ fn test_simultaneous_inbound_outbound() {
         let peer_id_b = node_b.registry.peer_id.clone();
 
         // Configure peers on both nodes
-        node_a.registry.configure_peer(peer_id_b.clone(), addr_b).await;
-        node_b.registry.configure_peer(peer_id_a.clone(), addr_a).await;
+        node_a
+            .registry
+            .configure_peer(peer_id_b.clone(), addr_b)
+            .await;
+        node_b
+            .registry
+            .configure_peer(peer_id_a.clone(), addr_a)
+            .await;
 
         // 2. Have both dial each other simultaneously
         let peer_b_handle = node_a.add_peer(&peer_id_b).await;
@@ -129,7 +135,10 @@ fn test_outbound_unknown_peer_id_registration() {
         let peer_id_b = node_b.registry.peer_id.clone();
 
         // Configure peer only on A (B doesn't know about A yet)
-        node_a.registry.configure_peer(peer_id_b.clone(), addr_b).await;
+        node_a
+            .registry
+            .configure_peer(peer_id_b.clone(), addr_b)
+            .await;
 
         // 2. Node A dials node B (peer_id unknown initially on the connection)
         let peer_b_handle = node_a.add_peer(&peer_id_b).await;
@@ -174,7 +183,10 @@ fn test_duplicate_inbound_connections() {
         let peer_id_b = node_b.registry.peer_id.clone();
 
         // Configure peer on B
-        node_b.registry.configure_peer(peer_id_a.clone(), addr_a).await;
+        node_b
+            .registry
+            .configure_peer(peer_id_a.clone(), addr_a)
+            .await;
 
         // 2. Connect B to A twice in rapid succession
         let peer_a_handle_1 = node_b.add_peer(&peer_id_a).await;
@@ -256,7 +268,10 @@ fn test_communication_after_tie_breaker() {
         let node_b = create_tls_node(config).await.unwrap();
 
         // Set up message handler on B
-        node_b.registry.set_actor_message_handler(Arc::new(EchoHandler)).await;
+        node_b
+            .registry
+            .set_actor_message_handler(Arc::new(EchoHandler))
+            .await;
 
         let addr_a = node_a.registry.bind_addr;
         let addr_b = node_b.registry.bind_addr;
@@ -264,8 +279,14 @@ fn test_communication_after_tie_breaker() {
         let peer_id_b = node_b.registry.peer_id.clone();
 
         // Configure both ways
-        node_a.registry.configure_peer(peer_id_b.clone(), addr_b).await;
-        node_b.registry.configure_peer(peer_id_a.clone(), addr_a).await;
+        node_a
+            .registry
+            .configure_peer(peer_id_b.clone(), addr_b)
+            .await;
+        node_b
+            .registry
+            .configure_peer(peer_id_a.clone(), addr_a)
+            .await;
 
         // Connect both simultaneously
         let peer_b_handle = node_a.add_peer(&peer_id_b).await;
@@ -286,14 +307,20 @@ fn test_communication_after_tie_breaker() {
         sleep(Duration::from_millis(300)).await;
 
         // Verify we can communicate (register an actor and look it up)
-        node_b.register("test_actor".to_string(), addr_b).await.unwrap();
+        node_b
+            .register("test_actor".to_string(), addr_b)
+            .await
+            .unwrap();
 
         let found = wait_for_condition(Duration::from_secs(5), || async {
             node_a.lookup("test_actor").await.is_some()
         })
         .await;
 
-        assert!(found, "Actor should be discoverable after tie-breaker resolution");
+        assert!(
+            found,
+            "Actor should be discoverable after tie-breaker resolution"
+        );
 
         // Cleanup
         node_a.shutdown().await;
@@ -323,8 +350,14 @@ fn test_no_duplicate_drop_messages() {
         let peer_id_b = node_b.registry.peer_id.clone();
 
         // Configure both ways
-        node_a.registry.configure_peer(peer_id_b.clone(), addr_b).await;
-        node_b.registry.configure_peer(peer_id_a.clone(), addr_a).await;
+        node_a
+            .registry
+            .configure_peer(peer_id_b.clone(), addr_b)
+            .await;
+        node_b
+            .registry
+            .configure_peer(peer_id_a.clone(), addr_a)
+            .await;
 
         // Connect simultaneously multiple times to stress test
         for i in 0..3 {
@@ -333,10 +366,7 @@ fn test_no_duplicate_drop_messages() {
             let peer_b = node_a.add_peer(&peer_id_b).await;
             let peer_a = node_b.add_peer(&peer_id_a).await;
 
-            let _ = tokio::join!(
-                peer_b.connect(&addr_b),
-                peer_a.connect(&addr_a)
-            );
+            let _ = tokio::join!(peer_b.connect(&addr_b), peer_a.connect(&addr_a));
 
             sleep(Duration::from_millis(100)).await;
         }
@@ -348,11 +378,13 @@ fn test_no_duplicate_drop_messages() {
         let pool_a = &node_a.registry.connection_pool;
         let pool_b = &node_b.registry.connection_pool;
 
-        let a_to_b_count = pool_a.connections_by_peer
+        let a_to_b_count = pool_a
+            .connections_by_peer
             .iter()
             .filter(|e| e.key() == &peer_id_b)
             .count();
-        let b_to_a_count = pool_b.connections_by_peer
+        let b_to_a_count = pool_b
+            .connections_by_peer
             .iter()
             .filter(|e| e.key() == &peer_id_a)
             .count();
