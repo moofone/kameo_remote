@@ -41,113 +41,115 @@ wire_type!(Ping, "kameo.remote.PingTLS");
 #[test]
 fn test_typed_ask_over_tls_with_pooled_path() {
     run_typed_tls_test("typed-ask-pooled", || async {
-    std::env::set_var("KAMEO_REMOTE_TYPED_ECHO", "1");
+        std::env::set_var("KAMEO_REMOTE_TYPED_ECHO", "1");
 
-    let addr_a: SocketAddr = "127.0.0.1:9011".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:9012".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:9011".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:9012".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("typed_tls_a");
-    let key_pair_b = KeyPair::new_for_testing("typed_tls_b");
-    let peer_id_b = key_pair_b.peer_id();
+        let key_pair_a = KeyPair::new_for_testing("typed_tls_a");
+        let key_pair_b = KeyPair::new_for_testing("typed_tls_b");
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
 
-    sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(200)).await;
 
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
-    let request = Ping { id: 42 };
-    let response: Ping = conn.ask_typed(&request).await.unwrap();
-    assert_eq!(response, request);
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
+        let request = Ping { id: 42 };
+        let response: Ping = conn.ask_typed(&request).await.unwrap();
+        assert_eq!(response, request);
 
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
 
-    std::env::remove_var("KAMEO_REMOTE_TYPED_ECHO");
+        std::env::remove_var("KAMEO_REMOTE_TYPED_ECHO");
     });
 }
 
 #[test]
 fn test_typed_tell_over_tls_with_pooled_path() {
     run_typed_tls_test("typed-tell-pooled", || async {
-    use tokio::time::{Duration, Instant};
+        use tokio::time::{Duration, Instant};
 
-    std::env::set_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE", "1");
-    kameo_remote::test_helpers::drain_raw_payloads();
+        std::env::set_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE", "1");
+        kameo_remote::test_helpers::drain_raw_payloads();
 
-    let addr_a: SocketAddr = "127.0.0.1:9013".parse().unwrap();
-    let addr_b: SocketAddr = "127.0.0.1:9014".parse().unwrap();
+        let addr_a: SocketAddr = "127.0.0.1:9013".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:9014".parse().unwrap();
 
-    let key_pair_a = KeyPair::new_for_testing("typed_tls_tell_a");
-    let key_pair_b = KeyPair::new_for_testing("typed_tls_tell_b");
-    let peer_id_b = key_pair_b.peer_id();
+        let key_pair_a = KeyPair::new_for_testing("typed_tls_tell_a");
+        let key_pair_b = KeyPair::new_for_testing("typed_tls_tell_b");
+        let peer_id_b = key_pair_b.peer_id();
 
-    let config = GossipConfig {
-        gossip_interval: Duration::from_secs(300),
-        ..Default::default()
-    };
+        let config = GossipConfig {
+            gossip_interval: Duration::from_secs(300),
+            ..Default::default()
+        };
 
-    let handle_a = GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
-        .await
-        .unwrap();
-    let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
-        .await
-        .unwrap();
+        let handle_a =
+            GossipRegistryHandle::new_with_keypair(addr_a, key_pair_a, Some(config.clone()))
+                .await
+                .unwrap();
+        let handle_b = GossipRegistryHandle::new_with_keypair(addr_b, key_pair_b, Some(config))
+            .await
+            .unwrap();
 
-    let peer_b = handle_a.add_peer(&peer_id_b).await;
-    peer_b.connect(&addr_b).await.unwrap();
+        let peer_b = handle_a.add_peer(&peer_id_b).await;
+        peer_b.connect(&addr_b).await.unwrap();
 
-    sleep(Duration::from_millis(200)).await;
-    kameo_remote::test_helpers::drain_raw_payloads();
+        sleep(Duration::from_millis(200)).await;
+        kameo_remote::test_helpers::drain_raw_payloads();
 
-    let conn = handle_a.lookup_address(addr_b).await.unwrap();
-    let request = Ping { id: 7 };
-    conn.tell_typed(&request).await.unwrap();
+        let conn = handle_a.lookup_address(addr_b).await.unwrap();
+        let request = Ping { id: 7 };
+        conn.tell_typed(&request).await.unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut decoded: Option<Ping> = None;
-    while Instant::now() < deadline {
-        if let Some(payload) =
-            kameo_remote::test_helpers::wait_for_raw_payload(Duration::from_millis(200)).await
-        {
-            // Force alignment by copying to a fresh Vec
-            // record_raw_payload captures a slice offset by 4 bytes (len prefix), causing misalignment
-            // for rkyv if accessed directly.
-            let aligned = payload.to_vec();
-            if let Ok(msg) = kameo_remote::decode_typed::<Ping>(&aligned) {
-                decoded = Some(msg);
-                break;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut decoded: Option<Ping> = None;
+        while Instant::now() < deadline {
+            if let Some(payload) =
+                kameo_remote::test_helpers::wait_for_raw_payload(Duration::from_millis(200)).await
+            {
+                // Force alignment by copying to a fresh Vec
+                // record_raw_payload captures a slice offset by 4 bytes (len prefix), causing misalignment
+                // for rkyv if accessed directly.
+                let aligned = payload.to_vec();
+                if let Ok(msg) = kameo_remote::decode_typed::<Ping>(&aligned) {
+                    decoded = Some(msg);
+                    break;
+                }
             }
         }
-    }
 
-    if decoded.is_none() {
-        let payloads = kameo_remote::test_helpers::drain_raw_payloads();
-        let lengths: Vec<usize> = payloads.iter().map(|p| p.len()).collect();
-        panic!(
-            "typed tell payload not captured; saw {} raw payloads with lengths {:?}",
-            lengths.len(),
-            lengths
-        );
-    }
+        if decoded.is_none() {
+            let payloads = kameo_remote::test_helpers::drain_raw_payloads();
+            let lengths: Vec<usize> = payloads.iter().map(|p| p.len()).collect();
+            panic!(
+                "typed tell payload not captured; saw {} raw payloads with lengths {:?}",
+                lengths.len(),
+                lengths
+            );
+        }
 
-    assert_eq!(decoded, Some(request));
+        assert_eq!(decoded, Some(request));
 
-    handle_a.shutdown().await;
-    handle_b.shutdown().await;
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
 
-    std::env::remove_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE");
+        std::env::remove_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE");
     });
 }
