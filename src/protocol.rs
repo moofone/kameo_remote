@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     handle::{
