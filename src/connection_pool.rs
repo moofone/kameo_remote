@@ -8991,6 +8991,9 @@ mod tests {
 
     #[test]
     fn test_connection_handle_send_data_closed() {
+        // Test that send_data with ClosedWriter eventually queues data.
+        // This tests the basic fire-and-forget behavior - data is queued successfully
+        // because the fail-fast only triggers after writer has detected failure.
         run_multi_thread_test(async {
             let (stream_handle, _writer_task) = LockFreeStreamHandle::new(
                 ClosedWriter,
@@ -9006,8 +9009,49 @@ mod tests {
                 correlation: CorrelationTracker::new(),
             };
 
+            // First send to a freshly-created connection succeeds because:
+            // 1. Writer task hasn't tried to write yet (buffer was empty)
+            // 2. So shutdown_signal is not set yet
+            // 3. Data is queued to ring buffer successfully
+            // This is expected behavior - we can't know a connection is dead until we try.
             let result = handle.send_data(vec![1, 2, 3]).await;
-            assert!(result.is_ok());
+            assert!(result.is_ok(), "First send should succeed (queued before writer failure)");
+        });
+    }
+
+    #[test]
+    fn test_connection_handle_send_data_after_shutdown() {
+        // Test that send_data fails fast when shutdown_signal is already set.
+        // This verifies the fail-fast behavior that prevents silent data loss.
+        run_multi_thread_test(async {
+            let (stream_handle, _writer_task) = LockFreeStreamHandle::new(
+                ClosedWriter,
+                "127.0.0.1:8080".parse().unwrap(),
+                ChannelId::Global,
+                BufferConfig::default(),
+            );
+
+            // Manually set shutdown_signal to simulate writer having failed.
+            // In production, this is set by ShutdownGuard when writer task exits.
+            stream_handle.shutdown_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            let stream_handle = Arc::new(stream_handle);
+            let handle = ConnectionHandle {
+                addr: "127.0.0.1:8080".parse().unwrap(),
+                stream_handle,
+                correlation: CorrelationTracker::new(),
+            };
+
+            // With shutdown_signal set, send should fail immediately via fail-fast check.
+            // This prevents silent data loss on dead connections.
+            let result = handle.send_data(vec![1, 2, 3]).await;
+            assert!(
+                result.is_err(),
+                "Send should fail immediately when writer is shutdown"
+            );
+
+            // Verify is_shutdown returns true
+            assert!(handle.is_shutdown(), "is_shutdown should return true after shutdown");
         });
     }
 
