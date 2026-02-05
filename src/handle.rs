@@ -996,69 +996,61 @@ where
 
         let connection_arc = Arc::new(connection);
 
-        let keep_connection = {
+        // Use unified registration with atomic tie-breaker logic
+        // This handles: first registration, tie-breaker, and proper cleanup
+        let result = {
             let pool = &registry.connection_pool;
-            let has_existing = pool.has_connection_by_peer_id(&peer_id);
 
-            if has_existing {
-                if registry.should_keep_connection(&peer_id, false) {
-                    debug!(
-                        peer_id = %peer_id,
-                        "tie-breaker: favoring inbound connection, dropping existing outbound"
-                    );
-                    if let Some(existing) = pool.disconnect_connection_by_peer_id(&peer_id) {
-                        if let Some(handle) = existing.stream_handle.as_ref() {
-                            handle.shutdown();
-                        }
-                    }
-                    pool.add_connection_by_peer_id(
-                        peer_id.clone(),
-                        peer_state_addr,
-                        connection_arc.clone(),
-                    );
-                    true
-                } else {
-                    debug!(
-                        peer_id = %peer_id,
-                        "tie-breaker: rejecting inbound duplicate connection"
-                    );
-                    registry.clear_peer_capabilities(&peer_addr);
-                    false
-                }
+            // Pass ephemeral peer_addr as alt_addr if it differs from configured peer_state_addr
+            let alt_addr = if peer_addr != peer_state_addr {
+                Some(peer_addr)
             } else {
-                pool.add_connection_by_peer_id(
-                    peer_id.clone(),
-                    peer_state_addr,
-                    connection_arc.clone(),
-                );
-                true
-            }
+                None
+            };
+
+            pool.register_connection_with_tiebreaker(
+                peer_id.clone(),
+                connection_arc.clone(),
+                alt_addr,
+                false, // is_outbound = false for inbound connections
+                &registry,
+            )
         };
 
-        if !keep_connection {
-            if let Some(handle) = connection_arc.stream_handle.as_ref() {
-                handle.shutdown();
+        // Handle result AFTER entry lock is released (deferred shutdown)
+        match result {
+            crate::connection_pool::RegistrationResult::Registered => {
+                debug!(
+                    node_id = %sender_node_id,
+                    peer_addr = %peer_addr,
+                    peer_state_addr = %peer_state_addr,
+                    "Registered new inbound connection via unified registration"
+                );
             }
-            return ConnectionCloseOutcome::DroppedByTieBreaker;
-        }
-
-        // CRITICAL FIX: Also index by ephemeral peer_addr if it differs from peer_state_addr.
-        // This ensures that handle_response_message (which looks up by peer_addr) can find
-        // the connection AND the correlation tracker. Without this, responses fail to be
-        // delivered because they are looked up by the ephemeral address but only indexed
-        // by the configured bind address.
-        if peer_addr != peer_state_addr {
-            let pool = &registry.connection_pool;
-            pool.index_connection_by_addr(peer_addr, connection_arc.clone());
-            // Also add the addr_to_peer_id mapping so handle_response_message can look up
-            // the shared correlation tracker via peer_id
-            pool.add_addr_to_peer_id(peer_addr, peer_id.clone());
-            debug!(
-                node_id = %sender_node_id,
-                peer_addr = %peer_addr,
-                peer_state_addr = %peer_state_addr,
-                "Also indexed incoming connection by ephemeral address for response delivery"
-            );
+            crate::connection_pool::RegistrationResult::Replaced { old_conn } => {
+                debug!(
+                    peer_id = %peer_id,
+                    new_addr = %peer_state_addr,
+                    old_addr = %old_conn.addr,
+                    "tie-breaker: inbound connection replaced existing"
+                );
+                // Shutdown old connection AFTER lock release
+                if let Some(handle) = old_conn.stream_handle.as_ref() {
+                    handle.shutdown();
+                }
+            }
+            crate::connection_pool::RegistrationResult::ExistingKept => {
+                debug!(
+                    peer_id = %peer_id,
+                    "tie-breaker: keeping existing connection, rejecting inbound"
+                );
+                registry.clear_peer_capabilities(&peer_addr);
+                // Shutdown our new connection
+                if let Some(handle) = connection_arc.stream_handle.as_ref() {
+                    handle.shutdown();
+                }
+                return ConnectionCloseOutcome::DroppedByTieBreaker;
+            }
         }
 
         debug!(
