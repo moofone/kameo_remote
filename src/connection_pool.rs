@@ -5454,7 +5454,7 @@ impl ConnectionPool {
                     .map(|entry| entry.key().clone())
             });
 
-        if let Some(peer_id) = peer_id_opt {
+        if let Some(peer_id) = peer_id_opt.clone() {
             // Use shared correlation tracker for this peer
             conn.correlation = Some(self.get_or_create_correlation_tracker(&peer_id));
             conn.embedded_peer_id = Some(peer_id.clone());
@@ -5474,12 +5474,63 @@ impl ConnectionPool {
 
         let connection_arc = Arc::new(conn);
 
-        // Insert into lock-free map before spawning
-        self.connections_by_addr
-            .insert(addr, connection_arc.clone());
-        debug!("CONNECTION POOL: Added connection via get_connection to {} - pool now has {} connections",
-              addr, self.connections_by_addr.len());
-        // Double check it's really there
+        // If we know the peer_id, use unified registration with tie-breaker
+        // Otherwise, just insert by addr (peer_id will be learned from FullSyncResponse)
+        if let (Some(peer_id), Some(registry_arc)) = (peer_id_opt, registry_weak.as_ref().and_then(|w| w.upgrade())) {
+            let result = self.register_connection_with_tiebreaker(
+                peer_id.clone(),
+                connection_arc.clone(),
+                None, // No alt_addr for outbound - addr is the configured address
+                true, // is_outbound = true
+                &registry_arc,
+            );
+
+            match result {
+                RegistrationResult::Registered => {
+                    debug!(
+                        peer_id = %peer_id,
+                        addr = %addr,
+                        "CONNECTION POOL: Registered outbound connection with unified registration"
+                    );
+                }
+                RegistrationResult::ExistingKept => {
+                    // An inbound connection already exists - shutdown this outbound
+                    debug!(
+                        peer_id = %peer_id,
+                        addr = %addr,
+                        "CONNECTION POOL: Existing inbound connection kept, shutting down outbound"
+                    );
+                    if let Some(handle) = connection_arc.stream_handle.as_ref() {
+                        handle.shutdown();
+                    }
+                    // Return ConnectionExists since we're rejecting this new connection
+                    // in favor of an existing one
+                    return Err(crate::GossipError::ConnectionExists);
+                }
+                RegistrationResult::Replaced { old_conn } => {
+                    // Our outbound replaced an existing connection
+                    debug!(
+                        peer_id = %peer_id,
+                        addr = %addr,
+                        "CONNECTION POOL: Outbound replaced existing connection"
+                    );
+                    if let Some(handle) = old_conn.stream_handle.as_ref() {
+                        handle.shutdown();
+                    }
+                }
+            }
+        } else {
+            // No peer_id known yet - insert by addr only
+            // Unified registration will happen when FullSyncResponse arrives
+            self.connections_by_addr.insert(addr, connection_arc.clone());
+            debug!(
+                "CONNECTION POOL: Added connection via get_connection to {} (peer_id unknown) - pool now has {} connections",
+                addr,
+                self.connections_by_addr.len()
+            );
+        }
+
+        // Double check it's really there (at least in connections_by_addr)
         assert!(
             self.connections_by_addr.contains_key(&addr),
             "Connection was not added to pool!"
@@ -7802,12 +7853,21 @@ pub(crate) fn handle_incoming_message(
                                 }
                             }
                             RegistrationResult::ExistingKept => {
-                                // Our connection lost - the existing connection should be kept
+                                // Our connection lost - shutdown it explicitly
+                                // (don't rely on reader loop timeout)
                                 debug!(
                                     peer_id = %sender_peer_id,
-                                    "FullSync: existing connection kept, this one will be cleaned up"
+                                    "FullSync: existing connection kept, shutting down losing connection"
                                 );
-                                // Note: The reader loop will eventually exit when we don't respond
+                                if let Some(handle) = conn.value().stream_handle.as_ref() {
+                                    handle.shutdown();
+                                }
+                                // Also remove from connections_by_addr to avoid stale references
+                                drop(conn); // Release the DashMap guard first
+                                pool.connections_by_addr.remove(&_peer_addr);
+                                if sender_socket_addr != _peer_addr {
+                                    pool.connections_by_addr.remove(&sender_socket_addr);
+                                }
                             }
                             RegistrationResult::Registered => {
                                 debug!(
