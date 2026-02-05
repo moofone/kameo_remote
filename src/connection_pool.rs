@@ -872,6 +872,17 @@ impl LockFreeStreamHandle {
         use std::io::IoSlice;
         use tokio::io::AsyncWriteExt;
 
+        // CRITICAL: Set shutdown_signal on ANY exit path using a drop guard.
+        // This ensures callers can detect that the writer has died (connection broken,
+        // write error, etc.) and fail fast rather than silently dropping data.
+        struct ShutdownGuard(Arc<AtomicBool>);
+        impl Drop for ShutdownGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let _shutdown_guard = ShutdownGuard(shutdown_signal.clone());
+
         // Use direct tokio writer with vectored I/O for now.
         // Future optimization: wire in platform-specific writers (io_uring on Linux 5.1+).
         // This requires either:
@@ -1727,6 +1738,16 @@ impl LockFreeStreamHandle {
     }
 
     fn enqueue_with_permit(&self, data: WritePayload, permit: OwnedSemaphorePermit) -> Result<()> {
+        // CRITICAL: Fail fast if writer is dead - prevents silent data loss.
+        // Without this check, data would be pushed to the ring buffer but never written,
+        // causing callers to believe sends succeeded when they actually silently failed.
+        if self.shutdown_signal.load(Ordering::SeqCst) {
+            return Err(GossipError::Network(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "writer shutdown",
+            )));
+        }
+
         let sequence = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
         let command = WriteCommand {
             channel_id: self.channel_id,
@@ -2233,6 +2254,15 @@ impl LockFreeStreamHandle {
     /// Shutdown the background writer task
     pub fn shutdown(&self) {
         self.shutdown_signal.store(true, Ordering::Relaxed);
+    }
+
+    /// Check if the writer has been shutdown (either explicitly or due to error).
+    ///
+    /// Returns true if the background writer task has exited (due to write error,
+    /// connection closed, or explicit shutdown). Callers should use this to detect
+    /// dead connections and fail fast rather than silently dropping data.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_signal.load(Ordering::SeqCst)
     }
 
     /// Get the streaming threshold for this connection
@@ -3140,6 +3170,14 @@ impl std::fmt::Debug for DelegatedReplySender {
 }
 
 impl ConnectionHandle {
+    /// Check if the underlying writer has shut down.
+    ///
+    /// Returns true if the writer task has exited (gracefully or due to error).
+    /// Callers should check this before sending to avoid silent data loss.
+    pub fn is_shutdown(&self) -> bool {
+        self.stream_handle.is_shutdown()
+    }
+
     /// Send pre-serialized data through this connection - LOCK-FREE
     pub async fn send_data(&self, data: Vec<u8>) -> Result<()> {
         self.stream_handle
