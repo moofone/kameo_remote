@@ -12,6 +12,7 @@ crossbeam-queue = "0.3"
 async-trait = "0.1"
 arc-swap = "1.7"
 bytes = "1.0"
+libc = "0.2"
 dashmap = "6.1.0"
 lru = "0.12"  # LRU cache for known-peers
 ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }

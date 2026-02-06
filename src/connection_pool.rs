@@ -1498,6 +1498,139 @@ where
     Ok(())
 }
 
+async fn write_streaming_response_direct<S>(
+    stream: &mut S,
+    bytes_written_counter: &Arc<AtomicUsize>,
+    bytes_since_flush: &mut usize,
+    correlation_id: u16,
+    payload: bytes::Bytes,
+    max_message_size: usize,
+    schema_hash: Option<u64>,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    use bytes::BufMut;
+
+    // Streaming frame wire format excludes the 4-byte length prefix from `msg_len`.
+    // `msg_len` for stream data frames is: type(1) + corr(2) + reserved(9) + header(36) + chunk(N).
+    const STREAM_FRAME_OVERHEAD: usize = 12 + crate::StreamHeader::SERIALIZED_SIZE;
+    let max_chunk = max_message_size.saturating_sub(STREAM_FRAME_OVERHEAD);
+    if max_chunk == 0 {
+        return Err(GossipError::InvalidConfig(format!(
+            "max_message_size={} too small for streaming (overhead={})",
+            max_message_size, STREAM_FRAME_OVERHEAD
+        )));
+    }
+    let chunk_size = std::cmp::min(STREAM_CHUNK_SIZE, max_chunk);
+
+    // Generate unique stream ID for this response stream.
+    let stream_id = crate::current_timestamp_nanos();
+
+    fn build_stream_response_header(
+        msg_type: crate::MessageType,
+        header: &crate::StreamHeader,
+        correlation_id: u16,
+        chunk_len: usize,
+        schema_hash: Option<u64>,
+    ) -> bytes::Bytes {
+        // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36]
+        let inner_size = 12 + crate::StreamHeader::SERIALIZED_SIZE + chunk_len;
+        let mut message = bytes::BytesMut::with_capacity(4 + 12 + crate::StreamHeader::SERIALIZED_SIZE);
+
+        message.put_u32(inner_size as u32);
+        message.put_u8(msg_type as u8);
+        message.put_u16(correlation_id);
+
+        let mut reserved = [0u8; 9];
+        crate::framing::write_schema_hash(&mut reserved, schema_hash);
+        message.put_slice(&reserved);
+        message.put_slice(&header.to_bytes());
+
+        message.freeze()
+    }
+
+    let total_len = payload.len();
+    let start_header = crate::StreamHeader {
+        stream_id,
+        total_size: total_len as u64,
+        chunk_size: 0,
+        chunk_index: 0,
+        type_hash: 0,
+        actor_id: 0,
+    };
+
+    // StreamResponseStart
+    let start_msg = build_stream_response_header(
+        crate::MessageType::StreamResponseStart,
+        &start_header,
+        correlation_id,
+        0,
+        schema_hash,
+    );
+    stream
+        .write_all(&start_msg)
+        .await
+        .map_err(GossipError::Network)?;
+    bytes_written_counter.fetch_add(start_msg.len(), Ordering::Relaxed);
+    *bytes_since_flush += start_msg.len();
+
+    // StreamResponseData
+    let num_chunks = total_len.div_ceil(chunk_size);
+    for idx in 0..num_chunks {
+        let start = idx * chunk_size;
+        let end = std::cmp::min(start + chunk_size, total_len);
+        let chunk_len = end - start;
+        let chunk_data = payload.slice(start..end);
+
+        let data_header = crate::StreamHeader {
+            stream_id,
+            total_size: total_len as u64,
+            chunk_size: chunk_len as u32,
+            chunk_index: idx as u32,
+            type_hash: 0,
+            actor_id: 0,
+        };
+
+        let header_bytes = build_stream_response_header(
+            crate::MessageType::StreamResponseData,
+            &data_header,
+            correlation_id,
+            chunk_len,
+            schema_hash,
+        );
+
+        write_header_payload_vectored(
+            stream,
+            bytes_written_counter,
+            bytes_since_flush,
+            &header_bytes,
+            chunk_data.as_ref(),
+        )
+        .await?;
+    }
+
+    // StreamResponseEnd
+    let end_msg = build_stream_response_header(
+        crate::MessageType::StreamResponseEnd,
+        &start_header,
+        correlation_id,
+        0,
+        schema_hash,
+    );
+    stream
+        .write_all(&end_msg)
+        .await
+        .map_err(GossipError::Network)?;
+    bytes_written_counter.fetch_add(end_msg.len(), Ordering::Relaxed);
+    *bytes_since_flush += end_msg.len();
+
+    stream.flush().await.map_err(GossipError::Network)?;
+    *bytes_since_flush = 0;
+
+    Ok(())
+}
+
 async fn process_read_result_io<S>(
     result: crate::handle::MessageReadResult,
     streaming_state: &mut crate::protocol::StreamingState,
@@ -1554,16 +1687,109 @@ where
             if let Ok(Some(response)) = response {
                 if corr_id != 0 {
                     let write_start = perf.map(|_| Instant::now());
+                    let inline_payload_limit = registry
+                        .config
+                        .max_message_size
+                        .saturating_sub(crate::framing::ASK_RESPONSE_HEADER_LEN);
+                    let schema_hash = registry.config.schema_hash;
                     match response {
                         // Hot path (console bench): zero-copy batchable payloads.
                         crate::registry::ActorResponse::Bytes(payload) => {
-                            response_batch.push_bytes(corr_id, payload);
+                            let should_stream = payload.len() > inline_payload_limit
+                                || payload.len() > STREAMING_THRESHOLD;
+                            if should_stream {
+                                write_streaming_response_direct(
+                                    stream,
+                                    bytes_written_counter,
+                                    bytes_since_flush,
+                                    corr_id,
+                                    payload,
+                                    registry.config.max_message_size,
+                                    schema_hash,
+                                )
+                                .await?;
+                                if flush_each_actor_response() {
+                                    stream.flush().await.map_err(GossipError::Network)?;
+                                    *bytes_since_flush = 0;
+                                }
+                            } else {
+                                response_batch.push_bytes(corr_id, payload);
+                            }
                         }
                         crate::registry::ActorResponse::Aligned(payload) => {
-                            response_batch.push_bytes(corr_id, payload.into_bytes());
+                            let len = payload.len();
+                            let should_stream =
+                                len > inline_payload_limit || len > STREAMING_THRESHOLD;
+                            if should_stream {
+                                write_streaming_response_direct(
+                                    stream,
+                                    bytes_written_counter,
+                                    bytes_since_flush,
+                                    corr_id,
+                                    payload.into_bytes(),
+                                    registry.config.max_message_size,
+                                    schema_hash,
+                                )
+                                .await?;
+                                if flush_each_actor_response() {
+                                    stream.flush().await.map_err(GossipError::Network)?;
+                                    *bytes_since_flush = 0;
+                                }
+                            } else {
+                                response_batch.push_bytes(corr_id, payload.into_bytes());
+                            }
                         }
                         // Less common: keep correctness, allow existing slow-path writes.
                         other => {
+                            let should_stream = match &other {
+                                crate::registry::ActorResponse::Pooled { payload_len, .. } => {
+                                    *payload_len > inline_payload_limit
+                                        || *payload_len > STREAMING_THRESHOLD
+                                }
+                                _ => false,
+                            };
+                            if should_stream {
+                                // Fall back to copying pooled responses for oversize cases so asks
+                                // don't time out on valid responses.
+                                let bytes = match other {
+                                    crate::registry::ActorResponse::Pooled {
+                                        payload,
+                                        prefix,
+                                        payload_len,
+                                    } => {
+                                        let mut buf = bytes::BytesMut::with_capacity(payload_len);
+                                        if let Some(p) = prefix {
+                                            buf.extend_from_slice(&p); // ALLOW_COPY
+                                        }
+                                        let mut payload = payload;
+                                        while payload.has_remaining() {
+                                            let chunk = payload.chunk();
+                                            if chunk.is_empty() {
+                                                break;
+                                            }
+                                            buf.extend_from_slice(chunk); // ALLOW_COPY
+                                            payload.advance(chunk.len());
+                                        }
+                                        buf.freeze()
+                                    }
+                                    crate::registry::ActorResponse::Bytes(b) => b,
+                                    crate::registry::ActorResponse::Aligned(b) => b.into_bytes(),
+                                };
+                                write_streaming_response_direct(
+                                    stream,
+                                    bytes_written_counter,
+                                    bytes_since_flush,
+                                    corr_id,
+                                    bytes,
+                                    registry.config.max_message_size,
+                                    schema_hash,
+                                )
+                                .await?;
+                                if flush_each_actor_response() {
+                                    stream.flush().await.map_err(GossipError::Network)?;
+                                    *bytes_since_flush = 0;
+                                }
+                            } else {
                             write_actor_response_direct(
                                 stream,
                                 bytes_written_counter,
@@ -1575,6 +1801,7 @@ where
                             if flush_each_actor_response() {
                                 stream.flush().await.map_err(GossipError::Network)?;
                                 *bytes_since_flush = 0;
+                            }
                             }
                         }
                     }
@@ -1649,6 +1876,11 @@ pub struct LockFreeStreamHandle {
     streaming_tx: mpsc::UnboundedSender<StreamingCommand>,
     /// Buffer configuration that determines sizes and thresholds
     buffer_config: BufferConfig,
+    /// Max allowed frame payload size (msg_len, excluding 4-byte length prefix).
+    ///
+    /// This comes from the registry config and is used to bound streaming chunk sizes so
+    /// streaming frames themselves never exceed the reader limit.
+    max_message_size: usize,
     /// Optional schema/version hash for protocol guardrails.
     schema_hash: Option<u64>,
 }
@@ -1693,6 +1925,11 @@ impl LockFreeStreamHandle {
         // Create lock-free queue for payload writes and channel for streaming commands
         let write_queue = WriteQueue::new(buffer_config.write_queue_capacity());
         let (streaming_tx, streaming_rx) = mpsc::unbounded_channel();
+
+        let max_message_size = read_context
+            .as_ref()
+            .map(|ctx| ctx.max_message_size)
+            .unwrap_or(MASTER_BUFFER_SIZE);
         // Spawn background writer task with exclusive TCP access - NO MUTEX!
         let writer_handle = {
             let shutdown_signal = shutdown_signal.clone();
@@ -1744,15 +1981,16 @@ impl LockFreeStreamHandle {
                 frame_sequence: Arc::new(AtomicUsize::new(0)),
                 bytes_written, // This now tracks actual TCP bytes written
                 shutdown_signal,
-            flush_pending,
-            exit_flag,
-            exit_notify,
-            ask_permits,
-            streaming_active,
-            write_queue,
-            streaming_tx,
-            buffer_config,
-            schema_hash,
+                flush_pending,
+                exit_flag,
+                exit_notify,
+                ask_permits,
+                streaming_active,
+                write_queue,
+                streaming_tx,
+                buffer_config,
+                max_message_size,
+                schema_hash,
             },
             writer_handle,
         )
@@ -3465,6 +3703,21 @@ impl LockFreeStreamHandle {
         self.schema_hash
     }
 
+    fn max_stream_chunk_size(&self) -> Result<usize> {
+        // Streaming frame wire format excludes the 4-byte length prefix from `msg_len`.
+        // `msg_len` for stream data frames is: type(1) + corr(2) + reserved(9) + header(36) + chunk(N).
+        const STREAM_FRAME_OVERHEAD: usize = 12 + crate::StreamHeader::SERIALIZED_SIZE;
+
+        let max_chunk = self.max_message_size.saturating_sub(STREAM_FRAME_OVERHEAD);
+        if max_chunk == 0 {
+            return Err(GossipError::InvalidConfig(format!(
+                "max_message_size={} too small for streaming (overhead={})",
+                self.max_message_size, STREAM_FRAME_OVERHEAD
+            )));
+        }
+        Ok(std::cmp::min(STREAM_CHUNK_SIZE, max_chunk))
+    }
+
     /// Stream a large message directly to the socket, bypassing the write queue
     /// This provides maximum performance for large messages like PreBacktest
     pub async fn stream_large_message(
@@ -3475,7 +3728,7 @@ impl LockFreeStreamHandle {
     ) -> Result<()> {
         use crate::{current_timestamp_nanos, MessageType, StreamHeader};
 
-        const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+        let chunk_size = self.max_stream_chunk_size()?;
 
         // Acquire streaming mode atomically
         while self
@@ -3535,7 +3788,7 @@ impl LockFreeStreamHandle {
             .map_err(|_| GossipError::Shutdown)?;
 
         // Stream chunks directly
-        for (idx, chunk) in msg.chunks(CHUNK_SIZE).enumerate() {
+        for (idx, chunk) in msg.chunks(chunk_size).enumerate() {
             let data_header = StreamHeader {
                 stream_id,
                 total_size: msg.len() as u64,
@@ -3589,7 +3842,7 @@ impl LockFreeStreamHandle {
         debug!(
             "✅ STREAMING: Successfully streamed {} MB in {} chunks",
             msg.len() as f64 / 1_048_576.0,
-            msg.len().div_ceil(CHUNK_SIZE)
+            msg.len().div_ceil(chunk_size)
         );
 
         Ok(())
@@ -3624,7 +3877,7 @@ impl LockFreeStreamHandle {
         use crate::{current_timestamp_nanos, MessageType, StreamHeader};
         use bytes::BufMut;
 
-        const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+        let chunk_size = self.max_stream_chunk_size()?;
 
         // Acquire streaming mode atomically
         while self
@@ -3695,11 +3948,11 @@ impl LockFreeStreamHandle {
 
         // Stream response chunks using zero-copy slices
         let total_len = payload.len();
-        let num_chunks = total_len.div_ceil(CHUNK_SIZE);
+        let num_chunks = total_len.div_ceil(chunk_size);
 
         for idx in 0..num_chunks {
-            let start = idx * CHUNK_SIZE;
-            let end = std::cmp::min(start + CHUNK_SIZE, total_len);
+            let start = idx * chunk_size;
+            let end = std::cmp::min(start + chunk_size, total_len);
             let chunk_len = end - start;
 
             // Zero-copy slice of the payload
@@ -4978,7 +5231,7 @@ impl ConnectionHandle {
     ) -> Result<bytes::Bytes> {
         use crate::{current_timestamp_nanos, MessageType, StreamHeader};
 
-        const CHUNK_SIZE: usize = STREAM_CHUNK_SIZE;
+        let chunk_size = self.stream_handle.max_stream_chunk_size()?;
 
         // Allocate correlation ID for the response
         let correlation_id = self.correlation.allocate();
@@ -5080,7 +5333,7 @@ impl ConnectionHandle {
         let mut chunk_index = 0;
 
         while offset < total_size {
-            let chunk_end = std::cmp::min(offset + CHUNK_SIZE, total_size);
+            let chunk_end = std::cmp::min(offset + chunk_size, total_size);
             let chunk_len = chunk_end - offset;
 
             // Zero-copy slice of the original Bytes buffer

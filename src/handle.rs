@@ -530,6 +530,39 @@ fn bind_with_reuseaddr(bind_addr: SocketAddr) -> Result<TcpListener> {
         return bind_fallback_std(bind_addr);
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    fn set_reuse_port_best_effort(socket: &Socket) -> std::io::Result<()> {
+        // Best-effort only. This is not required for correctness, so callers should ignore errors.
+        use std::os::unix::io::AsRawFd;
+
+        // Safety: setsockopt with stable pointers; any error is returned and treated as best-effort.
+        unsafe {
+            let fd = socket.as_raw_fd();
+            let optval: libc::c_int = 1;
+            let rc = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+    }
+
     let domain = match bind_addr {
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
@@ -548,9 +581,18 @@ fn bind_with_reuseaddr(bind_addr: SocketAddr) -> Result<TcpListener> {
     // we don't fail startup if they're blocked.
     let _ = socket.set_reuse_address(true);
     // Best-effort: allow immediate rebinding during restarts on platforms that support it.
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
     {
-        let _ = socket.set_reuse_port(true);
+        let _ = set_reuse_port_best_effort(&socket);
     }
 
     if let Err(e) = socket.bind(&bind_addr.into()) {
@@ -1417,6 +1459,34 @@ pub(crate) async fn send_streaming_response(
         }
     } else {
         warn!(peer = %peer_addr, correlation_id = correlation_id, "No connection found for streaming response");
+    }
+}
+
+/// Send a streaming response on the already-accepted connection (no pool lookup).
+pub(crate) async fn send_streaming_response_on_connection(
+    conn: &crate::connection_pool::LockFreeConnection,
+    correlation_id: u16,
+    response: bytes::Bytes,
+) {
+    if let Some(ref stream_handle) = conn.stream_handle {
+        // Streaming responses always use the streaming protocol.
+        if let Err(e) = stream_handle
+            .stream_response_bytes(response, correlation_id)
+            .await
+        {
+            warn!(
+                peer = %conn.addr,
+                error = %e,
+                correlation_id = correlation_id,
+                "Failed to send streaming response on existing connection"
+            );
+        }
+    } else {
+        warn!(
+            peer = %conn.addr,
+            correlation_id = correlation_id,
+            "No stream handle for streaming response on existing connection"
+        );
     }
 }
 
