@@ -45,6 +45,29 @@ impl ActorMessageHandler for TestActorHandler {
     }
 }
 
+struct LargeResponseHandler {
+    response: bytes::Bytes,
+}
+
+impl ActorMessageHandler for LargeResponseHandler {
+    fn handle_actor_message(
+        &self,
+        _actor_id: u64,
+        _type_hash: u32,
+        _payload: kameo_remote::AlignedBytes,
+        correlation_id: Option<u16>,
+    ) -> ActorMessageFuture<'_> {
+        let response = self.response.clone();
+        Box::pin(async move {
+            if correlation_id.is_some() {
+                Ok(Some(response.into()))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+}
+
 fn run_with_large_stack<F, Fut>(name: &str, fut: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -277,6 +300,69 @@ fn test_end_to_end_ask_reply() {
         }
 
         // Shutdown
+        handle_a.shutdown().await;
+        handle_b.shutdown().await;
+    });
+}
+
+/// Regression test: ActorAsk responses larger than max_message_size must not be forced inline.
+#[test]
+fn test_end_to_end_actorask_oversize_response_streams() {
+    run_with_large_stack("end_to_end_actorask_oversize_response_streams", || async {
+        // Avoid sandbox-triggered EPERM flakiness unless explicitly enabled.
+        if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
+            let _ = tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer().with_filter(
+                    EnvFilter::from_default_env()
+                        .add_directive("kameo_remote=info".parse().unwrap()),
+                ))
+                .try_init();
+        }
+
+        let mut config = GossipConfig::default();
+        config.gossip_interval = Duration::from_secs(3600);
+
+        let handle_a = create_tls_node(config.clone()).await.unwrap();
+        let handle_b = create_tls_node(config).await.unwrap();
+
+        // Make the response payload exceed `max_message_size` once framed inline:
+        // msg_len = ASK_RESPONSE_HEADER_LEN (12) + payload_len. If payload_len == max_message_size,
+        // the receiver will reject the inline frame as MessageTooLarge.
+        let payload_len = handle_b.registry.config.max_message_size;
+        let response_bytes = bytes::Bytes::from(vec![b'Z'; payload_len]);
+        handle_b
+            .registry
+            .set_actor_message_handler(Arc::new(LargeResponseHandler {
+                response: response_bytes.clone(),
+            }))
+            .await;
+
+        let addr_b = handle_b.registry.bind_addr;
+        let peer_b_id = handle_b.registry.peer_id.clone();
+        let peer_b = handle_a.add_peer(&peer_b_id).await;
+        peer_b.connect(&addr_b).await.unwrap();
+
+        assert!(
+            wait_for_condition(Duration::from_secs(3), || async {
+                handle_a.stats().await.active_peers > 0
+            })
+            .await,
+            "TLS peer should connect"
+        );
+
+        let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
+        let conn = conn.connection_ref().expect("connection should be ready");
+        let request = bytes::Bytes::from_static(b"ping");
+
+        let response = conn
+            .ask_actor_frame(TEST_ACTOR_ID, TEST_TYPE_HASH, request, Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        assert_eq!(response.len(), response_bytes.len());
+        assert_eq!(response[0], b'Z');
+        assert_eq!(response[response.len() - 1], b'Z');
+
         handle_a.shutdown().await;
         handle_b.shutdown().await;
     });

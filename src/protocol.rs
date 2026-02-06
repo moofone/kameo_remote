@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use tracing::{info, warn};
 
 use crate::{
@@ -8,7 +8,8 @@ use crate::{
         handle_raw_ask_request, handle_response_message, send_inline_response,
         send_inline_response_aligned, send_inline_response_on_connection,
         send_inline_response_on_connection_aligned, send_pooled_response,
-        send_pooled_response_on_connection, send_streaming_response, MessageReadResult,
+        send_pooled_response_on_connection, send_streaming_response,
+        send_streaming_response_on_connection, MessageReadResult,
     },
     registry::{ActorResponse, GossipRegistry, RegistryMessage},
     GossipError, Result,
@@ -334,6 +335,11 @@ pub(crate) async fn process_read_result(
             } else {
                 0
             };
+            let response_mode = if msg_type == crate::MessageType::ActorAsk as u8 {
+                ResponseMode::AutoStream
+            } else {
+                ResponseMode::InlineOnly
+            };
             handle_assembled_message(
                 registry,
                 peer_addr,
@@ -343,7 +349,7 @@ pub(crate) async fn process_read_result(
                 corr_id,
                 schema_hash,
                 response_connection,
-                ResponseMode::InlineOnly,
+                response_mode,
             )
             .await;
         }
@@ -522,6 +528,33 @@ enum ResponseMode {
     AutoStream,
 }
 
+fn should_stream_response(
+    registry: &Arc<GossipRegistry>,
+    response_connection: Option<&Arc<crate::connection_pool::LockFreeConnection>>,
+    response_len: usize,
+    response_mode: ResponseMode,
+) -> bool {
+    // Absolute correctness bound: the reader rejects frames larger than max_message_size.
+    // `msg_len` on the wire is ASK_RESPONSE_HEADER_LEN + payload_len (length prefix excluded).
+    let inline_payload_limit = registry
+        .config
+        .max_message_size
+        .saturating_sub(crate::framing::ASK_RESPONSE_HEADER_LEN);
+    if response_len > inline_payload_limit {
+        return true;
+    }
+
+    match response_mode {
+        ResponseMode::InlineOnly => false,
+        ResponseMode::AutoStream => {
+            // Prefer streaming for large-ish payloads to avoid huge inline frames.
+            let _ = response_connection; // threshold is currently a global constant
+            let threshold = crate::connection_pool::STREAMING_THRESHOLD;
+            response_len > threshold
+        }
+    }
+}
+
 async fn handle_assembled_message(
     registry: &Arc<GossipRegistry>,
     peer_addr: SocketAddr,
@@ -556,39 +589,40 @@ async fn handle_assembled_message(
         if corr_id != 0 {
             match response {
                 ActorResponse::Bytes(response) => {
-                    match response_mode {
-                        ResponseMode::InlineOnly => {
-                            if let Some(conn) = response_connection {
-                                send_inline_response_on_connection(conn, corr_id, response).await;
-                            } else {
-                                send_inline_response(registry, peer_addr, corr_id, response).await;
-                            }
-                        }
-                        ResponseMode::AutoStream => {
+                    if should_stream_response(
+                        registry,
+                        response_connection,
+                        response.len(),
+                        response_mode,
+                    ) {
+                        if let Some(conn) = response_connection {
+                            send_streaming_response_on_connection(conn, corr_id, response).await;
+                        } else {
                             send_streaming_response(registry, peer_addr, corr_id, response).await;
                         }
+                    } else if let Some(conn) = response_connection {
+                        send_inline_response_on_connection(conn, corr_id, response).await;
+                    } else {
+                        send_inline_response(registry, peer_addr, corr_id, response).await;
                     }
                 }
                 ActorResponse::Aligned(response) => {
-                    match response_mode {
-                        ResponseMode::InlineOnly => {
-                            if let Some(conn) = response_connection {
-                                send_inline_response_on_connection_aligned(conn, corr_id, response)
-                                    .await;
-                            } else {
-                                send_inline_response_aligned(registry, peer_addr, corr_id, response)
-                                    .await;
-                            }
+                    if should_stream_response(
+                        registry,
+                        response_connection,
+                        response.len(),
+                        response_mode,
+                    ) {
+                        let bytes = response.into_bytes();
+                        if let Some(conn) = response_connection {
+                            send_streaming_response_on_connection(conn, corr_id, bytes).await;
+                        } else {
+                            send_streaming_response(registry, peer_addr, corr_id, bytes).await;
                         }
-                        ResponseMode::AutoStream => {
-                            send_streaming_response(
-                                registry,
-                                peer_addr,
-                                corr_id,
-                                response.into_bytes(),
-                            )
-                            .await;
-                        }
+                    } else if let Some(conn) = response_connection {
+                        send_inline_response_on_connection_aligned(conn, corr_id, response).await;
+                    } else {
+                        send_inline_response_aligned(registry, peer_addr, corr_id, response).await;
                     }
                 }
                 ActorResponse::Pooled {
@@ -596,25 +630,37 @@ async fn handle_assembled_message(
                     prefix,
                     payload_len,
                 } => {
-                    if let Some(conn) = response_connection {
-                        send_pooled_response_on_connection(
-                            conn,
-                            corr_id,
-                            payload,
-                            prefix,
-                            payload_len,
-                        )
-                        .await;
+                    if should_stream_response(registry, response_connection, payload_len, response_mode)
+                    {
+                        // Fallback to copying for oversize pooled responses so the caller doesn't
+                        // time out on a valid response.
+                        let mut buf = bytes::BytesMut::with_capacity(payload_len);
+                        if let Some(p) = prefix {
+                            buf.extend_from_slice(&p); // ALLOW_COPY
+                        }
+                        let mut payload = payload;
+                        while payload.has_remaining() {
+                            let chunk = payload.chunk();
+                            if chunk.is_empty() {
+                                break;
+                            }
+                            buf.extend_from_slice(chunk); // ALLOW_COPY
+                            let len = chunk.len();
+                            payload.advance(len);
+                        }
+                        let bytes = buf.freeze();
+
+                        if let Some(conn) = response_connection {
+                            send_streaming_response_on_connection(conn, corr_id, bytes).await;
+                        } else {
+                            send_streaming_response(registry, peer_addr, corr_id, bytes).await;
+                        }
+                    } else if let Some(conn) = response_connection {
+                        send_pooled_response_on_connection(conn, corr_id, payload, prefix, payload_len)
+                            .await;
                     } else {
-                        send_pooled_response(
-                            registry,
-                            peer_addr,
-                            corr_id,
-                            payload,
-                            prefix,
-                            payload_len,
-                        )
-                        .await;
+                        send_pooled_response(registry, peer_addr, corr_id, payload, prefix, payload_len)
+                            .await;
                     }
                 }
             }
