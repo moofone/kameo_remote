@@ -828,6 +828,25 @@ impl GossipRegistry {
         node_id: Option<crate::NodeId>,
     ) {
         debug!(peer = %peer_addr, self_addr = %self.bind_addr, has_node_id = node_id.is_some(), "add_peer_with_node_id called");
+
+        // Defensive guard: never learn our own peer ID from gossip actor metadata.
+        // Actor locations can be stale in distributed systems (e.g. old pod IPs),
+        // and accepting them can poison self-mapping and trigger self-reconnect loops.
+        if let Some(incoming_peer_id) = node_id.as_ref().map(|id| id.to_peer_id()) {
+            if incoming_peer_id == self.peer_id {
+                if peer_addr != self.bind_addr {
+                    warn!(
+                        peer = %peer_addr,
+                        self_addr = %self.bind_addr,
+                        "ignoring stale self peer mapping learned from actor gossip"
+                    );
+                } else {
+                    debug!(peer = %peer_addr, "ignoring self peer add");
+                }
+                return;
+            }
+        }
+
         if peer_addr != self.bind_addr {
             {
                 let mut gossip_state = self.gossip_state.lock().await;
@@ -927,6 +946,19 @@ impl GossipRegistry {
 
     /// Configure a peer by peer ID and its expected connection address
     pub async fn configure_peer(&self, peer_id: crate::PeerId, connect_addr: SocketAddr) {
+        // Do not let external updates rewrite our own peer mapping.
+        if peer_id == self.peer_id {
+            if connect_addr != self.bind_addr {
+                warn!(
+                    peer_id = %peer_id,
+                    addr = %connect_addr,
+                    self_addr = %self.bind_addr,
+                    "ignoring non-authoritative self configure_peer update"
+                );
+            }
+            return;
+        }
+
         let pool = &self.connection_pool;
         info!(peer_id = %peer_id, addr = %connect_addr, "Configured peer");
         pool.peer_id_to_addr.insert(peer_id.clone(), connect_addr);
@@ -2602,15 +2634,36 @@ impl GossipRegistry {
         if !updates_to_apply.is_empty() {
             let mut actor_state = self.actor_state.write().await;
             for (name, location) in &updates_to_apply {
-                // Also ensure the peer's NodeId is in the gossip state for TLS
-                if let Ok(addr) = location.address.parse::<SocketAddr>() {
-                    // Convert PeerId to NodeId for TLS
-                    let node_id = Some(location.peer_id.to_node_id());
-                    if node_id.is_some() {
-                        // This will be used later when we need to connect to this peer for TLS
-                        self.add_peer_with_node_id(addr, node_id).await;
-                        debug!(actor = %name, peer_addr = %addr, "Added NodeId to gossip state for actor's host");
+                // Never learn our own node mapping from remote actor metadata.
+                if location.peer_id == self.peer_id {
+                    debug!(
+                        actor = %name,
+                        addr = %location.address,
+                        "Skipping self peer mapping learned from remote actor metadata"
+                    );
+                    continue;
+                }
+
+                // Seed peer mapping from actor metadata only when we have never seen this peer.
+                // Connection-sourced FullSync/FullSyncResponse is authoritative for address updates.
+                let should_seed_peer = !self
+                    .connection_pool
+                    .peer_id_to_addr
+                    .contains_key(&location.peer_id);
+
+                if should_seed_peer {
+                    if let Ok(addr) = location.address.parse::<SocketAddr>() {
+                        self.add_peer_with_node_id(addr, Some(location.peer_id.to_node_id()))
+                            .await;
+                        debug!(actor = %name, peer_addr = %addr, "Seeded peer mapping from actor metadata");
                     }
+                } else {
+                    debug!(
+                        actor = %name,
+                        peer_id = %location.peer_id,
+                        addr = %location.address,
+                        "Skipping actor-derived peer remap for already-known peer"
+                    );
                 }
                 actor_state
                     .known_actors
@@ -5228,6 +5281,63 @@ mod tests {
         let actor_state = registry.actor_state.read().await;
         assert!(actor_state.known_actors.contains_key("remote_actor1"));
         assert!(actor_state.known_actors.contains_key("remote_actor2"));
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_with_node_id_ignores_self_peer_id_with_foreign_addr() {
+        let registry = GossipRegistry::new(test_addr(8080), test_config());
+        let self_peer_id = registry.peer_id.clone();
+        let stale_self_addr = test_addr(9099);
+
+        registry
+            .add_peer_with_node_id(stale_self_addr, Some(self_peer_id.to_node_id()))
+            .await;
+
+        let gossip_state = registry.gossip_state.lock().await;
+        assert!(!gossip_state.peers.contains_key(&stale_self_addr));
+        drop(gossip_state);
+
+        assert!(registry
+            .connection_pool
+            .peer_id_to_addr
+            .get(&self_peer_id)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_merge_full_sync_does_not_overwrite_existing_peer_mapping_from_actor_metadata() {
+        let registry = GossipRegistry::new(test_addr(8080), test_config());
+        let peer_id = test_peer_id("stable_peer");
+        let existing_addr = test_addr(9400);
+        let stale_addr = test_addr(9500);
+
+        registry
+            .connection_pool
+            .peer_id_to_addr
+            .insert(peer_id.clone(), existing_addr);
+
+        let mut remote_known = HashMap::new();
+        remote_known.insert(
+            "stale_actor".to_string(),
+            RemoteActorLocation::new_with_peer(stale_addr, peer_id.clone()),
+        );
+
+        registry
+            .merge_full_sync(
+                HashMap::new(),
+                remote_known,
+                test_addr(8081),
+                1,
+                current_timestamp(),
+            )
+            .await;
+
+        let mapped = registry
+            .connection_pool
+            .peer_id_to_addr
+            .get(&peer_id)
+            .map(|v| *v.value());
+        assert_eq!(mapped, Some(existing_addr));
     }
 
     #[tokio::test]
