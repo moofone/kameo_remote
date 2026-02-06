@@ -6691,6 +6691,18 @@ impl ConnectionPool {
                 );
 
                 if let Some(ref stream_handle) = conn.stream_handle {
+                    // If the IO task already exited, treat this entry as stale even if the
+                    // connection state wasn't updated yet (race with failure handling).
+                    if stream_handle.exit_flag.load(Ordering::Acquire) {
+                        let addr = conn.addr;
+                        debug!(
+                            peer_id = %peer_id,
+                            addr = %addr,
+                            "CONNECTION POOL: existing peer entry has exited IO task; evicting"
+                        );
+                        drop(conn_entry);
+                        let _ = self.remove_connection(addr);
+                    } else {
                     // Need to get the address for ConnectionHandle
                     let addr = conn.addr;
                     // Use shared correlation tracker
@@ -6700,6 +6712,7 @@ impl ConnectionPool {
                         stream_handle: stream_handle.clone(),
                         correlation,
                     });
+                    }
                 } else {
                     return Err(crate::GossipError::Network(std::io::Error::other(
                         "Connection exists but no stream handle",
@@ -6859,7 +6872,20 @@ impl ConnectionPool {
         ) {
             let remote_peer_id = crate::PeerId::from(node_id_value);
             if let Some(existing_conn) = self.get_connection_by_peer_id(&remote_peer_id) {
-                if !registry_arc.should_keep_connection(&remote_peer_id, true) {
+                let alive = existing_conn.is_connected()
+                    && existing_conn
+                        .stream_handle
+                        .as_ref()
+                        .map(|h| !h.exit_flag.load(Ordering::Acquire))
+                        .unwrap_or(false);
+                if !alive {
+                    debug!(
+                        remote = %remote_peer_id,
+                        addr = %existing_conn.addr,
+                        "tie-breaker: evicting stale existing connection before dialing"
+                    );
+                    let _ = self.remove_connection(existing_conn.addr);
+                } else if !registry_arc.should_keep_connection(&remote_peer_id, true) {
                     debug!(
                         remote = %remote_peer_id,
                         "tie-breaker: reusing existing connection instead of dialing outbound"

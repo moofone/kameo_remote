@@ -7,7 +7,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     time::{interval, Instant},
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use std::sync::atomic::Ordering;
 
 use crate::{
@@ -484,7 +484,9 @@ fn bind_with_reuseaddr(bind_addr: SocketAddr) -> Result<TcpListener> {
         // macOS sandboxed runs can return transient EPERM for otherwise-valid `bind()` calls.
         // Retrying here is cheap (only on startup) and makes socket-heavy integration tests
         // deterministic.
-        const MAX_EPERM_RETRIES: usize = 50;
+        // Some sandbox profiles exhibit multi-second EPERM bursts under load, so allow a longer
+        // retry window. This only impacts startup when EPERM is actually occurring.
+        const MAX_EPERM_RETRIES: usize = 400;
         const EPERM_RETRY_SLEEP_MS: u64 = 10;
 
         for attempt in 0..=MAX_EPERM_RETRIES {
@@ -1411,39 +1413,26 @@ pub(crate) async fn send_streaming_response(
     // (both connections use the same TCP wire - responses go back on the same connection)
     let mut conn_opt: Option<Arc<crate::connection_pool::LockFreeConnection>> = None;
     if let Some(peer_id) = pool.get_peer_id_by_addr(&peer_addr) {
-        debug!(peer = %peer_addr, %peer_id, "Found peer_id for streaming response, looking up connection");
-
         // Get connection by peer_id - this returns the best available connection
         let conn = pool.get_connection_by_peer_id(&peer_id);
-        if let Some(ref c) = conn {
-            debug!(peer = %peer_addr, %peer_id, conn_addr = %c.addr, conn_direction = ?c.direction,
-                  "Found connection by peer_id for streaming response");
-        }
 
         // For responses, we prefer OUTBOUND connection over INBOUND
         // because we typically have an outbound connection for ongoing communication
         if let Some(ref c) = conn {
             if c.direction == crate::connection_pool::ConnectionDirection::Outbound {
-                // Perfect - use the outbound connection
-                debug!(peer = %peer_addr, %peer_id, conn_addr = %c.addr,
-                      "✅ Using outbound connection for response");
                 conn_opt = Some(c.clone());
             } else {
                 // We only have an inbound connection
                 // That's OK! The inbound connection is the same TCP wire, just from the peer's perspective
                 // Responses will go back on the same TCP connection
-                debug!(peer = %peer_addr, %peer_id, conn_addr = %c.addr,
-                      "Using inbound connection for response (same TCP wire)");
                 conn_opt = Some(c.clone());
             }
         }
     } else {
-        debug!(peer = %peer_addr, "No peer_id found for address, falling back to direct address lookup for streaming response");
         conn_opt = pool.get_connection_by_addr(&peer_addr);
     };
 
     if let Some(conn) = conn_opt {
-        debug!(peer = %peer_addr, conn_addr = %conn.addr, conn_direction = ?conn.direction, "Sending streaming response on connection");
         if let Some(ref stream_handle) = conn.stream_handle {
             // Streaming responses always use the streaming protocol.
             if let Err(e) = stream_handle
@@ -1452,7 +1441,7 @@ pub(crate) async fn send_streaming_response(
             {
                 warn!(peer = %peer_addr, error = %e, correlation_id = correlation_id, "Failed to send streaming response");
             } else {
-                debug!(peer = %peer_addr, correlation_id = correlation_id, "Sent streaming response");
+                // Intentionally quiet: this is the hot-path and can spam logs in benchmarks.
             }
         } else {
             warn!(peer = %peer_addr, correlation_id = correlation_id, "No stream handle for streaming response");
@@ -1764,10 +1753,6 @@ pub(crate) fn parse_message_from_pooled_buffer(
         // Try to deserialize as RegistryMessage first (Ask wrapper for gossip)
         match decode_registry_message(payload_slice) {
             Ok(msg) => {
-                debug!(
-                    correlation_id = correlation_id,
-                    "Received Ask message with correlation ID"
-                );
                 return Ok(MessageReadResult::Gossip(msg, Some(correlation_id)));
             }
             Err(err) => {
@@ -1861,11 +1846,9 @@ pub(crate) fn parse_message_from_pooled_buffer(
                             match decode_registry_message(payload_slice) {
                                 Ok(msg) => return Ok(MessageReadResult::Gossip(msg, None)),
                                 Err(err) => {
-                                    debug!(
-                                        payload_len = payload_slice.len(),
-                                        error = %err,
-                                        "Failed to decode gossip payload"
-                                    );
+                                    // Avoid spamming logs with rkyv error strings (can be very noisy in stress tests).
+                                    trace!(payload_len = payload_slice.len(), "Failed to decode gossip payload");
+                                    let _ = err;
                                     return Ok(raw(buffer));
                                 }
                             }
@@ -2050,10 +2033,6 @@ where
         // Try to deserialize as RegistryMessage first (Ask wrapper for gossip)
         match decode_registry_message(payload.as_ref()) {
             Ok(msg) => {
-                debug!(
-                    correlation_id = correlation_id,
-                    "Received Ask message with correlation ID"
-                );
                 Ok(MessageReadResult::Gossip(msg, Some(correlation_id)))
             }
             Err(err) => {
@@ -2132,11 +2111,9 @@ where
                             match decode_registry_message(payload.as_ref()) {
                                 Ok(msg) => return Ok(MessageReadResult::Gossip(msg, None)),
                                 Err(err) => {
-                                    debug!(
-                                        payload_len = payload.len(),
-                                        error = %err,
-                                        "Failed to decode gossip payload"
-                                    );
+                                    // Avoid spamming logs with rkyv error strings (can be very noisy in stress tests).
+                                    trace!(payload_len = payload.len(), "Failed to decode gossip payload");
+                                    let _ = err;
                                     return Ok(MessageReadResult::Raw(msg_data));
                                 }
                             }
