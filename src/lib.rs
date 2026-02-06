@@ -1,8 +1,10 @@
+pub mod aligned;
 pub mod config;
 pub mod connection_pool;
 pub mod framing;
 mod handle;
 mod handle_builder;
+mod net;
 pub mod handshake;
 pub mod peer_discovery;
 pub mod priority;
@@ -28,8 +30,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub use aligned::{AlignedBytes, AlignedBytesPool, PooledAlignedBuffer, PAYLOAD_ALIGNMENT};
 pub use config::GossipConfig;
 pub use connection_pool::{ChannelId, DelegatedReplySender, LockFreeStreamHandle, StreamFrameType};
+
+/// Maximum allowed size for streaming payloads (hard cap).
+pub const MAX_STREAM_SIZE: usize = 64 * 1024 * 1024; // 64MB
 pub use handle::GossipRegistryHandle;
 pub use handle_builder::GossipRegistryBuilder;
 pub use priority::{ConsistencyLevel, RegistrationPriority};
@@ -1154,6 +1160,12 @@ pub enum GossipError {
 
     #[error("registry shutdown")]
     Shutdown,
+
+    #[error("connection closed: {0}")]
+    ConnectionClosed(SocketAddr),
+
+    #[error("write queue full")]
+    WriteQueueFull,
 
     #[error("invalid keypair: {0}")]
     InvalidKeyPair(String),

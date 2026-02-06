@@ -96,6 +96,8 @@ async fn test_pooled_send_benchmarks() {
         "127.0.0.1:0".parse().unwrap(),
         ChannelId::TellAsk,
         BufferConfig::default(),
+        None,
+        None,
     );
 
     let reader_task = tokio::spawn(async move {

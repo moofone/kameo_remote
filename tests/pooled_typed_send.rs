@@ -18,6 +18,8 @@ async fn test_pooled_typed_send_matches_wire_bytes() {
         "127.0.0.1:0".parse().unwrap(),
         ChannelId::TellAsk,
         BufferConfig::default(),
+        None,
+        None,
     );
 
     let msg = WireMsg { value: 99 };
@@ -25,7 +27,7 @@ async fn test_pooled_typed_send_matches_wire_bytes() {
 
     let pooled = encode_typed_pooled(&msg).expect("encode_typed_pooled");
     let (payload, prefix, payload_len) = typed_payload_parts::<WireMsg>(pooled);
-    let mut header = [0u8; 8];
+    let mut header = [0u8; 16];
     header[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
     let prefix_len = prefix.as_ref().map(|p| p.len()).unwrap_or(0) as u8;
     handle
@@ -56,6 +58,8 @@ async fn test_write_ask_progresses_under_load() {
         "127.0.0.1:0".parse().unwrap(),
         ChannelId::TellAsk,
         BufferConfig::default(),
+        None,
+        None,
     );
 
     let reader_task = tokio::spawn(async move {

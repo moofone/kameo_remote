@@ -45,79 +45,85 @@ where
         .expect("node name test thread panicked unexpectedly");
 }
 
-#[test]
-fn test_node_name_based_connections() {
-    run_node_name_test(async {
-        // Initialize logging for debugging
+fn maybe_init_tracing() {
+    // Avoid sandbox-triggered EPERM flakiness unless explicitly enabled.
+    if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("kameo_remote=debug")
             .try_init();
+    }
+}
 
-    // Create configs
-    let config_a = GossipConfig {
-        gossip_interval: Duration::from_secs(5),
-        ..Default::default()
-    };
+#[test]
+fn test_node_name_based_connections() {
+    run_node_name_test(async {
+        maybe_init_tracing();
 
-    let config_b = GossipConfig {
-        gossip_interval: Duration::from_secs(5),
-        ..Default::default()
-    };
+        // Create configs
+        let config_a = GossipConfig {
+            gossip_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
 
-    // Start Node A first with TLS
-    let key_pair_a = KeyPair::new_for_testing("test_node_a");
-    let peer_id_a = key_pair_a.peer_id();
-    let node_a = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:0".parse().unwrap(), // Use port 0 for dynamic allocation
-        key_pair_a,
-        Some(config_a),
-    )
-    .await
-    .expect("Failed to create node A");
+        let config_b = GossipConfig {
+            gossip_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
 
-    let node_a_addr = node_a.registry.bind_addr;
-    println!("Node A started at {}", node_a_addr);
-
-    // Start Node B with TLS
-    let key_pair_b = KeyPair::new_for_testing("test_node_b");
-    let peer_id_b = key_pair_b.peer_id();
-    let node_b = GossipRegistryHandle::new_with_keypair(
-        "127.0.0.1:0".parse().unwrap(),
-        key_pair_b,
-        Some(config_b),
-    )
-    .await
-    .expect("Failed to create node B");
-
-    let node_b_addr = node_b.registry.bind_addr;
-    println!("Node B started at {}", node_b_addr);
-
-    // Node B: Add node A as peer and connect
-    let peer_a = node_b.add_peer(&peer_id_a).await;
-    peer_a
-        .connect(&node_a_addr)
+        // Start Node A first with TLS
+        let key_pair_a = KeyPair::new_for_testing("test_node_a");
+        let peer_id_a = key_pair_a.peer_id();
+        let node_a = GossipRegistryHandle::new_with_keypair(
+            "127.0.0.1:0".parse().unwrap(), // Use port 0 for dynamic allocation
+            key_pair_a,
+            Some(config_a),
+        )
         .await
-        .expect("Failed to connect to node A");
+        .expect("Failed to create node A");
 
-    // Node A: Add node B as peer and connect
-    let peer_b = node_a.add_peer(&peer_id_b).await;
-    peer_b
-        .connect(&node_b_addr)
+        let node_a_addr = node_a.registry.bind_addr;
+        println!("Node A started at {}", node_a_addr);
+
+        // Start Node B with TLS
+        let key_pair_b = KeyPair::new_for_testing("test_node_b");
+        let peer_id_b = key_pair_b.peer_id();
+        let node_b = GossipRegistryHandle::new_with_keypair(
+            "127.0.0.1:0".parse().unwrap(),
+            key_pair_b,
+            Some(config_b),
+        )
         .await
-        .expect("Failed to connect to node B");
+        .expect("Failed to create node B");
 
-    assert!(
-        wait_for_peer_mapping(&node_b, &peer_id_a, Duration::from_secs(5)).await,
-        "Node B failed to retain mapping for Node A"
-    );
+        let node_b_addr = node_b.registry.bind_addr;
+        println!("Node B started at {}", node_b_addr);
 
-    assert!(
-        wait_for_peer_mapping(&node_a, &peer_id_b, Duration::from_secs(5)).await,
-        "Node A failed to retain mapping for Node B"
-    );
+        // Node B: Add node A as peer and connect
+        let peer_a = node_b.add_peer(&peer_id_a).await;
+        peer_a
+            .connect(&node_a_addr)
+            .await
+            .expect("Failed to connect to node A");
 
-    // Clean shutdown
-    node_a.shutdown().await;
-    node_b.shutdown().await;
+        // Node A: Add node B as peer and connect
+        let peer_b = node_a.add_peer(&peer_id_b).await;
+        peer_b
+            .connect(&node_b_addr)
+            .await
+            .expect("Failed to connect to node B");
+
+        assert!(
+            wait_for_peer_mapping(&node_b, &peer_id_a, Duration::from_secs(5)).await,
+            "Node B failed to retain mapping for Node A"
+        );
+
+        assert!(
+            wait_for_peer_mapping(&node_a, &peer_id_b, Duration::from_secs(5)).await,
+            "Node A failed to retain mapping for Node B"
+        );
+
+        // Clean shutdown
+        node_a.shutdown().await;
+        node_b.shutdown().await;
     });
 }

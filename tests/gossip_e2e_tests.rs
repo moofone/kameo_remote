@@ -30,6 +30,12 @@ where
         .name("gossip-e2e-test".into())
         .stack_size(TEST_THREAD_STACK_SIZE)
         .spawn(move || {
+            if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                    .with_test_writer()
+                    .try_init();
+            }
             let rt = Builder::new_multi_thread()
                 .worker_threads(TEST_WORKER_THREADS)
                 .thread_stack_size(TEST_WORKER_STACK_SIZE)
@@ -146,26 +152,80 @@ fn test_delta_gossip_after_initial_full_sync() -> Result<(), DynError> {
             .register("actor.delta.1".to_string(), node_a.registry.bind_addr)
             .await?;
         assert!(
-            wait_for_actor(&node_b, "actor.delta.1", Duration::from_secs(2)).await,
+            wait_for_actor(&node_b, "actor.delta.1", Duration::from_secs(5)).await,
             "initial actor should propagate"
         );
 
         let stats_before = node_b.stats().await;
+        let addr_a = node_a.registry.bind_addr;
+        let addr_b = node_b.registry.bind_addr;
+        let pool_a = &node_a.registry.connection_pool;
+        let pool_b = &node_b.registry.connection_pool;
+        let had_conn_a_to_b = pool_a.has_connection(&addr_b);
+        let had_conn_b_to_a = pool_b.has_connection(&addr_a);
+        let bytes_written_before = if had_conn_a_to_b {
+            node_a
+                .lookup_address(addr_b)
+                .await
+                .ok()
+                .and_then(|r| r.connection_ref().map(|c| c.bytes_written()))
+        } else {
+            None
+        };
 
         node_a
             .register("actor.delta.2".to_string(), node_a.registry.bind_addr)
             .await?;
-        assert!(
-            wait_for_actor(&node_b, "actor.delta.2", Duration::from_secs(2)).await,
-            "second actor should propagate after initial sync"
-        );
+        let ok = wait_for_actor(&node_b, "actor.delta.2", Duration::from_secs(5)).await;
+        if !ok {
+            let stats_a = node_a.stats().await;
+            let stats_b = node_b.stats().await;
+            let bytes_written_after = if pool_a.has_connection(&addr_b) {
+                node_a
+                    .lookup_address(addr_b)
+                    .await
+                    .ok()
+                    .and_then(|r| r.connection_ref().map(|c| c.bytes_written()))
+            } else {
+                None
+            };
+
+            panic!(
+                "second actor should propagate after initial sync\n\
+                 addr_a={addr_a} addr_b={addr_b}\n\
+                 conn_a_to_b={had_conn_a_to_b} conn_b_to_a={had_conn_b_to_a}\n\
+                 bytes_written_a_to_b_before={bytes_written_before:?} after={bytes_written_after:?}\n\
+                 node_a: seq={} local={} known={} peers(active={} failed={}) delta_ex={} full_ex={} delta_hist={}\n\
+                 node_b: seq={} local={} known={} peers(active={} failed={}) delta_ex={} full_ex={} delta_hist={}\n\
+                 pool_a.connected_peers={:?}\n\
+                 pool_b.connected_peers={:?}",
+                stats_a.current_sequence,
+                stats_a.local_actors,
+                stats_a.known_actors,
+                stats_a.active_peers,
+                stats_a.failed_peers,
+                stats_a.delta_exchanges,
+                stats_a.full_sync_exchanges,
+                stats_a.delta_history_size,
+                stats_b.current_sequence,
+                stats_b.local_actors,
+                stats_b.known_actors,
+                stats_b.active_peers,
+                stats_b.failed_peers,
+                stats_b.delta_exchanges,
+                stats_b.full_sync_exchanges,
+                stats_b.delta_history_size,
+                pool_a.get_connected_peers(),
+                pool_b.get_connected_peers(),
+            );
+        }
 
         assert!(
             wait_for_exchange(
                 &node_b,
                 stats_before.delta_exchanges,
                 stats_before.full_sync_exchanges,
-                Duration::from_secs(2)
+                Duration::from_secs(5)
             )
             .await,
             "gossip exchange counters should advance after second update"

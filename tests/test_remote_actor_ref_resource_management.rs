@@ -20,6 +20,15 @@ const REMOTE_REF_TEST_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
 const REMOTE_REF_TEST_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const REMOTE_REF_TEST_WORKERS: usize = 4;
 
+fn maybe_init_tracing() {
+    // Avoid sandbox-triggered EPERM flakiness unless explicitly enabled.
+    if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init();
+    }
+}
+
 fn run_remote_actor_ref_test<F, Fut>(name: &'static str, test: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -46,9 +55,7 @@ where
 
 #[cfg(feature = "test-helpers")]
 async fn test_remote_actor_ref_detects_shutdown_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -132,9 +139,7 @@ fn test_remote_actor_ref_detects_shutdown() {
 }
 
 async fn test_concurrent_remote_actor_ref_usage_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -213,9 +218,7 @@ fn test_concurrent_remote_actor_ref_usage() {
 }
 
 async fn test_weak_registry_ref_prevents_cycles_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -292,9 +295,7 @@ fn test_weak_registry_ref_prevents_cycles() {
 }
 
 async fn test_remote_actor_ref_clone_independence_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -366,9 +367,7 @@ fn test_remote_actor_ref_clone_independence() {
 }
 
 async fn test_remote_actor_ref_location_metadata_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -446,9 +445,7 @@ fn test_remote_actor_ref_location_metadata() {
 
 #[cfg(feature = "test-helpers")]
 async fn test_connection_reuse_across_lookups_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -522,9 +519,7 @@ fn test_connection_reuse_across_lookups() {
 }
 
 async fn test_remote_actor_ref_debug_output_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -597,9 +592,7 @@ fn test_remote_actor_ref_debug_output() {
 }
 
 async fn test_remote_actor_ref_with_timeout_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),
@@ -669,9 +662,7 @@ fn test_remote_actor_ref_with_timeout() {
 }
 
 async fn test_multiple_remote_actor_refs_same_actor_inner() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    maybe_init_tracing();
 
     let config = GossipConfig {
         gossip_interval: Duration::from_secs(300),

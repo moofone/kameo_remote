@@ -22,6 +22,26 @@ pub const DEFAULT_ASK_INFLIGHT_LIMIT: usize = 128;
 /// Set to 0 to always use delta sync when possible
 pub const DEFAULT_SMALL_CLUSTER_THRESHOLD: usize = 5;
 
+/// Default TCP keepalive idle time (seconds)
+pub const DEFAULT_TCP_KEEPALIVE_IDLE_SECS: u64 = 1;
+
+/// Default TCP keepalive interval (seconds)
+pub const DEFAULT_TCP_KEEPALIVE_INTERVAL_SECS: u64 = 1;
+
+/// Default TCP keepalive probe retries
+pub const DEFAULT_TCP_KEEPALIVE_RETRIES: u32 = 1;
+
+/// TCP keepalive configuration for fast disconnect detection during idle periods
+#[derive(Debug, Clone)]
+pub struct TcpKeepaliveConfig {
+    /// Idle time before sending keepalive probes
+    pub idle: Duration,
+    /// Interval between keepalive probes
+    pub interval: Duration,
+    /// Number of failed probes before declaring the socket dead (platform dependent)
+    pub retries: Option<u32>,
+}
+
 /// Configuration for the gossip registry
 #[derive(Debug, Clone)]
 pub struct GossipConfig {
@@ -41,6 +61,8 @@ pub struct GossipConfig {
     pub response_timeout: Duration,
     /// Maximum message size in bytes
     pub max_message_size: usize,
+    /// Optional schema/version hash for protocol guardrails (v3 header).
+    pub schema_hash: Option<u64>,
     /// Maximum number of failed connection attempts before marking peer as failed
     pub max_peer_failures: usize,
     /// Time to wait before retrying failed peers
@@ -83,6 +105,8 @@ pub struct GossipConfig {
     pub ask_inflight_limit: usize,
     /// How long to keep disconnected peers before removing them (default: 15 minutes)
     pub dead_peer_timeout: Duration,
+    /// TCP keepalive settings for faster idle disconnect detection
+    pub tcp_keepalive: Option<TcpKeepaliveConfig>,
 
     // =================== Peer Discovery Configuration ===================
     /// Advertised address for peer discovery (what we tell others to connect to)
@@ -153,6 +177,7 @@ impl Default for GossipConfig {
             connection_timeout: Duration::from_secs(10),
             response_timeout: Duration::from_secs(5),
             max_message_size: 10 * 1024 * 1024, // 10MB
+            schema_hash: None,
             max_peer_failures: DEFAULT_MAX_PEER_FAILURES,
             peer_retry_interval: Duration::from_secs(DEFAULT_PEER_RETRY_SECONDS),
             max_delta_history: 100,
@@ -174,6 +199,11 @@ impl Default for GossipConfig {
             causal_consistency_timeout: Duration::from_millis(500),
             ask_inflight_limit: DEFAULT_ASK_INFLIGHT_LIMIT,
             dead_peer_timeout: Duration::from_secs(DEFAULT_DEAD_PEER_TIMEOUT_SECS),
+            tcp_keepalive: Some(TcpKeepaliveConfig {
+                idle: Duration::from_secs(DEFAULT_TCP_KEEPALIVE_IDLE_SECS),
+                interval: Duration::from_secs(DEFAULT_TCP_KEEPALIVE_INTERVAL_SECS),
+                retries: Some(DEFAULT_TCP_KEEPALIVE_RETRIES),
+            }),
             // Peer discovery defaults
             advertise_address: None,
             enable_peer_discovery: false, // Safe rollout: disabled by default

@@ -1,7 +1,7 @@
 //! Hello handshake protocol for peer capability negotiation
 //!
 //! This module implements the Hello handshake that establishes peer capabilities
-//! at connection time for TLS-only v2 peers.
+//! at connection time for TLS-only v3 peers.
 
 use crate::{tls, GossipError, Result};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -14,10 +14,10 @@ const HELLO_MAX_SIZE: usize = 1024;
 const HELLO_TIMEOUT_MS: u64 = 3_000;
 
 /// Protocol version constants
-pub const PROTOCOL_VERSION_V2: u16 = 2;
+pub const PROTOCOL_VERSION_V3: u16 = 3;
 
 /// Current protocol version
-pub const CURRENT_PROTOCOL_VERSION: u16 = PROTOCOL_VERSION_V2;
+pub const CURRENT_PROTOCOL_VERSION: u16 = PROTOCOL_VERSION_V3;
 
 /// Feature flags for capability negotiation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -87,7 +87,7 @@ impl PeerCapabilities {
 
     /// Check if we can send peer list gossip to this peer
     pub fn can_send_peer_list(&self) -> bool {
-        self.version >= PROTOCOL_VERSION_V2 && self.features.contains(&Feature::PeerListGossip)
+        self.version >= PROTOCOL_VERSION_V3 && self.features.contains(&Feature::PeerListGossip)
     }
 
     /// Check if a specific feature is supported
@@ -166,7 +166,7 @@ where
         GossipError::TlsHandshakeFailed("missing ALPN negotiation result".to_string())
     })?;
 
-    if alpn != tls::ALPN_KAMEO_V2 {
+    if alpn != tls::ALPN_KAMEO_V3 {
         return Err(GossipError::TlsHandshakeFailed(format!(
             "unsupported ALPN: {}",
             String::from_utf8_lossy(alpn)
@@ -223,13 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_capabilities_from_hello_exchange_both_v2() {
+    fn test_peer_capabilities_from_hello_exchange_both_v3() {
         let local = Hello::new();
         let remote = Hello::new();
 
         let caps = PeerCapabilities::from_hello_exchange(&local, &remote);
 
-        assert_eq!(caps.version, PROTOCOL_VERSION_V2);
+        assert_eq!(caps.version, PROTOCOL_VERSION_V3);
         assert!(caps.features.contains(&Feature::PeerListGossip));
         assert!(caps.can_send_peer_list());
     }
@@ -238,13 +238,13 @@ mod tests {
     fn test_peer_capabilities_from_hello_exchange_partial_features() {
         let local = Hello::with_features(vec![Feature::PeerListGossip]);
         let remote = Hello {
-            protocol_version: PROTOCOL_VERSION_V2,
-            features: vec![], // Remote supports v2 but no features
+            protocol_version: PROTOCOL_VERSION_V3,
+            features: vec![], // Remote supports no features
         };
 
         let caps = PeerCapabilities::from_hello_exchange(&local, &remote);
 
-        assert_eq!(caps.version, PROTOCOL_VERSION_V2);
+        assert_eq!(caps.version, PROTOCOL_VERSION_V3);
         assert!(caps.features.is_empty()); // No common features
         assert!(!caps.can_send_peer_list()); // Needs both version and feature
     }
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_hello_handshake_negotiation() {
-        // Scenario: Two v2 nodes negotiate capabilities
+        // Scenario: Two v3 nodes negotiate capabilities
         let node_a_hello = Hello::new();
         let node_b_hello = Hello::new();
 
@@ -282,5 +282,49 @@ mod tests {
         assert_eq!(a_caps.features, b_caps.features);
         assert!(a_caps.can_send_peer_list());
         assert!(b_caps.can_send_peer_list());
+    }
+
+    #[tokio::test]
+    async fn perform_handshake_rejects_mismatched_version() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut client, mut server) = tokio::io::duplex(1024);
+
+        let server_task = tokio::spawn(async move {
+            // Drain the local hello.
+            let mut len_buf = [0u8; 4];
+            server.read_exact(&mut len_buf).await.unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut buf = vec![0u8; len];
+            server.read_exact(&mut buf).await.unwrap();
+
+            // Send an older-version Hello to trigger rejection.
+            let legacy_hello = Hello {
+                protocol_version: 0,
+                features: vec![],
+            };
+            let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&legacy_hello).unwrap();
+            server
+                .write_all(&(serialized.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            server.write_all(&serialized).await.unwrap();
+        });
+
+        let err = perform_hello_handshake(&mut client, Some(crate::tls::ALPN_KAMEO_V3), true)
+            .await
+            .expect_err("handshake should reject legacy protocol peers");
+
+        server_task.await.unwrap();
+
+        match err {
+            GossipError::TlsHandshakeFailed(msg) => {
+                assert!(
+                    msg.contains("unsupported protocol version"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected TlsHandshakeFailed, got {other:?}"),
+        }
     }
 }

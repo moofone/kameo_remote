@@ -1,12 +1,29 @@
 use kameo_remote::*;
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::time::sleep;
 
 const PEER_INIT_THREAD_STACK_SIZE: usize = 32 * 1024 * 1024;
 const PEER_INIT_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const PEER_INIT_WORKERS: usize = 4;
+
+async fn wait_for_active_peers(
+    handle: &GossipRegistryHandle,
+    expected: usize,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    loop {
+        if handle.stats().await.active_peers >= expected {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
 
 fn run_peer_init_test<F, Fut>(name: &'static str, test: F)
 where
@@ -114,8 +131,19 @@ async fn test_peer_initialization_with_names_inner() {
     peer1_from_3.connect(&node1_actual_addr).await.unwrap();
     peer2_from_3.connect(&node2_actual_addr).await.unwrap();
 
-    // Wait for connections
-    sleep(Duration::from_millis(200)).await;
+    // Wait for connections to become active on all nodes before registering actors.
+    assert!(
+        wait_for_active_peers(&handle1, 2, Duration::from_secs(10)).await,
+        "node1 should have 2 active peers"
+    );
+    assert!(
+        wait_for_active_peers(&handle2, 2, Duration::from_secs(10)).await,
+        "node2 should have 2 active peers"
+    );
+    assert!(
+        wait_for_active_peers(&handle3, 2, Duration::from_secs(10)).await,
+        "node3 should have 2 active peers"
+    );
 
     // Register actors using real bind addresses with immediate priority to reduce gossip flake.
     handle1
@@ -143,31 +171,54 @@ async fn test_peer_initialization_with_names_inner() {
         .await
         .unwrap();
 
-    // Wait for gossip (minimal initial sleep)
+    // Trigger immediate gossip from all nodes to prime propagation.
+    let _ = handle1.registry.trigger_immediate_gossip().await;
+    let _ = handle2.registry.trigger_immediate_gossip().await;
+    let _ = handle3.registry.trigger_immediate_gossip().await;
+
+    // Wait for gossip (minimal initial sleep).
     sleep(Duration::from_millis(1000)).await;
 
     // Test discovery from all nodes with retry
     println!("\n🔍 Testing full mesh discovery:");
 
-    // Each node should discover all other services
-    for (handle, node_name) in [
+    let services = ["service1", "service2", "service3"];
+    let handles = [
         (&handle1, "node1"),
         (&handle2, "node2"),
         (&handle3, "node3"),
-    ] {
-        println!("\nFrom {}:", node_name);
-        for service in ["service1", "service2", "service3"] {
-            // Robust wait for discovery
-            let mut found = false;
-            for _ in 0..20 {
-                // Try for 2 seconds (20 * 100ms)
-                if handle.lookup(service).await.is_some() {
-                    found = true;
+    ];
+
+    let start = Instant::now();
+    loop {
+        let mut all_found = true;
+        for (handle, _) in &handles {
+            for service in services {
+                if handle.lookup(service).await.is_none() {
+                    all_found = false;
                     break;
                 }
-                sleep(Duration::from_millis(100)).await;
             }
+            if !all_found {
+                break;
+            }
+        }
 
+        if all_found || start.elapsed() >= Duration::from_secs(20) {
+            break;
+        }
+
+        for (handle, _) in &handles {
+            let _ = handle.registry.trigger_immediate_gossip().await;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    // Each node should discover all other services.
+    for (handle, node_name) in handles {
+        println!("\nFrom {}:", node_name);
+        for service in services {
+            let found = handle.lookup(service).await.is_some();
             println!("  lookup('{}') = {}", service, found);
             assert!(found, "{} should discover {}", node_name, service);
         }

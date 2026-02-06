@@ -1,10 +1,14 @@
 use anyhow::Result;
-use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
+use kameo_remote::registry::{
+    ActorMessageFuture, ActorMessageHandler, ActorMessageHandlerSync, PeerDisconnectHandler,
+};
 use kameo_remote::{GossipConfig, GossipRegistryHandle, SecretKey};
+use futures::future::BoxFuture;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+
+const ACTOR_ID: u64 = 0xC0FF_EE00;
 
 /// Console tell/ask server (TLS).
 ///
@@ -44,42 +48,78 @@ async fn main() -> Result<()> {
 
     registry
         .registry
-        .set_actor_message_handler(Arc::new(ConsoleActorHandler))
+        .set_actor_message_handler_sync(Arc::new(ConsoleActorHandler))
+        .await;
+    registry
+        .registry
+        .set_peer_disconnect_handler(Arc::new(ConsoleDisconnectHandler))
         .await;
 
     println!("✅ Listening on: {}", server_addr);
-    println!("✅ Actor handler ready: console_echo\n");
+    println!(
+        "✅ Actor handler ready (accepts any actor_id; client uses 0x{:016x})\n",
+        ACTOR_ID
+    );
     println!("Run the client in another terminal:");
     println!("  cargo run --example console_tell_ask_client {}", pub_path);
     println!("Press Ctrl+C to stop\n");
 
-    loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    }
+    let _ = tokio::signal::ctrl_c().await;
+    println!("🛑 [SERVER] Ctrl+C received, shutting down...");
+    registry.shutdown_and_wait().await;
+    println!("🛑 [SERVER] Shutdown complete.");
+    Ok(())
 }
 
 struct ConsoleActorHandler;
+struct ConsoleDisconnectHandler;
+
+impl PeerDisconnectHandler for ConsoleDisconnectHandler {
+    fn handle_peer_disconnect(
+        &self,
+        peer_addr: std::net::SocketAddr,
+        peer_id: Option<kameo_remote::PeerId>,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            println!(
+                "🔌 [SERVER] Peer disconnected: addr={} peer_id={:?}",
+                peer_addr, peer_id
+            );
+        })
+    }
+}
 
 impl ActorMessageHandler for ConsoleActorHandler {
     fn handle_actor_message(
         &self,
-        actor_id: &str,
+        _actor_id: u64,
         _type_hash: u32,
-        payload: &[u8],
+        payload: kameo_remote::AlignedBytes,
         correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_> {
-        let actor_id = actor_id.to_string();
-        let payload = payload.to_vec();
-
         Box::pin(async move {
-            let payload_str = String::from_utf8_lossy(&payload);
             if correlation_id.is_some() {
-                let reply = format!("reply:{}:{}", actor_id, payload_str);
-                Ok(Some(reply.into_bytes()))
+                Ok(Some(payload.into()))
             } else {
                 Ok(None)
             }
         })
+    }
+}
+
+impl ActorMessageHandlerSync for ConsoleActorHandler {
+    fn handle_actor_message_sync(
+        &self,
+        _actor_id: u64,
+        _type_hash: u32,
+        payload: kameo_remote::AlignedBytes,
+        correlation_id: Option<u16>,
+    ) -> kameo_remote::Result<Option<kameo_remote::registry::ActorResponse>> {
+        if correlation_id.is_some() {
+            Ok(Some(payload.into()))
+        } else {
+            Ok(None)
+        }
     }
 }
 

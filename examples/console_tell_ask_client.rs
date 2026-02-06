@@ -1,18 +1,34 @@
 use anyhow::Result;
 use bytes::Bytes;
-
-use kameo_remote::registry::RegistryMessage;
 use kameo_remote::{wire_type, GossipConfig, GossipRegistryHandle, NodeId, SecretKey};
+use kameo_remote::registry::PeerDisconnectHandler;
+use futures::future::BoxFuture;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::Notify;
 use std::time::{Duration, Instant};
-use tokio::task::JoinSet;
 
 struct CountingAlloc;
+struct ConsoleDisconnectHandler;
+
+impl PeerDisconnectHandler for ConsoleDisconnectHandler {
+    fn handle_peer_disconnect(
+        &self,
+        peer_addr: std::net::SocketAddr,
+        peer_id: Option<kameo_remote::PeerId>,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            println!(
+                "🔌 [CLIENT] Peer disconnected: addr={} peer_id={:?}",
+                peer_addr, peer_id
+            );
+        })
+    }
+}
 
 static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -31,6 +47,8 @@ struct EchoResponse {
 
 wire_type!(EchoRequest, "kameo.remote.EchoRequest");
 wire_type!(EchoResponse, "kameo.remote.EchoResponse");
+
+const ACTOR_ID: u64 = 0xC0FF_EE00;
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -52,7 +70,7 @@ static GLOBAL: CountingAlloc = CountingAlloc;
 /// Console tell/ask client (TLS).
 ///
 /// Usage:
-///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub [tell_count] [ask_count] [ask_concurrency] [--typed] [--direct]
+///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub [tell_count] [ask_count] [ask_concurrency] [--typed] [--direct] [--no-timeout]
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -72,6 +90,7 @@ async fn main() -> Result<()> {
     let run_typed = args.iter().any(|arg| arg == "--typed");
     let use_direct = args.iter().any(|arg| arg == "--direct");
     let use_direct_timeout = args.iter().any(|arg| arg == "--direct-timeout");
+    let use_no_timeout = args.iter().any(|arg| arg == "--no-timeout");
 
     println!("🔐 Console Tell/Ask Client (TLS)");
     println!("================================\n");
@@ -86,13 +105,25 @@ async fn main() -> Result<()> {
 
     println!("Client NodeId: {}", client_node_id.fmt_short());
     println!("Client key: {}\n", client_key_path);
+    println!("Actor Id: 0x{:016x}\n", ACTOR_ID);
 
     let mut config = GossipConfig::default();
     config.ask_inflight_limit = ask_concurrency.max(1);
+    if !use_direct_timeout {
+        // Disable per-request timeouts to avoid timer allocations in the hot path.
+        config.response_timeout = Duration::ZERO;
+    }
+    // Bind to loopback by default to keep the 2-terminal benchmark self-contained.
+    // (Some sandboxed environments disallow binding 0.0.0.0.)
     let registry =
-        GossipRegistryHandle::new_with_tls("0.0.0.0:0".parse()?, client_secret, Some(config))
+        GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, client_secret, Some(config))
             .await?;
+    registry
+        .registry
+        .set_peer_disconnect_handler(Arc::new(ConsoleDisconnectHandler))
+        .await;
     let ask_timeout = registry.registry.config.response_timeout;
+    let effective_no_timeout = use_no_timeout || ask_timeout.is_zero();
 
     let server_addr = "127.0.0.1:29200".parse()?;
     registry
@@ -102,61 +133,62 @@ async fn main() -> Result<()> {
 
     // Establish TLS connection to the server.
     let conn = registry.lookup_address(server_addr).await?;
+    let conn_handle = conn
+        .connection_ref()
+        .ok_or_else(|| anyhow::anyhow!("No connection handle for {}", server_addr))?;
 
     println!("✅ Connected to {}", server_addr);
-    println!("Sending tell + ask via ActorMessage...\n");
+    println!("Sending tell + ask via Actor frames...\n");
 
-    let actor_id = "console_echo".to_string();
+    let actor_id = ACTOR_ID;
     let type_hash = 0xC0FFEE00;
 
-    // Tell (fire-and-forget)
-    let tell_msg = RegistryMessage::ActorMessage {
-        actor_id: actor_id.clone(),
-        type_hash,
-        payload: b"tell:hello".to_vec(),
-        correlation_id: None,
-    };
-    let tell_bytes = Bytes::from(rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
-        &tell_msg,
-        Vec::new(),
-    )?);
-    conn.tell(&tell_bytes).await?;
+    // Tell (fire-and-forget) via ActorTell frame
+    conn_handle
+        .tell_actor_frame(actor_id, type_hash, Bytes::from_static(b"tell:hello"))
+        .await?;
     println!("✅ Tell sent");
 
-    // Ask (request-response)
-    let ask_msg = RegistryMessage::ActorMessage {
-        actor_id,
-        type_hash,
-        payload: b"ask:ping".to_vec(),
-        correlation_id: None,
-    };
-    let ask_bytes = Bytes::from(rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
-        &ask_msg,
-        Vec::new(),
-    )?);
-
-    let response = if use_direct {
-        // DirectAsk fast path: bypass RegistryMessage overhead
-        let payload = Bytes::from(b"ask:ping".to_vec());
+    // Ask (request-response) via ActorAsk frame
+    let response: Bytes = if use_direct {
+        // DirectAsk fast path: bypass ActorAsk envelope
         if use_direct_timeout {
-            conn.connection_ref()
-                .unwrap()
-                .ask_direct(payload, ask_timeout)
+            conn_handle
+                .ask_direct(Bytes::from_static(b"ask:ping"), ask_timeout)
                 .await?
-                .to_vec()
         } else {
-            conn.connection_ref()
-                .unwrap()
-                .ask_direct_no_timeout(payload)
+            conn_handle
+                .ask_direct_no_timeout(Bytes::from_static(b"ask:ping"))
                 .await?
-                .to_vec()
         }
     } else {
-        // Regular ask through RegistryMessage (slow path)
-        conn.ask(&ask_bytes).await?.to_vec()
+        // Regular ask through ActorAsk frames
+        if effective_no_timeout {
+            conn_handle
+                .ask_actor_frame_no_timeout_aligned(
+                    actor_id,
+                    type_hash,
+                    Bytes::from_static(b"ask:ping"),
+                )
+                .await?
+                .into_bytes()
+        } else {
+            conn_handle
+                .ask_actor_frame_aligned(
+                    actor_id,
+                    type_hash,
+                    Bytes::from_static(b"ask:ping"),
+                    ask_timeout,
+                )
+                .await?
+                .into_bytes()
+        }
     };
 
-    println!("✅ Ask response: {:?}", String::from_utf8_lossy(&response));
+    println!(
+        "✅ Ask response: {:?}",
+        String::from_utf8_lossy(response.as_ref())
+    );
 
     if run_typed {
         #[cfg(debug_assertions)]
@@ -180,6 +212,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    let run = async {
     if tell_count > 0 {
         println!("\n🔸 Tell benchmark (count = {})", tell_count);
         let before = alloc_snapshot();
@@ -187,7 +220,9 @@ async fn main() -> Result<()> {
         let tell_start = Instant::now();
         for _ in 0..tell_count {
             let start = Instant::now();
-            conn.tell(&tell_bytes).await?;
+            conn_handle
+                .tell_actor_frame(actor_id, type_hash, Bytes::from_static(b"tell:hello"))
+                .await?;
             tell_latencies.push(start.elapsed());
         }
         let tell_total = tell_start.elapsed();
@@ -209,77 +244,224 @@ async fn main() -> Result<()> {
             } else {
                 " [DirectAsk FAST PATH]"
             }
+        } else if effective_no_timeout {
+            " [ActorAsk NO TIMEOUT]"
         } else {
-            " [RegistryMessage SLOW PATH]"
+            " [ActorAsk FRAME]"
         };
         println!(
             "\n🔸 Ask benchmark (count = {}, workers = {}){}",
             ask_count, ask_concurrency, ask_label
         );
-        let ask_payload = if use_direct {
-            Bytes::from(b"ask:ping".to_vec())
-        } else {
-            ask_bytes.clone()
-        };
+        let ask_payload = b"ask:ping";
 
-        // CONCURRENT WORKERS (one in-flight per worker) without per-request task allocations.
+        // Warm up to let TLS and buffers settle before measuring allocations.
+        let warmup = ask_count.min(64);
+        for _ in 0..warmup {
+            if use_direct {
+                if use_direct_timeout {
+                    let _ = conn
+                        .connection_ref()
+                        .unwrap()
+                        .ask_direct(Bytes::from_static(ask_payload), ask_timeout)
+                        .await?;
+                } else {
+                    let _ = conn
+                        .connection_ref()
+                        .unwrap()
+                        .ask_direct_no_timeout(Bytes::from_static(ask_payload))
+                        .await?;
+                }
+            } else {
+                let conn_handle = conn.connection_ref().unwrap();
+                if effective_no_timeout {
+                    let _ = conn_handle
+                        .ask_actor_frame_no_timeout_aligned(
+                            actor_id,
+                            type_hash,
+                            Bytes::from_static(ask_payload),
+                        )
+                        .await?;
+                } else {
+                    let _ = conn_handle
+                        .ask_actor_frame_aligned(
+                            actor_id,
+                            type_hash,
+                            Bytes::from_static(ask_payload),
+                            ask_timeout,
+                        )
+                        .await?;
+                }
+            }
+        }
+        tokio::task::yield_now().await;
+
         let worker_count = ask_concurrency.min(ask_count).max(1);
-        let per_worker = ask_count / worker_count;
-        let remainder = ask_count % worker_count;
-        let barrier = Arc::new(tokio::sync::Barrier::new(worker_count + 1));
-        let mut join_set = JoinSet::new();
-        for i in 0..worker_count {
-            let count = per_worker + if i < remainder { 1 } else { 0 };
-            let conn_clone = conn.clone();
-            let payload = ask_payload.clone();
-            let use_direct_clone = use_direct;
-            let use_direct_timeout_clone = use_direct_timeout;
-            let ask_timeout_clone = ask_timeout;
-            let barrier_clone = barrier.clone();
-            join_set.spawn(async move {
-                barrier_clone.wait().await;
-                let mut latencies = Vec::with_capacity(count);
-                for _ in 0..count {
+        let conn_handle = conn.connection_ref().unwrap().clone();
+        let remaining = Arc::new(AtomicUsize::new(0));
+        let warmup_done = Arc::new(AtomicUsize::new(0));
+        let warmup_complete = Arc::new(Notify::new());
+        let warmup_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let (warmup_tx, warmup_rx) = tokio::sync::watch::channel(false);
+        let (measure_tx, measure_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let done_count = Arc::new(AtomicUsize::new(0));
+        let done_notify = Arc::new(Notify::new());
+        let latencies = Arc::new(
+            (0..ask_count)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let ask_payload = Bytes::from_static(ask_payload);
+
+        let mut tasks = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let conn_handle = conn_handle.clone();
+            let remaining = remaining.clone();
+            let latencies = latencies.clone();
+            let ask_payload = ask_payload.clone();
+            let warmup_done = warmup_done.clone();
+            let warmup_complete = warmup_complete.clone();
+            let warmup_error = warmup_error.clone();
+            let mut warmup_rx = warmup_rx.clone();
+            let mut measure_rx = measure_rx.clone();
+            let mut shutdown_rx = shutdown_rx.clone();
+            let done_count = done_count.clone();
+            let done_notify = done_notify.clone();
+            tasks.push(tokio::spawn(async move {
+                if !*warmup_rx.borrow() {
+                    warmup_rx
+                        .changed()
+                        .await
+                        .map_err(|_| anyhow::anyhow!("warmup start dropped"))?;
+                }
+                let warmup_result = if use_direct {
+                    if use_direct_timeout {
+                        conn_handle
+                            .ask_direct(ask_payload.clone(), ask_timeout)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        conn_handle
+                            .ask_direct_no_timeout(ask_payload.clone())
+                            .await
+                            .map(|_| ())
+                    }
+                } else if effective_no_timeout {
+                    conn_handle
+                        .ask_actor_frame_no_timeout_aligned(
+                            actor_id,
+                            type_hash,
+                            ask_payload.clone(),
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    conn_handle
+                        .ask_actor_frame_aligned(
+                            actor_id,
+                            type_hash,
+                            ask_payload.clone(),
+                            ask_timeout,
+                        )
+                        .await
+                        .map(|_| ())
+                };
+
+                if let Err(err) = warmup_result {
+                    let mut guard = warmup_error.lock().unwrap();
+                    if guard.is_none() {
+                        *guard = Some(format!("{err}"));
+                    }
+                }
+                if warmup_done.fetch_add(1, Ordering::Relaxed) + 1 == worker_count {
+                    warmup_complete.notify_waiters();
+                }
+                if !*measure_rx.borrow() {
+                    measure_rx
+                        .changed()
+                        .await
+                        .map_err(|_| anyhow::anyhow!("measure start dropped"))?;
+                }
+                loop {
+                    let idx = remaining.fetch_add(1, Ordering::Relaxed);
+                    if idx >= ask_count {
+                        break;
+                    }
                     let start = Instant::now();
-                    if use_direct_clone {
-                        if use_direct_timeout_clone {
-                            let _ = conn_clone
-                                .connection_ref()
-                                .unwrap()
-                                .ask_direct(payload.clone(), ask_timeout_clone)
+                    if use_direct {
+                        if use_direct_timeout {
+                            let _ = conn_handle
+                                .ask_direct(ask_payload.clone(), ask_timeout)
                                 .await?;
                         } else {
-                            let _ = conn_clone
-                                .connection_ref()
-                                .unwrap()
-                                .ask_direct_no_timeout(payload.clone())
+                            let _ = conn_handle
+                                .ask_direct_no_timeout(ask_payload.clone())
                                 .await?;
                         }
+                    } else if effective_no_timeout {
+                        let _ = conn_handle
+                            .ask_actor_frame_no_timeout_aligned(
+                                actor_id,
+                                type_hash,
+                                ask_payload.clone(),
+                            )
+                            .await?;
                     } else {
-                        let _ = conn_clone.ask(&payload).await?;
+                        let _ = conn_handle
+                            .ask_actor_frame_aligned(
+                                actor_id,
+                                type_hash,
+                                ask_payload.clone(),
+                                ask_timeout,
+                            )
+                            .await?;
                     }
-                    latencies.push(start.elapsed());
+                    let nanos = start.elapsed().as_nanos() as u64;
+                    latencies[idx].store(nanos, Ordering::Relaxed);
                 }
-                Ok::<Vec<Duration>, anyhow::Error>(latencies)
-            });
+                if done_count.fetch_add(1, Ordering::Relaxed) + 1 == worker_count {
+                    done_notify.notify_waiters();
+                }
+                if !*shutdown_rx.borrow() {
+                    let _ = shutdown_rx.changed().await;
+                }
+                Ok::<(), anyhow::Error>(())
+            }));
         }
 
-        // Snapshot allocations after worker tasks are spawned to exclude harness setup.
+        let _ = warmup_tx.send(true);
+        while warmup_done.load(Ordering::Relaxed) < worker_count {
+            if tokio::time::timeout(Duration::from_secs(5), warmup_complete.notified())
+                .await
+                .is_err()
+            {
+                return Err(anyhow::anyhow!(
+                    "warmup timed out after 5s (done {}/{})",
+                    warmup_done.load(Ordering::Relaxed),
+                    worker_count
+                ));
+            }
+        }
+        if let Some(err) = warmup_error.lock().unwrap().take() {
+            return Err(anyhow::anyhow!("warmup failed: {err}"));
+        }
+
+        remaining.store(0, Ordering::Relaxed);
         let before = alloc_snapshot();
         let ask_start = Instant::now();
-        barrier.wait().await;
+        let _ = measure_tx.send(true);
 
-        let mut ask_latencies = Vec::with_capacity(ask_count);
         let bench_timeout = Duration::from_secs(10);
-        let join_result = tokio::time::timeout(bench_timeout, async {
-            while let Some(result) = join_set.join_next().await {
-                ask_latencies.extend(result??);
+        let wait_done = async {
+            while done_count.load(Ordering::Relaxed) < worker_count {
+                done_notify.notified().await;
             }
             Ok::<(), anyhow::Error>(())
-        })
-        .await;
+        };
 
-        match join_result {
+        match tokio::time::timeout(bench_timeout, wait_done).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
             Err(_) => {
@@ -293,6 +475,12 @@ async fn main() -> Result<()> {
         let ask_total = ask_start.elapsed();
         let ask_rps = ask_count as f64 / ask_total.as_secs_f64();
         let after = alloc_snapshot();
+
+        let mut ask_latencies = Vec::with_capacity(ask_count);
+        for entry in latencies.iter() {
+            let nanos = entry.load(Ordering::Relaxed);
+            ask_latencies.push(Duration::from_nanos(nanos));
+        }
         print_latency_stats("ask()", &ask_latencies);
         println!(
             "ask() throughput: {:.0} req/sec (total {:.3}s)",
@@ -300,12 +488,33 @@ async fn main() -> Result<()> {
             ask_total.as_secs_f64()
         );
         print_alloc_delta("ask()", before, after);
+
+        let _ = shutdown_tx.send(true);
+        for task in tasks {
+            task.await??;
+        }
+
     }
 
     // Keep the client alive so the server doesn't mark the peer as failed.
     println!("\nPress Enter to exit...");
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
+    let _ = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    })
+    .await;
+    println!("🛑 [CLIENT] Enter received, shutting down registry...");
+    registry.shutdown().await;
+    Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::select! {
+        res = run => res?,
+        _ = tokio::signal::ctrl_c() => {
+            println!("🛑 [CLIENT] Ctrl+C received, shutting down...");
+            registry.shutdown_and_wait().await;
+        }
+    }
     Ok(())
 }
 

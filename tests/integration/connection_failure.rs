@@ -2,14 +2,20 @@ use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, RegistrationPrio
 use std::time::Duration;
 use tokio::time::sleep;
 
+fn maybe_init_tracing() {
+    // Avoid sandbox-triggered EPERM flakiness unless explicitly enabled.
+    if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
+        let _ = tracing_subscriber::fmt::try_init();
+    }
+}
+
 // NOTE: These tests are currently expected to fail as the gossip propagation
 // mechanism between nodes is not fully implemented. They serve as documentation
 // of the intended behavior once the gossip system is complete.
 
 #[tokio::test]
 async fn test_node_b_killed_a_detects_immediately() {
-    // Initialize tracing
-    let _ = tracing_subscriber::fmt::try_init();
+    maybe_init_tracing();
     
     // Test case: Node A→B connection, kill B, verify A detects immediately
     
@@ -107,8 +113,7 @@ async fn test_node_b_killed_a_detects_immediately() {
 
 #[tokio::test]
 async fn test_node_a_killed_b_detects_immediately() {
-    // Initialize tracing
-    let _ = tracing_subscriber::fmt::try_init();
+    maybe_init_tracing();
     
     // Test case: Node A→B connection, kill A, verify B detects immediately
     
