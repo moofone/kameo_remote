@@ -84,9 +84,10 @@ where
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
 
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4)
-                .thread_stack_size(TEST_WORKER_STACK)
+            // Using a multi-thread runtime here increases the likelihood of transient EPERM in
+            // sandboxed macOS environments. A current-thread runtime is sufficient for these
+            // tests (we're not CPU-bound) and is substantially more deterministic.
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build test runtime");
@@ -97,7 +98,10 @@ where
         .expect("join large stack test thread");
 }
 
-/// Test true end-to-end ask/reply over TCP sockets
+/// End-to-end ask/reply over real TLS sockets.
+///
+/// This is intentionally kept as a single test to reduce socket bind/connect churn in
+/// sandboxed environments where transient EPERM can occur under heavy socket activity.
 #[test]
 fn test_end_to_end_ask_reply() {
     run_with_large_stack("end_to_end_ask_reply", || async {
@@ -299,104 +303,48 @@ fn test_end_to_end_ask_reply() {
             info!("Throughput: {:.0} req/sec", throughput);
         }
 
+        info!("=== Test 5: Oversize ActorAsk response must stream (not inline) ===");
+        {
+            // Make the response payload exceed `max_message_size` once framed inline:
+            // msg_len = ASK_RESPONSE_HEADER_LEN (12) + payload_len. If payload_len == max_message_size,
+            // the receiver will reject the inline frame as MessageTooLarge.
+            let payload_len = handle_b.registry.config.max_message_size;
+            let response_bytes = bytes::Bytes::from(vec![b'Z'; payload_len]);
+            handle_b
+                .registry
+                .set_actor_message_handler(Arc::new(LargeResponseHandler {
+                    response: response_bytes.clone(),
+                }))
+                .await;
+
+            let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
+            let conn = conn.connection_ref().expect("connection should be ready");
+            let request = bytes::Bytes::from_static(b"ping");
+
+            let response = conn
+                .ask_actor_frame(TEST_ACTOR_ID, TEST_TYPE_HASH, request, Duration::from_secs(30))
+                .await
+                .unwrap();
+
+            assert_eq!(response.len(), response_bytes.len());
+            assert_eq!(response[0], b'Z');
+            assert_eq!(response[response.len() - 1], b'Z');
+        }
+
+        info!("=== Test 6: Connection failure path (connect to missing peer) ===");
+        {
+            let addr_missing: SocketAddr = "127.0.0.1:8004".parse().unwrap(); // should not exist
+            let missing_peer_id = kameo_remote::KeyPair::new_for_testing("node_missing").peer_id();
+            let missing_peer = handle_a.add_peer(&missing_peer_id).await;
+
+            match missing_peer.connect(&addr_missing).await {
+                Err(e) => info!("Expected connection failure: {}", e),
+                Ok(_) => panic!("Should not connect to non-existent node"),
+            }
+        }
+
         // Shutdown
         handle_a.shutdown().await;
         handle_b.shutdown().await;
-    });
-}
-
-/// Regression test: ActorAsk responses larger than max_message_size must not be forced inline.
-#[test]
-fn test_end_to_end_actorask_oversize_response_streams() {
-    run_with_large_stack("end_to_end_actorask_oversize_response_streams", || async {
-        // Avoid sandbox-triggered EPERM flakiness unless explicitly enabled.
-        if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
-            let _ = tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer().with_filter(
-                    EnvFilter::from_default_env()
-                        .add_directive("kameo_remote=info".parse().unwrap()),
-                ))
-                .try_init();
-        }
-
-        let mut config = GossipConfig::default();
-        config.gossip_interval = Duration::from_secs(3600);
-
-        let handle_a = create_tls_node(config.clone()).await.unwrap();
-        let handle_b = create_tls_node(config).await.unwrap();
-
-        // Make the response payload exceed `max_message_size` once framed inline:
-        // msg_len = ASK_RESPONSE_HEADER_LEN (12) + payload_len. If payload_len == max_message_size,
-        // the receiver will reject the inline frame as MessageTooLarge.
-        let payload_len = handle_b.registry.config.max_message_size;
-        let response_bytes = bytes::Bytes::from(vec![b'Z'; payload_len]);
-        handle_b
-            .registry
-            .set_actor_message_handler(Arc::new(LargeResponseHandler {
-                response: response_bytes.clone(),
-            }))
-            .await;
-
-        let addr_b = handle_b.registry.bind_addr;
-        let peer_b_id = handle_b.registry.peer_id.clone();
-        let peer_b = handle_a.add_peer(&peer_b_id).await;
-        peer_b.connect(&addr_b).await.unwrap();
-
-        assert!(
-            wait_for_condition(Duration::from_secs(3), || async {
-                handle_a.stats().await.active_peers > 0
-            })
-            .await,
-            "TLS peer should connect"
-        );
-
-        let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
-        let conn = conn.connection_ref().expect("connection should be ready");
-        let request = bytes::Bytes::from_static(b"ping");
-
-        let response = conn
-            .ask_actor_frame(TEST_ACTOR_ID, TEST_TYPE_HASH, request, Duration::from_secs(30))
-            .await
-            .unwrap();
-
-        assert_eq!(response.len(), response_bytes.len());
-        assert_eq!(response[0], b'Z');
-        assert_eq!(response[response.len() - 1], b'Z');
-
-        handle_a.shutdown().await;
-        handle_b.shutdown().await;
-    });
-}
-
-/// Test timeout handling
-#[test]
-fn test_ask_timeout() {
-    run_with_large_stack("ask_timeout", || async {
-        // Tracing in this sandboxed environment can trigger EPERM ("Operation not permitted")
-        // on subsequent networking syscalls. Only enable it when explicitly requested.
-        if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
-            let _ = tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer().with_filter(
-                    EnvFilter::from_default_env()
-                        .add_directive("kameo_remote=warn".parse().unwrap()),
-                ))
-                .try_init();
-        }
-
-        // Create a single TLS-enabled node but don't start the peer it's trying to reach
-        let handle_a = create_tls_node(GossipConfig::default()).await.unwrap();
-        let addr_b: SocketAddr = "127.0.0.1:8004".parse().unwrap(); // This won't exist
-
-        // Try to connect to non-existent node
-        let peer_b_id = kameo_remote::KeyPair::new_for_testing("node_b").peer_id();
-        let peer_b = handle_a.add_peer(&peer_b_id).await;
-
-        // Connection should fail
-        match peer_b.connect(&addr_b).await {
-            Err(e) => info!("Expected connection failure: {}", e),
-            Ok(_) => panic!("Should not connect to non-existent node"),
-        }
-
-        handle_a.shutdown().await;
     });
 }

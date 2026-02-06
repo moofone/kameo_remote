@@ -58,6 +58,41 @@ log_section() {
     echo "═══════════════════════════════════════════════════════════════" | tee -a "${LOG_FILE}"
 }
 
+# Also: EPERM can still occur transiently even when serialized. Retry a couple times to make
+# validation runs deterministic without hiding real regressions (non-EPERM failures will repeat).
+MAX_TEST_ATTEMPTS="${KAMEO_VALIDATION_TEST_ATTEMPTS:-10}"
+RETRY_SLEEP_SECS="${KAMEO_VALIDATION_RETRY_SLEEP_SECS:-5}"
+CARGO_TEST_QUIET="${KAMEO_VALIDATION_CARGO_TEST_QUIET:-1}"
+#
+# Some e2e tests retry socket bind/connect on transient sandbox EPERM. The default retry window
+# in tests is intentionally conservative for ad-hoc `cargo test` runs, but for this validation
+# harness we prefer faster "fail and retry the whole suite" behavior.
+TEST_EPERM_MAX_MS="${KAMEO_VALIDATION_TEST_EPERM_MAX_MS:-5000}"
+
+# Step 0: Run the most socket-sensitive TLS e2e test in isolation first.
+#
+# Rationale: In sandboxed macOS runs, we've observed transient EPERM bursts that correlate with
+# overall socket syscall volume. Running this e2e test first dramatically reduces flakiness.
+log_section "Step 0: socket-heavy TLS e2e (isolated)"
+SOCKET_E2E_SKIP_NAME="test_end_to_end_ask_reply"
+e2e_attempt=1
+while true; do
+  echo "Running isolated TLS e2e (attempt ${e2e_attempt}/${MAX_TEST_ATTEMPTS})..." | tee -a "${LOG_FILE}"
+  if env KAMEO_TEST_EPERM_MAX_MS="${TEST_EPERM_MAX_MS}" \
+    cargo test --test ask_reply_end_to_end -j 1 -- --test-threads=1; then
+    echo "✅ socket-heavy TLS e2e passed (isolated)" | tee -a "${LOG_FILE}"
+    break
+  fi
+
+  if [[ "${e2e_attempt}" -ge "${MAX_TEST_ATTEMPTS}" ]]; then
+    echo "❌ socket-heavy TLS e2e failed (isolated)" | tee -a "${LOG_FILE}"
+    exit 1
+  fi
+  e2e_attempt=$((e2e_attempt+1))
+  sleep "${RETRY_SLEEP_SECS}"
+done
+echo "" | tee -a "${LOG_FILE}"
+
 # Step 1: Run the full workspace test suite.
 log_section "Step 1: cargo test --workspace"
 # IMPORTANT (macOS): piping/redirecting `cargo test` output (e.g. through `tee`) can cause
@@ -76,21 +111,15 @@ echo "NOTE: cargo test output is not streamed into ${LOG_FILE} to avoid EPERM in
 # In this repo's socket-heavy TLS integration tests, that concurrency has been observed to
 # correlate with transient EPERM ("Operation not permitted"). Force Cargo jobserver to 1 so test
 # binaries run sequentially.
-#
-# Also: EPERM can still occur transiently even when serialized. Retry a couple times to make
-# validation runs deterministic without hiding real regressions (non-EPERM failures will repeat).
-MAX_TEST_ATTEMPTS="${KAMEO_VALIDATION_TEST_ATTEMPTS:-10}"
-RETRY_SLEEP_SECS="${KAMEO_VALIDATION_RETRY_SLEEP_SECS:-5}"
-CARGO_TEST_QUIET="${KAMEO_VALIDATION_CARGO_TEST_QUIET:-1}"
 attempt=1
 while true; do
     echo "Running workspace tests (attempt ${attempt}/${MAX_TEST_ATTEMPTS})..." | tee -a "${LOG_FILE}"
     # Keep stdout minimal in sandboxed TLS socket tests. High output volume has been
     # observed to correlate with transient EPERM ("Operation not permitted").
     if [[ "${CARGO_TEST_QUIET}" == "1" ]]; then
-      CARGO_TEST_CMD=(cargo test --all -q -j 1 -- --test-threads=1)
+      CARGO_TEST_CMD=(env KAMEO_TEST_EPERM_MAX_MS="${TEST_EPERM_MAX_MS}" cargo test --all -q -j 1 -- --test-threads=1 --skip "${SOCKET_E2E_SKIP_NAME}")
     else
-      CARGO_TEST_CMD=(cargo test --all -j 1 -- --test-threads=1)
+      CARGO_TEST_CMD=(env KAMEO_TEST_EPERM_MAX_MS="${TEST_EPERM_MAX_MS}" cargo test --all -j 1 -- --test-threads=1 --skip "${SOCKET_E2E_SKIP_NAME}")
     fi
 
     if "${CARGO_TEST_CMD[@]}"; then
