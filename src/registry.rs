@@ -1245,26 +1245,34 @@ impl GossipRegistry {
         location: RemoteActorLocation,
         timeout: Duration,
     ) -> Result<()> {
-        // Step 1: Check if we have any healthy peers
-        let peer_count = {
+        // Step 1: Check if we have any healthy peers AND active connections
+        // Just having peers in gossip_state is not enough - we need actual connections
+        let (peer_count, active_connection_count) = {
             let gossip_state = self.gossip_state.lock().await;
-            gossip_state
+            let healthy_peers = gossip_state
                 .peers
                 .iter()
                 .filter(|(_, info)| info.failures < self.config.max_peer_failures)
-                .count()
+                .count();
+            // Also check the connection pool for active connections
+            let active_conns = self.connection_pool.connection_count();
+            (healthy_peers, active_conns)
         };
 
-        if peer_count == 0 {
-            // No peers - just do local registration and return
+        if peer_count == 0 || active_connection_count == 0 {
+            // No peers or no active connections - just do local registration and return
             self.register_actor_with_priority(name, location, RegistrationPriority::Immediate)
                 .await?;
 
-            info!("Sync registration completed immediately (no peers to confirm)");
+            info!(
+                peer_count = peer_count,
+                active_connection_count = active_connection_count,
+                "Sync registration completed immediately (no peers or no active connections to confirm)"
+            );
             return Ok(());
         }
 
-        // Have peers - wait for ACK from at least one
+        // Have peers AND active connections - wait for ACK from at least one
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
 
         // Store pending ACK handler
