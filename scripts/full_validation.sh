@@ -80,10 +80,20 @@ echo "NOTE: cargo test output is not streamed into ${LOG_FILE} to avoid EPERM in
 # Also: EPERM can still occur transiently even when serialized. Retry a couple times to make
 # validation runs deterministic without hiding real regressions (non-EPERM failures will repeat).
 MAX_TEST_ATTEMPTS="${KAMEO_VALIDATION_TEST_ATTEMPTS:-10}"
+RETRY_SLEEP_SECS="${KAMEO_VALIDATION_RETRY_SLEEP_SECS:-5}"
+CARGO_TEST_QUIET="${KAMEO_VALIDATION_CARGO_TEST_QUIET:-1}"
 attempt=1
 while true; do
     echo "Running workspace tests (attempt ${attempt}/${MAX_TEST_ATTEMPTS})..." | tee -a "${LOG_FILE}"
-    if cargo test --all -j 1 -- --test-threads=1; then
+    # Keep stdout minimal in sandboxed TLS socket tests. High output volume has been
+    # observed to correlate with transient EPERM ("Operation not permitted").
+    if [[ "${CARGO_TEST_QUIET}" == "1" ]]; then
+      CARGO_TEST_CMD=(cargo test --all -q -j 1 -- --test-threads=1)
+    else
+      CARGO_TEST_CMD=(cargo test --all -j 1 -- --test-threads=1)
+    fi
+
+    if "${CARGO_TEST_CMD[@]}"; then
         echo "✅ Workspace tests passed" | tee -a "${LOG_FILE}"
         break
     fi
@@ -94,7 +104,10 @@ while true; do
     fi
 
     attempt=$((attempt+1))
-    sleep 1
+    # In sandboxed macOS runs we've observed transient EPERM bursts that can persist
+    # for several seconds. A slightly longer cooldown improves determinism without
+    # hiding real regressions.
+    sleep "${RETRY_SLEEP_SECS}"
 done
 echo "" | tee -a "${LOG_FILE}"
 

@@ -30,12 +30,24 @@ type RegistryAlignedVec = rkyv::util::AlignedVec<{ REGISTRY_MESSAGE_ALIGNMENT }>
 fn decode_registry_message(
     payload: &[u8],
 ) -> std::result::Result<RegistryMessage, rkyv::rancor::Error> {
+    fn decode_from_aligned_bytes(
+        bytes: &[u8],
+    ) -> std::result::Result<RegistryMessage, rkyv::rancor::Error> {
+        let archived = rkyv::access::<<RegistryMessage as rkyv::Archive>::Archived, rkyv::rancor::Error>(
+            bytes,
+        )?;
+        let mut pool = rkyv::de::Pool::new();
+        let deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
+        rkyv::Deserialize::deserialize(archived, deserializer)
+    }
+
     if is_registry_payload_aligned(payload) {
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(payload) // ALLOW_RKYV_FROM_BYTES
+        decode_from_aligned_bytes(payload)
     } else {
+        // Ensure proper alignment for rkyv archived access.
         let mut aligned = RegistryAlignedVec::with_capacity(payload.len());
         aligned.extend_from_slice(payload);
-        rkyv::from_bytes::<RegistryMessage, rkyv::rancor::Error>(aligned.as_ref()) // ALLOW_RKYV_FROM_BYTES
+        decode_from_aligned_bytes(aligned.as_ref())
     }
 }
 
@@ -484,17 +496,37 @@ fn bind_with_reuseaddr(bind_addr: SocketAddr) -> Result<TcpListener> {
         // macOS sandboxed runs can return transient EPERM for otherwise-valid `bind()` calls.
         // Retrying here is cheap (only on startup) and makes socket-heavy integration tests
         // deterministic.
-        // Some sandbox profiles exhibit multi-second EPERM bursts under load, so allow a longer
-        // retry window. This only impacts startup when EPERM is actually occurring.
-        const MAX_EPERM_RETRIES: usize = 400;
-        const EPERM_RETRY_SLEEP_MS: u64 = 10;
+        // Some sandbox profiles exhibit long EPERM bursts under load, so allow a longer retry
+        // window. This only impacts startup when EPERM is actually occurring.
+        //
+        // IMPORTANT: use backoff, not a tight loop. Hammering bind() every ~10ms can prolong the
+        // sandbox burst and makes `cargo test --all` retries converge poorly.
+        let max_wait_ms: u64 = std::env::var("KAMEO_EPERM_BIND_MAX_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let backoff_start_ms: u64 = std::env::var("KAMEO_EPERM_BIND_BACKOFF_START_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let backoff_max_ms: u64 = std::env::var("KAMEO_EPERM_BIND_BACKOFF_MAX_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_000);
 
-        for attempt in 0..=MAX_EPERM_RETRIES {
+        let deadline = std::time::Instant::now() + Duration::from_millis(max_wait_ms);
+        let mut backoff = Duration::from_millis(backoff_start_ms);
+
+        loop {
             match std::net::TcpListener::bind(bind_addr) {
                 Ok(std_listener) => {
                     if let Err(e) = std_listener.set_nonblocking(true) {
-                        if is_sandbox_eperm(&e) && attempt < MAX_EPERM_RETRIES {
-                            std::thread::sleep(Duration::from_millis(EPERM_RETRY_SLEEP_MS));
+                        if is_sandbox_eperm(&e) && std::time::Instant::now() < deadline {
+                            std::thread::sleep(backoff);
+                            backoff = std::cmp::min(
+                                backoff.saturating_mul(2),
+                                Duration::from_millis(backoff_max_ms),
+                            );
                             continue;
                         }
                         return Err(GossipError::Network(e));
@@ -505,8 +537,12 @@ fn bind_with_reuseaddr(bind_addr: SocketAddr) -> Result<TcpListener> {
                         Err(e) => {
                             // Treat tokio's conversion failure the same way as bind flakiness
                             // in sandboxed environments.
-                            if is_sandbox_eperm(&e) && attempt < MAX_EPERM_RETRIES {
-                                std::thread::sleep(Duration::from_millis(EPERM_RETRY_SLEEP_MS));
+                            if is_sandbox_eperm(&e) && std::time::Instant::now() < deadline {
+                                std::thread::sleep(backoff);
+                                backoff = std::cmp::min(
+                                    backoff.saturating_mul(2),
+                                    Duration::from_millis(backoff_max_ms),
+                                );
                                 continue;
                             }
                             return Err(GossipError::Network(e));
@@ -514,16 +550,18 @@ fn bind_with_reuseaddr(bind_addr: SocketAddr) -> Result<TcpListener> {
                     }
                 }
                 Err(e) => {
-                    if is_sandbox_eperm(&e) && attempt < MAX_EPERM_RETRIES {
-                        std::thread::sleep(Duration::from_millis(EPERM_RETRY_SLEEP_MS));
+                    if is_sandbox_eperm(&e) && std::time::Instant::now() < deadline {
+                        std::thread::sleep(backoff);
+                        backoff = std::cmp::min(
+                            backoff.saturating_mul(2),
+                            Duration::from_millis(backoff_max_ms),
+                        );
                         continue;
                     }
                     return Err(GossipError::Network(e));
                 }
             }
         }
-
-        unreachable!("retry loop must return on final attempt")
     }
 
     // For ephemeral ports, std's bind path is already fast and reliable, and avoids

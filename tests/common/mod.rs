@@ -21,9 +21,36 @@ fn init_crypto() {
 pub async fn create_tls_node(config: GossipConfig) -> Result<GossipRegistryHandle, DynError> {
     init_crypto();
     let secret_key = SecretKey::generate();
-    let node = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, secret_key, Some(config))
-        .await?;
-    Ok(node)
+    let bind_addr: SocketAddr = "127.0.0.1:0".parse()?;
+
+    // Sandbox note (macOS): transient EPERM ("Operation not permitted") can occur during bind()
+    // in socket-heavy suites. Retrying at the test boundary with backoff is more effective than
+    // hammering bind() in a tight loop.
+    let deadline = Instant::now()
+        + Duration::from_millis(
+            std::env::var("KAMEO_TEST_EPERM_MAX_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60_000),
+        );
+    let mut backoff = Duration::from_millis(25);
+
+    loop {
+        match GossipRegistryHandle::new_with_tls(bind_addr, secret_key.clone(), Some(config.clone()))
+            .await
+        {
+            Ok(node) => return Ok(node),
+            Err(e) => {
+                let is_eperm = matches!(&e, kameo_remote::GossipError::Network(io) if io.raw_os_error() == Some(1));
+                if is_eperm && Instant::now() < deadline {
+                    sleep(backoff).await;
+                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(1_000));
+                    continue;
+                }
+                return Err(Box::new(e));
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]
