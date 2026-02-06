@@ -49,7 +49,7 @@ pub struct RemoteActorRef {
     /// The actor location information
     pub location: RemoteActorLocation,
     /// Cached connection handle - set during lookup(), used for direct zero-lookup sending
-    /// Lock-free access - ConnectionHandle has thread-safe internal locking for stream operations
+    /// Lock-free access - ConnectionHandle uses lock-free stream operations
     /// None for actors that aren't listening yet (will be established on first use)
     ///
     /// # Testing
@@ -143,34 +143,6 @@ impl RemoteActorRef {
         // Direct call - ZERO LOCKS
         // ConnectionHandle.tell() uses internal lock-free operations
         conn.tell(message).await
-    }
-
-    /// Send multiple fire-and-forget messages in one batch
-    pub async fn tell_batch(&self, messages: &[&[u8]]) -> crate::Result<()> {
-        if let Some(registry) = self.registry.upgrade() {
-            if registry.shutdown.load(Ordering::Relaxed) {
-                return Err(crate::GossipError::Shutdown);
-            }
-        } else {
-            return Err(crate::GossipError::Shutdown);
-        }
-
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let conn = self.connection.as_ref().ok_or_else(|| {
-            crate::GossipError::ActorNotFound(format!(
-                "'{}' - not listening yet",
-                self.location.address
-            ))
-        })?;
-
-        if messages.len() == 1 {
-            conn.tell(messages[0]).await
-        } else {
-            conn.tell_batch(messages).await
-        }
     }
 
     /// Send a request and wait for a response.

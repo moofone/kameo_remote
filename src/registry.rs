@@ -7,7 +7,9 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
+use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
+use futures::future::BoxFuture;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,6 +43,14 @@ pub fn resolve_peer_addr(
 ) -> SocketAddr {
     if let Some(bind_addr_str) = sender_bind_addr {
         if let Ok(bind_addr) = bind_addr_str.parse::<SocketAddr>() {
+            if bind_addr.port() == 0 {
+                debug!(
+                    "sender_bind_addr {} has port 0, falling back to TCP source {}",
+                    bind_addr, tcp_source_addr
+                );
+                return tcp_source_addr;
+            }
+
             let ip = bind_addr.ip();
 
             // Validate: reject unspecified (0.0.0.0, ::)
@@ -77,20 +87,111 @@ pub fn resolve_peer_addr(
     tcp_source_addr
 }
 
+/// Response payload for actor asks.
+pub enum ActorResponse {
+    Bytes(bytes::Bytes),
+    Aligned(crate::AlignedBytes),
+    Pooled {
+        payload: crate::typed::PooledPayload,
+        prefix: Option<[u8; 8]>,
+        payload_len: usize,
+    },
+}
+
+#[derive(Clone)]
+pub struct ActorMessageHandlerCell {
+    handler: Arc<dyn ActorMessageHandler>,
+}
+
+#[derive(Clone)]
+pub struct ActorMessageHandlerSyncCell {
+    handler: Arc<dyn ActorMessageHandlerSync>,
+}
+
+#[derive(Clone)]
+pub struct PeerDisconnectHandlerCell {
+    handler: Arc<dyn PeerDisconnectHandler>,
+}
+
+#[derive(Clone)]
+pub struct PeerConnectHandlerCell {
+    handler: Arc<dyn PeerConnectHandler>,
+}
+
+impl ActorResponse {
+    pub fn pooled(
+        payload: crate::typed::PooledPayload,
+        prefix: Option<[u8; 8]>,
+        payload_len: usize,
+    ) -> Self {
+        Self::Pooled {
+            payload,
+            prefix,
+            payload_len,
+        }
+    }
+}
+
+impl From<bytes::Bytes> for ActorResponse {
+    fn from(value: bytes::Bytes) -> Self {
+        ActorResponse::Bytes(value)
+    }
+}
+
+impl From<Vec<u8>> for ActorResponse {
+    fn from(value: Vec<u8>) -> Self {
+        ActorResponse::Bytes(bytes::Bytes::from(value))
+    }
+}
+
+impl From<crate::AlignedBytes> for ActorResponse {
+    fn from(value: crate::AlignedBytes) -> Self {
+        ActorResponse::Aligned(value)
+    }
+}
+
 /// Future type for actor message handling responses
-pub type ActorMessageFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;
+pub type ActorMessageFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<ActorResponse>>> + Send + 'a>,
+>;
 
 /// Callback trait for handling incoming actor messages
 pub trait ActorMessageHandler: Send + Sync {
     /// Handle an incoming actor message
     fn handle_actor_message(
         &self,
-        actor_id: &str,
+        actor_id: u64,
         type_hash: u32,
-        payload: &[u8],
+        payload: crate::aligned::AlignedBytes,
         correlation_id: Option<u16>,
     ) -> ActorMessageFuture<'_>;
+}
+
+/// Synchronous actor message handler for ultra-low-latency paths.
+pub trait ActorMessageHandlerSync: Send + Sync {
+    fn handle_actor_message_sync(
+        &self,
+        actor_id: u64,
+        type_hash: u32,
+        payload: crate::aligned::AlignedBytes,
+        correlation_id: Option<u16>,
+    ) -> Result<Option<ActorResponse>>;
+}
+
+pub trait PeerDisconnectHandler: Send + Sync {
+    fn handle_peer_disconnect(
+        &self,
+        peer_addr: SocketAddr,
+        peer_id: Option<crate::PeerId>,
+    ) -> BoxFuture<'_, ()>;
+}
+
+pub trait PeerConnectHandler: Send + Sync {
+    fn handle_peer_connect(
+        &self,
+        peer_addr: SocketAddr,
+        peer_id: Option<crate::PeerId>,
+    ) -> BoxFuture<'_, ()>;
 }
 
 /// Registry change types for delta tracking with vector clocks
@@ -460,7 +561,10 @@ pub struct GossipRegistry {
     pub peer_capability_addr_to_node: Arc<DashMap<SocketAddr, crate::NodeId>>,
 
     // Actor message handler callback
-    pub actor_message_handler: Arc<Mutex<Option<Arc<dyn ActorMessageHandler>>>>,
+    pub actor_message_handler: Arc<ArcSwapOption<ActorMessageHandlerCell>>,
+    pub actor_message_handler_sync: Arc<ArcSwapOption<ActorMessageHandlerSyncCell>>,
+    pub peer_disconnect_handler: Arc<ArcSwapOption<PeerDisconnectHandlerCell>>,
+    pub peer_connect_handler: Arc<ArcSwapOption<PeerConnectHandlerCell>>,
 
     // Stream assembly state
     pub stream_assemblies: Arc<Mutex<HashMap<u64, StreamAssembly>>>,
@@ -480,8 +584,10 @@ unsafe impl Sync for GossipRegistry {}
 #[derive(Debug)]
 pub struct StreamAssembly {
     pub header: crate::StreamHeader,
-    pub chunks: std::collections::BTreeMap<u32, Vec<u8>>,
+    pub received_indices: std::collections::BTreeSet<u32>,
     pub received_bytes: usize,
+    pub buffer: crate::PooledAlignedBuffer,
+    pub chunk_stride: Option<usize>,
     /// Timestamp when stream assembly started (for stale cleanup)
     pub started_at: std::time::Instant,
     /// Correlation ID for ask_streaming (to send response back)
@@ -493,18 +599,18 @@ pub struct StreamAssembly {
 impl StreamAssembly {
     /// Check if the stream assembly is complete (all chunks received with no gaps)
     pub fn is_complete(&self) -> bool {
-        let expected_chunks = self
-            .header
-            .total_size
-            .div_ceil(crate::connection_pool::STREAM_CHUNK_SIZE as u64);
+        let Some(stride) = self.chunk_stride else {
+            return false;
+        };
+        let expected_chunks = self.header.total_size.div_ceil(stride as u64);
 
-        if self.chunks.len() as u64 != expected_chunks {
+        if self.received_indices.len() as u64 != expected_chunks {
             return false;
         }
 
         // Verify all indices 0..N-1 are present (no gaps)
         for i in 0..expected_chunks as u32 {
-            if !self.chunks.contains_key(&i) {
+            if !self.received_indices.contains(&i) {
                 return false;
             }
         }
@@ -517,7 +623,7 @@ impl StreamAssembly {
 #[derive(Debug)]
 pub struct StreamAssemblyResult {
     /// The assembled complete message
-    pub data: Vec<u8>,
+    pub data: crate::AlignedBytes,
     /// Correlation ID for ask_streaming responses
     pub correlation_id: Option<u16>,
     /// Peer address to send response to
@@ -542,8 +648,13 @@ impl GossipRegistry {
             "creating new gossip registry"
         );
 
-        let connection_pool =
-            ConnectionPool::new(config.max_pooled_connections, config.connection_timeout);
+        let aligned_pool_size = crate::aligned::DEFAULT_ALIGNED_POOL_SIZE
+            .max(config.ask_inflight_limit.saturating_mul(8));
+        let connection_pool = ConnectionPool::new_with_aligned_pool_size(
+            config.max_pooled_connections,
+            config.connection_timeout,
+            aligned_pool_size,
+        );
         let peer_capabilities = Arc::new(DashMap::new());
 
         Self {
@@ -597,7 +708,10 @@ impl GossipRegistry {
             peer_capabilities: peer_capabilities.clone(),
             peer_capabilities_by_node: Arc::new(DashMap::new()),
             peer_capability_addr_to_node: Arc::new(DashMap::new()),
-            actor_message_handler: Arc::new(Mutex::new(None)),
+            actor_message_handler: Arc::new(ArcSwapOption::empty()),
+            actor_message_handler_sync: Arc::new(ArcSwapOption::empty()),
+            peer_disconnect_handler: Arc::new(ArcSwapOption::empty()),
+            peer_connect_handler: Arc::new(ArcSwapOption::empty()),
             stream_assemblies: Arc::new(Mutex::new(HashMap::new())),
             pending_acks: Arc::new(Mutex::new(HashMap::new())),
             discovery_task_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -706,40 +820,85 @@ impl GossipRegistry {
 
     /// Register an actor message handler callback
     pub async fn set_actor_message_handler(&self, handler: Arc<dyn ActorMessageHandler>) {
-        let mut callback_guard = self.actor_message_handler.lock().await;
-        *callback_guard = Some(handler);
+        self.actor_message_handler
+            .store(Some(Arc::new(ActorMessageHandlerCell { handler })));
         info!("actor message handler registered");
+    }
+
+    /// Register a synchronous actor message handler callback (fast path).
+    pub async fn set_actor_message_handler_sync(
+        &self,
+        handler: Arc<dyn ActorMessageHandlerSync>,
+    ) {
+        self.actor_message_handler_sync
+            .store(Some(Arc::new(ActorMessageHandlerSyncCell { handler })));
+        info!("actor message handler sync registered");
     }
 
     /// Remove the actor message handler callback
     pub async fn clear_actor_message_handler(&self) {
-        let mut callback_guard = self.actor_message_handler.lock().await;
-        *callback_guard = None;
+        self.actor_message_handler.store(None);
         info!("actor message handler cleared");
+    }
+
+    /// Remove the synchronous actor message handler callback
+    pub async fn clear_actor_message_handler_sync(&self) {
+        self.actor_message_handler_sync.store(None);
+        info!("actor message handler sync cleared");
+    }
+
+    /// Register a peer disconnect handler callback
+    pub async fn set_peer_disconnect_handler(&self, handler: Arc<dyn PeerDisconnectHandler>) {
+        self.peer_disconnect_handler
+            .store(Some(Arc::new(PeerDisconnectHandlerCell { handler })));
+        info!("peer disconnect handler registered");
+    }
+
+    /// Register a peer connect handler callback
+    pub async fn set_peer_connect_handler(&self, handler: Arc<dyn PeerConnectHandler>) {
+        self.peer_connect_handler
+            .store(Some(Arc::new(PeerConnectHandlerCell { handler })));
+        info!("peer connect handler registered");
+    }
+
+    /// Remove the peer disconnect handler callback
+    pub async fn clear_peer_disconnect_handler(&self) {
+        self.peer_disconnect_handler.store(None);
+        info!("peer disconnect handler cleared");
+    }
+
+    /// Remove the peer connect handler callback
+    pub async fn clear_peer_connect_handler(&self) {
+        self.peer_connect_handler.store(None);
+        info!("peer connect handler cleared");
     }
 
     /// Handle an incoming actor message by forwarding to the registered callback
     pub async fn handle_actor_message(
         &self,
-        actor_id: &str,
+        actor_id: u64,
         type_hash: u32,
-        payload: &[u8],
+        payload: crate::aligned::AlignedBytes,
         correlation_id: Option<u16>,
-    ) -> Result<Option<Vec<u8>>> {
-        let handler_guard = self.actor_message_handler.lock().await;
-        if let Some(ref handler) = *handler_guard {
+    ) -> Result<Option<ActorResponse>> {
+        if let Some(cell) = self.actor_message_handler_sync.load_full() {
+            return cell
+                .handler
+                .handle_actor_message_sync(actor_id, type_hash, payload, correlation_id);
+        }
+        if let Some(cell) = self.actor_message_handler.load_full() {
             debug!(
-                actor_id = %actor_id,
+                actor_id = actor_id,
                 type_hash = type_hash,
                 payload_len = payload.len(),
                 "forwarding actor message to handler"
             );
-            handler
+            cell.handler
                 .handle_actor_message(actor_id, type_hash, payload, correlation_id)
                 .await
         } else {
             warn!(
-                actor_id = %actor_id,
+                actor_id = actor_id,
                 type_hash = type_hash,
                 "no actor message handler registered - message dropped"
             );
@@ -932,6 +1091,11 @@ impl GossipRegistry {
         pool.peer_id_to_addr.insert(peer_id.clone(), connect_addr);
         pool.addr_to_peer_id.insert(connect_addr, peer_id.clone());
         pool.reindex_connection_addr(&peer_id, connect_addr);
+        if let Some(cell) = self.peer_connect_handler.load_full() {
+            cell.handler
+                .handle_peer_connect(connect_addr, Some(peer_id))
+                .await;
+        }
     }
 
     /// Set the DNS name for a peer. When a peer has a DNS name configured,
@@ -2709,7 +2873,7 @@ impl GossipRegistry {
                     age_secs = age.as_secs(),
                     received_bytes = assembly.received_bytes,
                     expected_bytes = assembly.header.total_size,
-                    chunks_received = assembly.chunks.len(),
+                    chunks_received = assembly.received_indices.len(),
                     "Cleaning up stale stream assembly - StreamEnd never arrived"
                 );
                 false // Remove this entry
@@ -2961,13 +3125,17 @@ impl GossipRegistry {
         );
 
         let current_time = current_timestamp();
+        let peer_id = {
+            let pool = &self.connection_pool;
+            pool.get_peer_id_by_addr(&failed_peer_addr)
+        };
 
         // IMMEDIATELY mark the connection as failed and remove from pool
         // Use disconnect_connection_by_peer_id when possible to clean up ALL address aliases
         {
             let pool = &self.connection_pool;
             // Try to find peer_id for proper cleanup of all aliases
-            if let Some(peer_id) = pool.get_peer_id_by_addr(&failed_peer_addr) {
+            if let Some(peer_id) = peer_id.clone() {
                 if let Some(_conn) = pool.disconnect_connection_by_peer_id(&peer_id) {
                     info!(addr = %failed_peer_addr, peer_id = %peer_id, "removed disconnected connection from pool (all address aliases cleaned up)");
                 }
@@ -2976,6 +3144,16 @@ impl GossipRegistry {
                 pool.remove_connection(failed_peer_addr);
                 info!(addr = %failed_peer_addr, "removed disconnected connection from pool (by address only)");
             }
+        }
+
+        if let Some(cell) = self.peer_disconnect_handler.load_full() {
+            let handler = cell.handler.clone();
+            let peer_id = peer_id.clone();
+            tokio::spawn(async move {
+                handler
+                    .handle_peer_disconnect(failed_peer_addr, peer_id)
+                    .await;
+            });
         }
 
         // IMMEDIATELY mark peer as failed in our local state
@@ -3107,6 +3285,16 @@ impl GossipRegistry {
                 connections_remaining = pool.connection_count(),
                 "connection cleanup complete"
             );
+        }
+
+        if let Some(cell) = self.peer_disconnect_handler.load_full() {
+            let handler = cell.handler.clone();
+            let peer_id = Some(failed_peer_id.clone());
+            tokio::spawn(async move {
+                handler
+                    .handle_peer_disconnect(failed_peer_addr, peer_id)
+                    .await;
+            });
         }
 
         // IMMEDIATELY mark peer as failed in our local state
@@ -3550,13 +3738,13 @@ impl GossipRegistry {
                     priority,
                     ..
                 } => {
-                    error!(
+                    info!(
                         "  ➕ IMMEDIATE: Adding actor {} at {} (priority: {:?})",
                         name, location.address, priority
                     );
                 }
                 RegistryChange::ActorRemoved { name, priority, .. } => {
-                    error!(
+                    info!(
                         "  ➖ IMMEDIATE: Removing actor {} (priority: {:?})",
                         name, priority
                     );
@@ -3652,7 +3840,7 @@ impl GossipRegistry {
         }
 
         // Log immediate propagation with timing
-        error!(
+        info!(
             "🚀 IMMEDIATE GOSSIP: Broadcasting {} urgent changes to {} peers (serialization: {:.3}ms, chunks: {})",
             urgent_changes_count,
             critical_peers.len(),
@@ -3851,13 +4039,37 @@ impl GossipRegistry {
         correlation_id: Option<u16>,
         peer_addr: Option<std::net::SocketAddr>,
     ) {
+        let total_size = match usize::try_from(header.total_size) {
+            Ok(size) => size,
+            Err(_) => {
+                warn!(
+                    stream_id = header.stream_id,
+                    total_size = header.total_size,
+                    "Stream assembly size overflows usize"
+                );
+                return;
+            }
+        };
+
+        if total_size > crate::MAX_STREAM_SIZE {
+            warn!(
+                stream_id = header.stream_id,
+                total_size = total_size,
+                max_size = crate::MAX_STREAM_SIZE,
+                "Stream assembly size exceeds MAX_STREAM_SIZE"
+            );
+            return;
+        }
+
         let mut assemblies = self.stream_assemblies.lock().await;
         assemblies.insert(
             header.stream_id,
             StreamAssembly {
                 header,
-                chunks: std::collections::BTreeMap::new(),
+                received_indices: std::collections::BTreeSet::new(),
                 received_bytes: 0,
+                buffer: self.connection_pool.make_pooled_aligned_buffer(total_size),
+                chunk_stride: None,
                 started_at: std::time::Instant::now(),
                 correlation_id,
                 peer_addr,
@@ -3875,8 +4087,41 @@ impl GossipRegistry {
     pub async fn add_stream_chunk(&self, header: crate::StreamHeader, chunk_data: Vec<u8>) {
         let mut assemblies = self.stream_assemblies.lock().await;
         if let Some(assembly) = assemblies.get_mut(&header.stream_id) {
+            if header.total_size != assembly.header.total_size {
+                warn!(
+                    stream_id = header.stream_id,
+                    "Stream assembly total_size mismatch"
+                );
+                return;
+            }
+
+            if header.chunk_size as usize != chunk_data.len() {
+                warn!(
+                    stream_id = header.stream_id,
+                    "Stream assembly chunk_size mismatch"
+                );
+                return;
+            }
+
+            if assembly.chunk_stride.is_none() && header.chunk_size > 0 {
+                assembly.chunk_stride = Some(header.chunk_size as usize);
+            }
+
+            let stride = assembly.chunk_stride.unwrap_or(header.chunk_size as usize);
+            let offset = header.chunk_index as usize * stride;
+            let end = offset + chunk_data.len();
+            if end > assembly.header.total_size as usize {
+                warn!(
+                    stream_id = header.stream_id,
+                    "Stream assembly chunk overflow"
+                );
+                return;
+            }
+
+            // CRITICAL_PATH: write chunk directly into final buffer.
+            assembly.buffer.as_mut_slice()[offset..end].copy_from_slice(&chunk_data);
             assembly.received_bytes += chunk_data.len();
-            assembly.chunks.insert(header.chunk_index, chunk_data);
+            assembly.received_indices.insert(header.chunk_index);
             // debug!(
             //     stream_id = header.stream_id,
             //     chunk_index = header.chunk_index,
@@ -3896,58 +4141,23 @@ impl GossipRegistry {
         let mut assemblies = self.stream_assemblies.lock().await;
         if let Some(assembly) = assemblies.remove(&stream_id) {
             // Verify we have all chunks with proper gap detection
-            let expected_chunks = assembly
-                .header
-                .total_size
-                .div_ceil(crate::connection_pool::STREAM_CHUNK_SIZE as u64);
-
-            // ✅ PROPER: Check both count and verify all chunk indices are present
-            if assembly.chunks.len() as u64 != expected_chunks {
+            if !assembly.is_complete() {
                 warn!(
                     stream_id = stream_id,
-                    expected = expected_chunks,
-                    received = assembly.chunks.len(),
-                    "Incomplete stream assembly - wrong count"
+                    received = assembly.received_indices.len(),
+                    "Incomplete stream assembly"
                 );
                 return None;
             }
 
-            // ✅ PROPER: Verify all indices 0..N-1 are present (no gaps)
-            for i in 0..expected_chunks as u32 {
-                if !assembly.chunks.contains_key(&i) {
-                    warn!(
-                        stream_id = stream_id,
-                        expected_chunks = expected_chunks,
-                        missing_chunk = i,
-                        received_chunks = ?assembly.chunks.keys().collect::<Vec<_>>(),
-                        "Incomplete stream assembly - missing chunk index"
-                    );
-                    return None;
-                }
-            }
-
-            // ✅ PROPER: Reassemble in correct order using chunk indices
-            let mut complete = Vec::with_capacity(assembly.header.total_size as usize);
-            for i in 0..expected_chunks as u32 {
-                if let Some(chunk) = assembly.chunks.get(&i) {
-                    complete.extend_from_slice(chunk);
-                } else {
-                    // This should never happen due to the gap check above
-                    error!(
-                        stream_id = stream_id,
-                        chunk_index = i,
-                        "Critical error: chunk missing during assembly after gap check"
-                    );
-                    return None;
-                }
-            }
-
             info!(
                 stream_id = stream_id,
-                total_size = complete.len(),
+                total_size = assembly.header.total_size,
                 correlation_id = ?assembly.correlation_id,
                 "Completed stream assembly"
             );
+
+            let complete = assembly.buffer.into_aligned_bytes();
 
             Some(StreamAssemblyResult {
                 data: complete,
@@ -4396,38 +4606,46 @@ impl GossipRegistry {
 
     /// Mark a peer connection as established (clears failure state)
     pub async fn mark_peer_connected(&self, addr: SocketAddr) {
-        let mut gossip_state = self.gossip_state.lock().await;
+        {
+            let mut gossip_state = self.gossip_state.lock().await;
 
-        // Update known_peers
-        if let Some(peer_info) = gossip_state.known_peers.get_mut(&addr) {
-            peer_info.failures = 0;
-            peer_info.last_failure_time = None;
-            peer_info.last_success = current_timestamp();
-            if let Some(node_id) = peer_info.node_id {
-                self.peer_capability_addr_to_node.insert(addr, node_id);
-                if let Some(entry) = self.peer_capabilities_by_node.get(&node_id) {
-                    self.peer_capabilities.insert(addr, entry.value().clone());
+            // Update known_peers
+            if let Some(peer_info) = gossip_state.known_peers.get_mut(&addr) {
+                peer_info.failures = 0;
+                peer_info.last_failure_time = None;
+                peer_info.last_success = current_timestamp();
+                if let Some(node_id) = peer_info.node_id {
+                    self.peer_capability_addr_to_node.insert(addr, node_id);
+                    if let Some(entry) = self.peer_capabilities_by_node.get(&node_id) {
+                        self.peer_capabilities.insert(addr, entry.value().clone());
+                    }
                 }
             }
-        }
 
-        // Update peer_discovery
-        let should_track_mesh_time = 
-            self.config.mesh_formation_target > 0 && gossip_state.mesh_formation_time_ms.is_none();
+            // Update peer_discovery
+            let should_track_mesh_time = self.config.mesh_formation_target > 0
+                && gossip_state.mesh_formation_time_ms.is_none();
 
-        if let Some(ref mut discovery) = gossip_state.peer_discovery {
-            discovery.on_peer_connected(addr);
+            if let Some(ref mut discovery) = gossip_state.peer_discovery {
+                discovery.on_peer_connected(addr);
 
-            if should_track_mesh_time {
-                let target = self.config.mesh_formation_target;
-                if discovery.connected_peer_count() >= target {
-                    let elapsed_ms = self.start_instant.elapsed().as_millis() as u64;
-                    gossip_state.mesh_formation_time_ms = Some(elapsed_ms);
+                if should_track_mesh_time {
+                    let target = self.config.mesh_formation_target;
+                    if discovery.connected_peer_count() >= target {
+                        let elapsed_ms = self.start_instant.elapsed().as_millis() as u64;
+                        gossip_state.mesh_formation_time_ms = Some(elapsed_ms);
+                    }
                 }
             }
+
+            debug!(addr = %addr, "marked peer as connected");
         }
 
-        debug!(addr = %addr, "marked peer as connected");
+        // Notify peer connect handler (outgoing connections may only hit this path).
+        if let Some(cell) = self.peer_connect_handler.load_full() {
+            let peer_id = self.connection_pool.get_peer_id_by_addr(&addr);
+            cell.handler.handle_peer_connect(addr, peer_id).await;
+        }
     }
 
     /// Mark a peer connection as failed (applies backoff)
@@ -5307,6 +5525,36 @@ mod tests {
         // (current implementation takes changes before checking for peers)
         let gossip_state = registry.gossip_state.lock().await;
         assert!(gossip_state.urgent_changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stream_assembly_copies_chunks_into_buffer() {
+        let registry = GossipRegistry::new(test_addr(8080), test_config());
+
+        let header0 = crate::StreamHeader {
+            stream_id: 42,
+            total_size: 6,
+            chunk_size: 3,
+            chunk_index: 0,
+            type_hash: 0,
+            actor_id: 0,
+        };
+
+        registry.start_stream_assembly(header0, None, None).await;
+        registry.add_stream_chunk(header0, vec![1, 2, 3]).await;
+
+        let header1 = crate::StreamHeader {
+            chunk_index: 1,
+            ..header0
+        };
+        registry.add_stream_chunk(header1, vec![4, 5, 6]).await;
+
+        let result = registry
+            .complete_stream_assembly(header0.stream_id)
+            .await
+            .expect("stream assembly should complete");
+
+        assert_eq!(result.data.as_ref(), &[1, 2, 3, 4, 5, 6]);
     }
 
     #[tokio::test]

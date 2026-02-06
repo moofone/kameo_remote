@@ -1,4 +1,4 @@
-use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, SecretKey};
+use kameo_remote::{GossipConfig, GossipRegistryHandle, SecretKey};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Once;
@@ -18,13 +18,9 @@ fn init_crypto() {
 }
 
 #[allow(dead_code)]
-pub async fn create_tls_node(mut config: GossipConfig) -> Result<GossipRegistryHandle, DynError> {
+pub async fn create_tls_node(config: GossipConfig) -> Result<GossipRegistryHandle, DynError> {
     init_crypto();
     let secret_key = SecretKey::generate();
-    let private_bytes = secret_key.to_bytes();
-    let key_pair =
-        KeyPair::from_private_key_bytes(&private_bytes).map_err(|e| -> DynError { Box::new(e) })?;
-    config.key_pair = Some(key_pair);
     let node = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse()?, secret_key, Some(config))
         .await?;
     Ok(node)

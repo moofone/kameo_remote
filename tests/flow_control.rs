@@ -13,6 +13,8 @@ async fn test_ask_backpressure_no_write_buffer_full() -> Result<()> {
         "127.0.0.1:0".parse().unwrap(),
         ChannelId::TellAsk,
         BufferConfig::default(),
+        None,
+        None,
     );
     let handle = Arc::new(handle);
 

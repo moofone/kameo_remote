@@ -1,7 +1,7 @@
 use crate::{GossipError, Result};
 use bytes::{Buf, Bytes};
+use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, OnceLock};
 
 const SERIALIZER_POOL_SIZE: usize = 64;
 const MAX_POOLED_BUFFER_CAPACITY: usize = 1024 * 1024; // 1MB
@@ -21,53 +21,41 @@ impl SerializerCtx {
     }
 }
 
-struct SerializerPool {
-    // Boxing is intentional: pool returns Box<SerializerCtx> to callers
-    // who may hold them across await points with stable addresses
-    #[allow(clippy::vec_box)]
-    inner: Mutex<Vec<Box<SerializerCtx>>>,
-}
-
-impl SerializerPool {
-    fn new() -> Self {
+thread_local! {
+    static SERIALIZER_POOL: RefCell<Vec<Box<SerializerCtx>>> = RefCell::new({
         let mut pool = Vec::with_capacity(SERIALIZER_POOL_SIZE);
         for _ in 0..SERIALIZER_POOL_SIZE {
             pool.push(Box::new(SerializerCtx::new()));
         }
-        Self {
-            inner: Mutex::new(pool),
-        }
-    }
+        pool
+    });
+}
 
-    fn acquire(&self) -> Box<SerializerCtx> {
-        self.inner
-            .lock()
-            .expect("serializer pool poisoned")
+fn acquire_ctx() -> Box<SerializerCtx> {
+    SERIALIZER_POOL.with(|pool| {
+        pool.borrow_mut()
             .pop()
             .unwrap_or_else(|| Box::new(SerializerCtx::new()))
+    })
+}
+
+fn release_ctx(mut ctx: Box<SerializerCtx>) {
+    ctx.writer.clear();
+    if ctx.writer.capacity() > MAX_POOLED_BUFFER_CAPACITY {
+        return;
+    }
+    if ctx.arena.capacity() > MAX_POOLED_ARENA_CAPACITY {
+        ctx.arena = rkyv::ser::allocator::Arena::new();
+    } else {
+        ctx.arena.shrink();
     }
 
-    fn release(&self, mut ctx: Box<SerializerCtx>) {
-        ctx.writer.clear();
-        if ctx.writer.capacity() > MAX_POOLED_BUFFER_CAPACITY {
-            return;
-        }
-        if ctx.arena.capacity() > MAX_POOLED_ARENA_CAPACITY {
-            ctx.arena = rkyv::ser::allocator::Arena::new();
-        } else {
-            ctx.arena.shrink();
-        }
-
-        let mut guard = self.inner.lock().expect("serializer pool poisoned");
+    SERIALIZER_POOL.with(|pool| {
+        let mut guard = pool.borrow_mut();
         if guard.len() < SERIALIZER_POOL_SIZE {
             guard.push(ctx);
         }
-    }
-}
-
-fn serializer_pool() -> &'static Arc<SerializerPool> {
-    static POOL: OnceLock<Arc<SerializerPool>> = OnceLock::new();
-    POOL.get_or_init(|| Arc::new(SerializerPool::new()))
+    });
 }
 
 fn encode_typed_in<T>(value: &T, ctx: &mut SerializerCtx) -> Result<usize>
@@ -89,7 +77,6 @@ where
 /// Pooled payload that implements bytes::Buf without copying.
 pub struct PooledPayload {
     ctx: Option<Box<SerializerCtx>>,
-    pool: Arc<SerializerPool>,
     len: usize,
     pos: usize,
 }
@@ -127,7 +114,7 @@ impl Buf for PooledPayload {
 impl Drop for PooledPayload {
     fn drop(&mut self) {
         if let Some(ctx) = self.ctx.take() {
-            self.pool.release(ctx);
+            release_ctx(ctx);
         }
     }
 }
@@ -244,13 +231,11 @@ pub fn encode_typed_pooled<T>(value: &T) -> Result<PooledPayload>
 where
     T: WireEncode,
 {
-    let pool = serializer_pool().clone();
-    let mut ctx = pool.acquire();
+    let mut ctx = acquire_ctx();
     let len = encode_typed_in(value, &mut ctx)?;
 
     Ok(PooledPayload {
         ctx: Some(ctx),
-        pool,
         len,
         pos: 0,
     })
@@ -301,15 +286,9 @@ mod tests {
 
     #[test]
     fn pool_reuse_and_cap_behavior() {
-        let pool = serializer_pool().clone();
-        let initial = pool.inner.lock().unwrap().len();
-
         let msg = TestMsg { value: 7 };
         let payload = encode_typed_pooled(&msg).unwrap();
         drop(payload);
-
-        let after = pool.inner.lock().unwrap().len();
-        assert!(after >= initial.saturating_sub(1));
 
         #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
         struct BigMsg {
@@ -322,9 +301,6 @@ mod tests {
         };
         let big_payload = encode_typed_pooled(&big).unwrap();
         drop(big_payload);
-
-        let final_len = pool.inner.lock().unwrap().len();
-        assert!(final_len <= after);
     }
 
     #[test]

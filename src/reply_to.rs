@@ -16,9 +16,7 @@ pub struct ReplyTo {
 impl ReplyTo {
     /// Send reply back to the original requester.
     ///
-    /// This method automatically uses streaming for large responses (>1MB),
-    /// preventing ring buffer overflow. For small responses, it uses the
-    /// efficient ring buffer path.
+    /// This method always uses the inline write queue (never streaming).
     pub async fn reply(self, response: &[u8]) -> Result<()> {
         let result = self
             .connection
@@ -40,21 +38,15 @@ impl ReplyTo {
         result
     }
 
-    /// Reply using owned bytes with automatic streaming for large responses.
-    ///
-    /// This uses zero-copy streaming for responses exceeding the threshold,
-    /// avoiding payload copies entirely.
+    /// Reply using owned bytes with the inline write queue (never streaming).
     pub async fn reply_bytes(self, response: Bytes) -> Result<()> {
         self.connection
             .send_response_auto_bytes(self.correlation_id, response)
             .await
     }
 
-    /// Reply with automatic streaming for large responses (legacy alias).
-    ///
-    /// NOTE: This is now equivalent to `reply()` since all reply methods
-    /// automatically use streaming when needed.
-    #[deprecated(since = "0.2.0", note = "Use reply() instead - it now auto-streams")]
+    /// Reply with the inline write queue (legacy alias).
+    #[deprecated(since = "0.2.0", note = "Use reply() instead")]
     pub async fn reply_auto(self, response: &[u8]) -> Result<()> {
         self.reply(response).await
     }

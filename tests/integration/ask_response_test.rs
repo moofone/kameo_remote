@@ -5,18 +5,24 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, RegistrationPriority};
 
+fn maybe_init_tracing(level: &'static str) {
+    // In this sandboxed environment, enabling tracing can trigger EPERM ("Operation not
+    // permitted") on subsequent networking syscalls. Only enable when explicitly requested.
+    if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
+        let directive = format!("kameo_remote={level}").parse().unwrap();
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(EnvFilter::from_default_env().add_directive(directive)),
+            )
+            .try_init();
+    }
+}
+
 /// Test the complete ask/response flow with correlation tracking
 #[tokio::test]
 async fn test_ask_response_with_correlation() {
-    // Initialize tracing
-    let _ = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_filter(EnvFilter::from_default_env()
-                    .add_directive("kameo_remote=debug".parse().unwrap())
-                )
-        )
-        .try_init();
+    maybe_init_tracing("debug");
 
     // Create two nodes
     let addr_a: SocketAddr = "127.0.0.1:9001".parse().unwrap();
@@ -165,15 +171,7 @@ async fn test_ask_response_with_correlation() {
 /// Test error handling and edge cases
 #[tokio::test]
 async fn test_ask_error_cases() {
-    // Initialize tracing
-    let _ = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_filter(EnvFilter::from_default_env()
-                    .add_directive("kameo_remote=info".parse().unwrap())
-                )
-        )
-        .try_init();
+    maybe_init_tracing("info");
 
     // Create single node
     let addr: SocketAddr = "127.0.0.1:9003".parse().unwrap();
@@ -215,15 +213,7 @@ async fn test_ask_error_cases() {
 /// Test performance and throughput
 #[tokio::test]
 async fn test_ask_performance() {
-    // Initialize tracing with less verbosity for performance test
-    let _ = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_filter(EnvFilter::from_default_env()
-                    .add_directive("kameo_remote=warn".parse().unwrap())
-                )
-        )
-        .try_init();
+    maybe_init_tracing("warn");
 
     // Create two nodes
     let addr_a: SocketAddr = "127.0.0.1:9004".parse().unwrap();

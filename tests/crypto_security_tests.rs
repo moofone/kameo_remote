@@ -41,7 +41,10 @@ where
 
 #[tokio::test]
 async fn test_keypair_generation_and_peer_id() {
-    tracing_subscriber::fmt::try_init().ok();
+    // Avoid sandbox-triggered EPERM flakiness unless explicitly enabled.
+    if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
+        tracing_subscriber::fmt::try_init().ok();
+    }
 
     println!("🔑 Testing keypair generation and PeerId derivation...");
 
@@ -201,10 +204,13 @@ fn test_key_mismatch_connection_rejection() {
             ..Default::default()
         };
 
-        let server_registry =
-            GossipRegistryHandle::new_with_keypair(server_addr, server_keypair, Some(server_config))
-                .await
-                .expect("Should create server registry");
+        let server_registry = GossipRegistryHandle::new_with_keypair(
+            server_addr,
+            server_keypair,
+            Some(server_config),
+        )
+        .await
+        .expect("Should create server registry");
 
         println!("   🖥️  Server started with PeerId: {}", server_peer_id);
 
@@ -218,10 +224,13 @@ fn test_key_mismatch_connection_rejection() {
             ..Default::default()
         };
 
-        let client_registry =
-            GossipRegistryHandle::new_with_keypair(client_addr, client_keypair, Some(client_config))
-                .await
-                .expect("Should create client registry");
+        let client_registry = GossipRegistryHandle::new_with_keypair(
+            client_addr,
+            client_keypair,
+            Some(client_config),
+        )
+        .await
+        .expect("Should create client registry");
 
         println!("   💻 Client started with PeerId: {}", client_peer_id);
         assert_ne!(

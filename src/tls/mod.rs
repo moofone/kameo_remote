@@ -12,9 +12,9 @@ use rustls::{
 use std::sync::Arc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-// ALPN Protocol versions for version negotiation (Phase 5)
-/// V2 protocol - supports peer discovery via PeerListGossip
-pub const ALPN_KAMEO_V2: &[u8] = b"kameo-remote-v2";
+// ALPN Protocol versions for version negotiation
+/// V3 protocol - supports peer discovery via PeerListGossip
+pub const ALPN_KAMEO_V3: &[u8] = b"kameo-remote-v3";
 
 /// Ensure the rustls CryptoProvider is installed (required for TLS)
 /// This uses the ring provider which is enabled in kameo_remote's Cargo.toml
@@ -83,9 +83,9 @@ fn make_client_config(secret_key: &SecretKey, enable_peer_discovery: bool) -> Re
         .with_custom_certificate_verifier(Arc::new(NodeIdServerVerifier::new()))
         .with_client_cert_resolver(Arc::new(resolver::AlwaysResolvesCert::new(secret_key)?));
 
-    // Set ALPN protocol to v2 only (TLS-only mode)
+    // Set ALPN protocol to v3 only (TLS-only mode)
     let _ = enable_peer_discovery;
-    config.alpn_protocols = vec![ALPN_KAMEO_V2.to_vec()];
+    config.alpn_protocols = vec![ALPN_KAMEO_V3.to_vec()];
 
     // Enable key logging for debugging if SSLKEYLOGFILE is set
     if std::env::var("SSLKEYLOGFILE").is_ok() {
@@ -101,9 +101,9 @@ fn make_server_config(secret_key: &SecretKey, enable_peer_discovery: bool) -> Re
         .with_client_cert_verifier(Arc::new(NodeIdClientVerifier::new()))
         .with_cert_resolver(Arc::new(resolver::AlwaysResolvesCert::new(secret_key)?));
 
-    // Set ALPN protocol to v2 only (TLS-only mode)
+    // Set ALPN protocol to v3 only (TLS-only mode)
     let _ = enable_peer_discovery;
-    config.alpn_protocols = vec![ALPN_KAMEO_V2.to_vec()];
+    config.alpn_protocols = vec![ALPN_KAMEO_V3.to_vec()];
 
     // Enable key logging for debugging if SSLKEYLOGFILE is set
     if std::env::var("SSLKEYLOGFILE").is_ok() {
@@ -346,27 +346,27 @@ mod tests {
     }
 
     #[test]
-    fn test_alpn_selection_v2_only() {
+    fn test_alpn_selection_v3_only() {
         ensure_crypto_provider();
         let secret = SecretKey::generate();
         let enabled = TlsConfig::with_peer_discovery(secret.clone(), true).unwrap();
         assert_eq!(
             enabled.client_config.alpn_protocols,
-            vec![ALPN_KAMEO_V2.to_vec()]
+            vec![ALPN_KAMEO_V3.to_vec()]
         );
         assert_eq!(
             enabled.server_config.alpn_protocols,
-            vec![ALPN_KAMEO_V2.to_vec()]
+            vec![ALPN_KAMEO_V3.to_vec()]
         );
 
         let disabled = TlsConfig::with_peer_discovery(secret, false).unwrap();
         assert_eq!(
             disabled.client_config.alpn_protocols,
-            vec![ALPN_KAMEO_V2.to_vec()]
+            vec![ALPN_KAMEO_V3.to_vec()]
         );
         assert_eq!(
             disabled.server_config.alpn_protocols,
-            vec![ALPN_KAMEO_V2.to_vec()]
+            vec![ALPN_KAMEO_V3.to_vec()]
         );
     }
 }
