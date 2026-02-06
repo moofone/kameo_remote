@@ -1051,6 +1051,15 @@ where
                 }
                 return ConnectionCloseOutcome::DroppedByTieBreaker;
             }
+            crate::connection_pool::RegistrationResult::AlreadyRegistered => {
+                // Same connection already registered - this is expected
+                // when processing multiple messages on same connection
+                debug!(
+                    peer_id = %peer_id,
+                    peer_addr = %peer_addr,
+                    "tie-breaker: same connection already registered (idempotent)"
+                );
+            }
         }
 
         debug!(

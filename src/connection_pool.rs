@@ -2793,6 +2793,10 @@ pub enum RegistrationResult {
         /// The old connection that was replaced - caller should shutdown AFTER lock release
         old_conn: Arc<LockFreeConnection>,
     },
+    /// Same connection was already registered (idempotent - no action needed)
+    /// This prevents the tie-breaker from shutting down a connection that's currently
+    /// being used to handle FullSync/FullSyncResponse messages.
+    AlreadyRegistered,
 }
 
 /// Connection pool for maintaining persistent TCP connections to peers
@@ -4535,7 +4539,20 @@ impl ConnectionPool {
         // Do the atomic entry operation first, then update other maps
         let result = match self.connections_by_peer.entry(peer_id.clone()) {
             Entry::Occupied(mut existing) => {
-                // Connection already exists - run tie-breaker
+                // FIX: Check if this is the SAME connection being registered again
+                // This prevents the tie-breaker from shutting down a connection that's
+                // currently handling FullSync/FullSyncResponse messages (race condition fix)
+                if Arc::ptr_eq(existing.get(), &connection) {
+                    debug!(
+                        peer_id = %peer_id,
+                        addr = %addr,
+                        is_outbound = is_outbound,
+                        "same connection already registered - idempotent no-op"
+                    );
+                    return RegistrationResult::AlreadyRegistered;
+                }
+
+                // Connection already exists (different Arc) - run tie-breaker
                 if registry.should_keep_connection(&peer_id, is_outbound) {
                     // New connection wins - swap in new, return old for cleanup
                     let old_conn = existing.insert(connection.clone());
@@ -4634,6 +4651,9 @@ impl ConnectionPool {
             }
             RegistrationResult::ExistingKept => {
                 // No mappings to update - caller will cleanup rejected connection
+            }
+            RegistrationResult::AlreadyRegistered => {
+                // Same connection already registered - no action needed (idempotent)
             }
         }
 
@@ -5570,6 +5590,14 @@ impl ConnectionPool {
                     if let Some(handle) = old_conn.stream_handle.as_ref() {
                         handle.shutdown();
                     }
+                }
+                RegistrationResult::AlreadyRegistered => {
+                    // Same connection already registered - no action needed
+                    debug!(
+                        peer_id = %peer_id,
+                        addr = %addr,
+                        "CONNECTION POOL: Same outbound connection already registered (idempotent)"
+                    );
                 }
             }
         } else {
@@ -7940,6 +7968,15 @@ pub(crate) fn handle_incoming_message(
                                     "FullSync: registered connection by peer_id"
                                 );
                             }
+                            RegistrationResult::AlreadyRegistered => {
+                                // Same connection already registered - this is expected
+                                // when multiple FullSync/FullSyncResponse messages arrive
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    addr = %sender_socket_addr,
+                                    "FullSync: same connection already registered (idempotent)"
+                                );
+                            }
                         }
                     } else {
                         // Connection not found - may have been disconnected or not yet indexed
@@ -8239,6 +8276,15 @@ pub(crate) fn handle_incoming_message(
                                     peer_id = %sender_peer_id,
                                     addr = %sender_socket_addr,
                                     "FullSyncResponse: registered outbound connection by peer_id"
+                                );
+                            }
+                            RegistrationResult::AlreadyRegistered => {
+                                // Same connection already registered - this is expected
+                                // when FullSync was processed before FullSyncResponse
+                                debug!(
+                                    peer_id = %sender_peer_id,
+                                    addr = %sender_socket_addr,
+                                    "FullSyncResponse: same connection already registered (idempotent)"
                                 );
                             }
                         }
