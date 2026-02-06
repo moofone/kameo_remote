@@ -7787,15 +7787,47 @@ pub(crate) fn handle_incoming_message(
                                 success: true,
                             };
 
-                            // Serialize and send
+                            // Serialize and send with retry and peer_id fallback
                             if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&ack) {
                                 let pool = &registry.connection_pool;
                                 let buffer = pool.create_message_buffer(&serialized);
-                                // Use send_lock_free to send directly without needing a connection handle
-                                if let Err(e) = pool.send_lock_free(sender_socket_addr, &buffer) {
-                                    warn!("Failed to send ImmediateAck: {}", e);
-                                } else {
-                                    info!("Sent ImmediateAck for actor '{}'", actor_name);
+                                let frozen = bytes::Bytes::from(buffer);
+
+                                // Try send_lock_free first (by socket address)
+                                let send_result = pool.send_lock_free(sender_socket_addr, &frozen);
+
+                                // If that fails, try by peer_id if we know it
+                                let final_result = match send_result {
+                                    Ok(()) => Ok(()),
+                                    Err(e) => {
+                                        debug!(
+                                            "ImmediateAck send_lock_free failed for {}, trying peer_id route: {}",
+                                            actor_name, e
+                                        );
+                                        // Fallback: try sending by peer_id
+                                        pool.send_bytes_to_peer_id(&delta.sender_peer_id, frozen.clone())
+                                    }
+                                };
+
+                                match final_result {
+                                    Ok(()) => {
+                                        info!("Sent ImmediateAck for actor '{}'", actor_name);
+                                    }
+                                    Err(e) => {
+                                        // Final fallback: try the original peer address (_peer_addr)
+                                        if _peer_addr != sender_socket_addr {
+                                            if let Err(e2) = pool.send_lock_free(_peer_addr, &frozen) {
+                                                warn!(
+                                                    "Failed to send ImmediateAck for '{}' via all routes: primary={}, fallback={}",
+                                                    actor_name, e, e2
+                                                );
+                                            } else {
+                                                info!("Sent ImmediateAck for actor '{}' via peer_addr fallback", actor_name);
+                                            }
+                                        } else {
+                                            warn!("Failed to send ImmediateAck for '{}': {}", actor_name, e);
+                                        }
+                                    }
                                 }
                             }
                         }
