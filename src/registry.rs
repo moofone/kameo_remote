@@ -1171,8 +1171,22 @@ impl GossipRegistry {
             return None;
         }
 
-        // Current IP is NOT in DNS results - need to switch to first available
-        let new_addr = resolved_addrs[0];
+        // Current IP is NOT in DNS results - switch to the first safe address.
+        let Some(new_addr) = resolved_addrs.iter().copied().find(|addr| {
+            crate::net_security::is_safe_to_dial(
+                addr,
+                self.config.allow_private_discovery,
+                self.config.allow_loopback_discovery,
+                self.config.allow_link_local_discovery,
+            )
+        }) else {
+            warn!(
+                dns_name = %dns_name,
+                resolved_count = resolved_addrs.len(),
+                "DNS re-resolution: all resolved addresses blocked by security filter"
+            );
+            return None;
+        };
 
         info!(
             old_addr = %peer_addr,
@@ -4198,12 +4212,29 @@ impl GossipRegistry {
             if peer_info.failures >= self.config.max_peer_failures {
                 continue;
             }
+            // Don't gossip unsafe addresses (prevents private/bogon propagation).
+            if !crate::net_security::is_safe_to_dial(
+                &peer_info.address,
+                self.config.allow_private_discovery,
+                self.config.allow_loopback_discovery,
+                self.config.allow_link_local_discovery,
+            ) {
+                continue;
+            }
             peers.push(peer_info.to_gossip());
         }
 
         // Include known peers from LRU cache (up to limit)
         let remaining = Self::MAX_PEER_LIST_SIZE.saturating_sub(peers.len());
         for (_, peer_info) in gossip_state.known_peers.iter().take(remaining) {
+            if !crate::net_security::is_safe_to_dial(
+                &peer_info.address,
+                self.config.allow_private_discovery,
+                self.config.allow_loopback_discovery,
+                self.config.allow_link_local_discovery,
+            ) {
+                continue;
+            }
             peers.push(peer_info.to_gossip());
         }
 
@@ -4342,16 +4373,13 @@ impl GossipRegistry {
         let mut bogon_count = 0;
         for peer_gossip in &peers {
             if let Ok(addr) = peer_gossip.address.parse::<SocketAddr>() {
-                let ip = addr.ip();
-                // Check for bogon IPs that should never be in peer lists
-                if ip.is_loopback() && !self.config.allow_loopback_discovery {
+                if !crate::net_security::is_safe_to_dial(
+                    &addr,
+                    self.config.allow_private_discovery,
+                    self.config.allow_loopback_discovery,
+                    self.config.allow_link_local_discovery,
+                ) {
                     bogon_count += 1;
-                }
-                // Check link-local
-                if let std::net::IpAddr::V4(v4) = ip {
-                    if v4.is_link_local() && !self.config.allow_link_local_discovery {
-                        bogon_count += 1;
-                    }
                 }
             }
         }
@@ -4377,6 +4405,16 @@ impl GossipRegistry {
                 // Update known_peers LRU cache and active peers
                 for peer_gossip in &peers {
                     if let Some(peer_info) = PeerInfo::from_gossip(peer_gossip) {
+                        // Security filter: do not ingest unsafe/bogon addresses into known_peers.
+                        if !crate::net_security::is_safe_to_dial(
+                            &peer_info.address,
+                            self.config.allow_private_discovery,
+                            self.config.allow_loopback_discovery,
+                            self.config.allow_link_local_discovery,
+                        ) {
+                            continue;
+                        }
+
                         // Conservative merge: only update if newer
                         if let Some(existing) = gossip_state.known_peers.get_mut(&peer_info.address)
                         {
@@ -5338,6 +5376,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_peer_connection_failure_invokes_disconnect_handler_with_peer_id() {
+        use crate::registry::PeerDisconnectHandler;
+        use futures::future::BoxFuture;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use tokio::sync::oneshot;
+
+        struct TestHandler {
+            tx: tokio::sync::Mutex<Option<oneshot::Sender<(SocketAddr, Option<crate::PeerId>)>>>,
+        }
+
+        impl PeerDisconnectHandler for TestHandler {
+            fn handle_peer_disconnect(
+                &self,
+                peer_addr: SocketAddr,
+                peer_id: Option<crate::PeerId>,
+            ) -> BoxFuture<'_, ()> {
+                Box::pin(async move {
+                    if let Some(tx) = self.tx.lock().await.take() {
+                        let _ = tx.send((peer_addr, peer_id));
+                    }
+                })
+            }
+        }
+
+        let registry = GossipRegistry::new(test_addr(8080), test_config());
+        let peer_addr = test_addr(8081);
+        let peer_id = crate::KeyPair::new_for_testing("disconnect-handler-test").peer_id();
+
+        // Seed peer mapping so handle_peer_connection_failure resolves peer_id by addr.
+        registry
+            .connection_pool
+            .addr_to_peer_id
+            .insert(peer_addr, peer_id.clone());
+        registry
+            .connection_pool
+            .peer_id_to_addr
+            .insert(peer_id.clone(), peer_addr);
+
+        let (tx, rx) = oneshot::channel();
+        registry
+            .set_peer_disconnect_handler(Arc::new(TestHandler {
+                tx: tokio::sync::Mutex::new(Some(tx)),
+            }))
+            .await;
+
+        registry.handle_peer_connection_failure(peer_addr).await.unwrap();
+
+        let (got_addr, got_peer_id) =
+            tokio::time::timeout(Duration::from_secs(1), rx).await.unwrap().unwrap();
+        assert_eq!(got_addr, peer_addr);
+        assert_eq!(got_peer_id, Some(peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_handle_peer_connection_failure_invokes_disconnect_handler_without_peer_id_when_unknown() {
+        use crate::registry::PeerDisconnectHandler;
+        use futures::future::BoxFuture;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use tokio::sync::oneshot;
+
+        struct TestHandler {
+            tx: tokio::sync::Mutex<Option<oneshot::Sender<(SocketAddr, Option<crate::PeerId>)>>>,
+        }
+
+        impl PeerDisconnectHandler for TestHandler {
+            fn handle_peer_disconnect(
+                &self,
+                peer_addr: SocketAddr,
+                peer_id: Option<crate::PeerId>,
+            ) -> BoxFuture<'_, ()> {
+                Box::pin(async move {
+                    if let Some(tx) = self.tx.lock().await.take() {
+                        let _ = tx.send((peer_addr, peer_id));
+                    }
+                })
+            }
+        }
+
+        let registry = GossipRegistry::new(test_addr(8080), test_config());
+        let peer_addr = test_addr(8081);
+
+        let (tx, rx) = oneshot::channel();
+        registry
+            .set_peer_disconnect_handler(Arc::new(TestHandler {
+                tx: tokio::sync::Mutex::new(Some(tx)),
+            }))
+            .await;
+
+        registry.handle_peer_connection_failure(peer_addr).await.unwrap();
+
+        let (got_addr, got_peer_id) =
+            tokio::time::timeout(Duration::from_secs(1), rx).await.unwrap().unwrap();
+        assert_eq!(got_addr, peer_addr);
+        assert_eq!(got_peer_id, None);
+    }
+
+    #[tokio::test]
     async fn test_cleanup_stale_actors() {
         let mut config = test_config();
         config.actor_ttl = Duration::from_millis(50);
@@ -5750,6 +5887,130 @@ mod tests {
         let mut gossip_state = registry.gossip_state.lock().await;
         let addr_9001: SocketAddr = "127.0.0.1:9001".parse().unwrap();
         assert!(gossip_state.known_peers.get(&addr_9001).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_on_peer_list_gossip_does_not_ingest_private_addrs_when_disallowed() {
+        let config = GossipConfig {
+            enable_peer_discovery: true,
+            allow_loopback_discovery: true,
+            allow_private_discovery: false,
+            max_peers: 1,
+            ..test_config()
+        };
+
+        let registry = GossipRegistry::new("127.0.0.1:9000".parse().unwrap(), config);
+
+        let peers = vec![PeerInfoGossip {
+            address: "10.0.0.1:9001".to_string(),
+            peer_address: None,
+            node_id: None,
+            failures: 0,
+            last_attempt: 1,
+            last_success: 1,
+            dns_name: None,
+        }];
+
+        let _candidates = registry
+            .on_peer_list_gossip(peers, "127.0.0.1:9003", 1)
+            .await;
+
+        let mut gossip_state = registry.gossip_state.lock().await;
+        let private_addr: SocketAddr = "10.0.0.1:9001".parse().unwrap();
+        assert!(
+            gossip_state.known_peers.get(&private_addr).is_none(),
+            "private address should not be ingested into known_peers when allow_private_discovery=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_peer_dns_rejects_unsafe_resolution_results() {
+        // Use a non-loopback current address so it won't match localhost results.
+        let peer_addr: SocketAddr = "1.2.3.4:5000".parse().unwrap();
+
+        let config = GossipConfig {
+            allow_loopback_discovery: false, // security filter should reject localhost
+            ..test_config()
+        };
+
+        let registry = GossipRegistry::new("127.0.0.1:9000".parse().unwrap(), config);
+
+        {
+            let mut gossip_state = registry.gossip_state.lock().await;
+            gossip_state.peers.insert(
+                peer_addr,
+                PeerInfo {
+                    address: peer_addr,
+                    peer_address: None,
+                    node_id: None,
+                    dns_name: Some("localhost:5000".to_string()),
+                    failures: 0,
+                    last_attempt: 1,
+                    last_success: 1,
+                    last_sequence: 0,
+                    last_sent_sequence: 0,
+                    consecutive_deltas: 0,
+                    last_failure_time: None,
+                },
+            );
+        }
+
+        let updated = registry.refresh_peer_dns(peer_addr).await;
+        assert!(
+            updated.is_none(),
+            "expected DNS refresh to be rejected due to loopback resolution"
+        );
+
+        let gossip_state = registry.gossip_state.lock().await;
+        assert!(
+            gossip_state.peers.contains_key(&peer_addr),
+            "peer entry should not be migrated when DNS resolves only to unsafe addresses"
+        );
+        assert!(
+            !gossip_state.peers.contains_key(&"127.0.0.1:5000".parse().unwrap()),
+            "unsafe resolved address should not be added"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peers_snapshot_does_not_gossip_unsafe_known_peers() {
+        let config = GossipConfig {
+            allow_loopback_discovery: true,  // keep test simple; self is loopback
+            allow_private_discovery: false,  // private peers should be filtered out
+            enable_peer_discovery: true,
+            ..test_config()
+        };
+
+        let registry = GossipRegistry::new("127.0.0.1:9000".parse().unwrap(), config);
+
+        // Simulate attacker-controlled state injection: unsafe private address present in known_peers.
+        // Pre-fix, peers_snapshot() would include this and re-gossip it.
+        {
+            let mut gossip_state = registry.gossip_state.lock().await;
+            let private_addr: SocketAddr = "10.0.0.1:9001".parse().unwrap();
+            gossip_state.known_peers.put(
+                private_addr,
+                PeerInfo {
+                    address: private_addr,
+                    peer_address: None,
+                    node_id: None,
+                    dns_name: None,
+                    failures: 0,
+                    last_attempt: 1,
+                    last_success: 1,
+                    last_sequence: 0,
+                    last_sent_sequence: 0,
+                    consecutive_deltas: 0,
+                    last_failure_time: None,
+                },
+            );
+        }
+
+        let snapshot = registry.peers_snapshot().await;
+        assert!(
+            !snapshot.iter().any(|p| p.address == "10.0.0.1:9001"),
+            "unsafe private known_peers entries must not be re-gossiped"
+        );
     }
 
     #[test]

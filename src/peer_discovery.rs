@@ -6,7 +6,7 @@
 //! - Soft cap enforcement for connection limits
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use tracing::{debug, warn};
@@ -323,62 +323,12 @@ impl PeerDiscovery {
 
     /// Check if an address is safe to dial (SSRF/bogon filtering)
     pub fn is_safe_to_dial(&self, addr: &SocketAddr) -> bool {
-        match addr.ip() {
-            IpAddr::V4(ipv4) => {
-                // Check loopback (127.x.x.x)
-                if ipv4.is_loopback() && !self.config.allow_loopback_discovery {
-                    return false;
-                }
-
-                // Check link-local (169.254.x.x)
-                if ipv4.is_link_local() && !self.config.allow_link_local_discovery {
-                    return false;
-                }
-
-                // Check private (10.x, 172.16-31.x, 192.168.x)
-                if ipv4.is_private() && !self.config.allow_private_discovery {
-                    return false;
-                }
-
-                // Check unspecified (0.0.0.0)
-                if ipv4.is_unspecified() {
-                    return false;
-                }
-
-                // Check broadcast (255.255.255.255)
-                if ipv4.is_broadcast() {
-                    return false;
-                }
-
-                // Check documentation ranges (192.0.2.x, 198.51.100.x, 203.0.113.x)
-                if ipv4.is_documentation() {
-                    return false;
-                }
-
-                true
-            }
-            IpAddr::V6(ipv6) => self.is_safe_ipv6(&ipv6),
-        }
-    }
-
-    fn is_safe_ipv6(&self, ipv6: &Ipv6Addr) -> bool {
-        if ipv6.is_loopback() && !self.config.allow_loopback_discovery {
-            return false;
-        }
-
-        if ipv6.is_unspecified() {
-            return false;
-        }
-
-        if ipv6.is_unicast_link_local() && !self.config.allow_link_local_discovery {
-            return false;
-        }
-
-        if ipv6.is_unique_local() && !self.config.allow_private_discovery {
-            return false;
-        }
-
-        true
+        crate::net_security::is_safe_to_dial(
+            addr,
+            self.config.allow_private_discovery,
+            self.config.allow_loopback_discovery,
+            self.config.allow_link_local_discovery,
+        )
     }
 
     /// Calculate if we should retry connecting to a peer based on backoff
