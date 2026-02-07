@@ -2384,6 +2384,50 @@ mod framing_tests {
     }
 }
 
+#[cfg(test)]
+mod keepalive_apply_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tcp_keepalive_is_applied_on_connect_and_accept_paths() {
+        crate::net::test_reset_keepalive_apply_calls();
+
+        let a_keypair = crate::KeyPair::new_for_testing("keepalive-a");
+        let b_keypair = crate::KeyPair::new_for_testing("keepalive-b");
+
+        let a = GossipRegistryHandle::new_with_keypair(
+            "127.0.0.1:0".parse().unwrap(),
+            a_keypair,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let b = GossipRegistryHandle::new_with_keypair(
+            "127.0.0.1:0".parse().unwrap(),
+            b_keypair,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Establish a real TCP connection between peers.
+        a.add_peer(&b.registry.peer_id)
+            .await
+            .connect(&b.registry.bind_addr)
+            .await
+            .unwrap();
+
+        // We expect keepalive to be applied for:
+        // - the outbound connect stream (A -> B)
+        // - the inbound accepted stream (B accept loop)
+        //
+        // If the connection retries or reindexes, it may be applied more than twice.
+        let calls = crate::net::test_keepalive_apply_calls();
+        assert!(calls >= 2, "expected >=2 keepalive apply calls, got {calls}");
+    }
+}
+
 /// Zero-copy gossip message sender - eliminates bottlenecks in serialization and connection handling
 async fn send_gossip_message_zero_copy(
     mut task: GossipTask,
