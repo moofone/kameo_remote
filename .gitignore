@@ -1,10 +1,16 @@
 /target
+target-linux/
 Cargo.lock
 .direnv
 .envrc
 sprints/
 qa/
+# Keep specific specs in-tree, but ignore everything else under spec/.
 spec/
+!spec/
+spec/*
+!spec/QA.md
+!spec/TEST_IMPROVEMENTS_GOSSIP.md
 .DS_Store
 
 # Generated files and reports
@@ -21,4 +27,3 @@ benches/output/
 test_output*.log
 test_output*.txt
 validation_output*.log
-

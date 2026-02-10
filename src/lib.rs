@@ -5,6 +5,7 @@ pub mod framing;
 mod handle;
 mod handle_builder;
 mod net;
+mod net_security;
 pub mod handshake;
 pub mod peer_discovery;
 pub mod priority;
