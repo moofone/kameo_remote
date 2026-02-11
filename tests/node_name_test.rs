@@ -16,7 +16,7 @@ async fn wait_for_peer_mapping(
     let start = Instant::now();
     while start.elapsed() < timeout {
         let pool = &node.registry.connection_pool;
-        if pool.peer_id_to_addr.contains_key(peer_id) && pool.connection_count() >= 1 {
+        if pool.peer_id_to_addr.contains_sync(peer_id) && pool.connection_count() >= 1 {
             return true;
         }
         sleep(Duration::from_millis(50)).await;

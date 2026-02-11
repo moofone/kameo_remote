@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
 
@@ -178,45 +178,6 @@ async fn run_test_basic_ask_correlation() {
 
             info!("Request {} got correct response: {}", i, response_str);
         }
-    }
-
-    // Test 3: Test ask_with_reply_to for delegated reply scenarios
-    // This would be used when an actor needs to pass the ReplyTo to another actor
-    {
-        info!("Test 3: Testing ask_with_reply_to for delegation scenarios");
-        let conn = handle_a.lookup_address(addr_b).await.unwrap();
-
-        // Create a channel to simulate actor delegation
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, kameo_remote::ReplyTo)>(10);
-
-        // Spawn a task to simulate a delegated actor
-        let delegated_actor = tokio::spawn(async move {
-            while let Some((request, reply_to)) = rx.recv().await {
-                info!(
-                    "Delegated actor received request: {:?}",
-                    String::from_utf8_lossy(&request)
-                );
-                // In a real scenario, this would be another actor processing the request
-                let response = format!(
-                    "Delegated response for: {}",
-                    String::from_utf8_lossy(&request)
-                );
-                reply_to.reply(response.as_bytes()).await.unwrap();
-            }
-        });
-
-        // Send an ask but delegate the reply
-        let request = b"Delegated request";
-        let reply_to = conn.ask_with_reply_to(request).await.unwrap();
-
-        // Pass the ReplyTo to our "delegated actor"
-        tx.send((request.to_vec(), reply_to)).await.unwrap();
-
-        // Note: In this test setup, the delegated reply goes directly back through the same connection
-        // In a real distributed system, the ReplyTo handle could be serialized and sent to another node
-
-        drop(tx);
-        delegated_actor.await.unwrap();
     }
 
     // Shutdown

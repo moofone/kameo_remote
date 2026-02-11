@@ -1,4 +1,4 @@
-use kameo_remote::{wire_type, GossipConfig, GossipRegistryHandle, KeyPair};
+use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair, wire_type};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -41,7 +41,9 @@ wire_type!(Ping, "kameo.remote.PingTLS");
 #[test]
 fn test_typed_ask_over_tls_with_pooled_path() {
     run_typed_tls_test("typed-ask-pooled", || async {
-        std::env::set_var("KAMEO_REMOTE_TYPED_ECHO", "1");
+        unsafe {
+            std::env::set_var("KAMEO_REMOTE_TYPED_ECHO", "1");
+        }
 
         let addr_a: SocketAddr = "127.0.0.1:9011".parse().unwrap();
         let addr_b: SocketAddr = "127.0.0.1:9012".parse().unwrap();
@@ -76,7 +78,9 @@ fn test_typed_ask_over_tls_with_pooled_path() {
         handle_a.shutdown().await;
         handle_b.shutdown().await;
 
-        std::env::remove_var("KAMEO_REMOTE_TYPED_ECHO");
+        unsafe {
+            std::env::remove_var("KAMEO_REMOTE_TYPED_ECHO");
+        }
     });
 }
 
@@ -85,7 +89,9 @@ fn test_typed_tell_over_tls_with_pooled_path() {
     run_typed_tls_test("typed-tell-pooled", || async {
         use tokio::time::{Duration, Instant};
 
-        std::env::set_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE", "1");
+        unsafe {
+            std::env::set_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE", "1");
+        }
         kameo_remote::test_helpers::drain_raw_payloads();
 
         let addr_a: SocketAddr = "127.0.0.1:9013".parse().unwrap();
@@ -150,6 +156,8 @@ fn test_typed_tell_over_tls_with_pooled_path() {
         handle_a.shutdown().await;
         handle_b.shutdown().await;
 
-        std::env::remove_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE");
+        unsafe {
+            std::env::remove_var("KAMEO_REMOTE_TYPED_TELL_CAPTURE");
+        }
     });
 }

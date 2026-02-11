@@ -1,12 +1,13 @@
 pub mod aligned;
 pub mod config;
 pub mod connection_pool;
+pub mod dns;
 pub mod framing;
 mod handle;
 mod handle_builder;
+pub mod handshake;
 mod net;
 mod net_security;
-pub mod handshake;
 pub mod peer_discovery;
 pub mod priority;
 pub mod protocol;
@@ -20,9 +21,10 @@ pub mod test_helpers;
 pub mod tls;
 pub mod typed;
 
-use dashmap::DashMap;
+use arc_swap::ArcSwap;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::net::SocketAddr;
@@ -31,19 +33,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub use aligned::{AlignedBytes, AlignedBytesPool, PooledAlignedBuffer, PAYLOAD_ALIGNMENT};
+pub use aligned::{AlignedBytes, AlignedBytesPool, PAYLOAD_ALIGNMENT, PooledAlignedBuffer};
 pub use config::GossipConfig;
-pub use connection_pool::{ChannelId, DelegatedReplySender, LockFreeStreamHandle, StreamFrameType};
+pub use connection_pool::{ChannelId, LockFreeStreamHandle, PendingAsk, StreamFrameType};
+pub use dns::{DnsResolver, TokioDnsResolver};
 
 /// Maximum allowed size for streaming payloads (hard cap).
 pub const MAX_STREAM_SIZE: usize = 64 * 1024 * 1024; // 64MB
-pub use handle::GossipRegistryHandle;
+pub use handle::{GossipClient, GossipRegistryHandle};
 pub use handle_builder::GossipRegistryBuilder;
 pub use priority::{ConsistencyLevel, RegistrationPriority};
 pub use remote_actor_location::RemoteActorLocation;
 pub use remote_actor_ref::RemoteActorRef;
 pub use reply_to::{ReplyTo, TimeoutReplyTo};
-pub use typed::{decode_typed, encode_typed, WireEncode, WireType};
+pub use typed::{WireEncode, WireType, decode_typed, encode_typed};
 
 // =================== New Iroh-style types ===================
 
@@ -231,52 +234,71 @@ impl std::fmt::Debug for SecretKey {
 // =================== End new types ===================
 
 /// Vector clock for tracking causal relationships between events
-/// Thread-safe implementation using DashMap internally
 pub struct VectorClock {
-    // Internal thread-safe storage using DashMap for O(1) operations
-    clocks: Arc<DashMap<NodeId, u64>>,
+    // `ArcSwap` gives us lock-free reads with copy-on-write updates. This keeps
+    // VectorClock mutation APIs (`&self`) usable throughout the codebase while
+    // avoiding lock-based maps.
+    clocks: ArcSwap<BTreeMap<NodeId, u64>>,
 }
 
 impl Clone for VectorClock {
     fn clone(&self) -> Self {
-        // Deep clone - create a new DashMap with the same entries
-        let new_clocks = Arc::new(DashMap::new());
-        for entry in self.clocks.iter() {
-            new_clocks.insert(*entry.key(), *entry.value());
+        // Deep clone to preserve historical semantics: clones should not share
+        // internal mutation state.
+        let snapshot = self.clocks.load_full();
+        Self {
+            clocks: ArcSwap::from_pointee(snapshot.as_ref().clone()),
         }
-        Self { clocks: new_clocks }
     }
 }
 
 impl VectorClock {
     pub fn new() -> Self {
         Self {
-            clocks: Arc::new(DashMap::new()),
+            clocks: ArcSwap::from_pointee(BTreeMap::new()),
         }
     }
 
     pub fn with_node(node_id: NodeId) -> Self {
-        let clocks = Arc::new(DashMap::new());
-        clocks.insert(node_id, 0);
-        Self { clocks }
+        let mut map = BTreeMap::new();
+        map.insert(node_id, 0);
+        Self {
+            clocks: ArcSwap::from_pointee(map),
+        }
     }
 
-    /// Increment the clock for a specific node (thread-safe)
+    /// Increment the clock for a specific node.
     pub fn increment(&self, node_id: NodeId) {
-        self.clocks
-            .entry(node_id)
-            .and_modify(|v| *v = v.saturating_add(1))
-            .or_insert(1);
+        // Copy-on-write update: clone the small map and CAS it in.
+        loop {
+            let current = self.clocks.load();
+            let mut next = (**current).clone();
+            let entry = next.entry(node_id).or_insert(0);
+            *entry = entry.saturating_add(1);
+
+            let swapped = self.clocks.compare_and_swap(&*current, Arc::new(next));
+            if Arc::ptr_eq(&swapped, &current) {
+                break;
+            }
+        }
     }
 
-    /// Merge with another vector clock (thread-safe)
+    /// Merge with another vector clock.
     pub fn merge(&self, other: &VectorClock) {
-        for entry in other.clocks.iter() {
-            let (other_node, other_clock) = entry.pair();
-            self.clocks
-                .entry(*other_node)
-                .and_modify(|v| *v = (*v).max(*other_clock))
-                .or_insert(*other_clock);
+        let other_snapshot = other.clocks.load();
+        loop {
+            let current = self.clocks.load();
+            let mut next = (**current).clone();
+
+            for (other_node, other_clock) in other_snapshot.iter() {
+                let entry = next.entry(*other_node).or_insert(0);
+                *entry = (*entry).max(*other_clock);
+            }
+
+            let swapped = self.clocks.compare_and_swap(&*current, Arc::new(next));
+            if Arc::ptr_eq(&swapped, &current) {
+                break;
+            }
         }
     }
 
@@ -285,19 +307,17 @@ impl VectorClock {
         let mut self_greater = false;
         let mut other_greater = false;
 
-        // Collect all node IDs from both clocks
-        let mut all_nodes = std::collections::HashSet::new();
-        for entry in self.clocks.iter() {
-            all_nodes.insert(*entry.key());
-        }
-        for entry in other.clocks.iter() {
-            all_nodes.insert(*entry.key());
-        }
+        let self_snapshot = self.clocks.load();
+        let other_snapshot = other.clocks.load();
 
-        // Compare clock values for each node
+        // Collect all node IDs from both clocks.
+        let mut all_nodes = std::collections::BTreeSet::new();
+        all_nodes.extend(self_snapshot.keys().copied());
+        all_nodes.extend(other_snapshot.keys().copied());
+
         for node_id in all_nodes {
-            let self_clock = self.clocks.get(&node_id).map(|v| *v).unwrap_or(0);
-            let other_clock = other.clocks.get(&node_id).map(|v| *v).unwrap_or(0);
+            let self_clock = self_snapshot.get(&node_id).copied().unwrap_or(0);
+            let other_clock = other_snapshot.get(&node_id).copied().unwrap_or(0);
 
             match self_clock.cmp(&other_clock) {
                 std::cmp::Ordering::Greater => self_greater = true,
@@ -316,67 +336,80 @@ impl VectorClock {
 
     /// Garbage collect entries for nodes not seen recently (thread-safe)
     pub fn gc_old_nodes(&self, active_nodes: &std::collections::HashSet<NodeId>) {
-        self.clocks
-            .retain(|node_id, _| active_nodes.contains(node_id));
+        loop {
+            let current = self.clocks.load();
+            if current.is_empty() {
+                break;
+            }
+
+            let mut next = (**current).clone();
+            next.retain(|node_id, _| active_nodes.contains(node_id));
+
+            let swapped = self.clocks.compare_and_swap(&*current, Arc::new(next));
+            if Arc::ptr_eq(&swapped, &current) {
+                break;
+            }
+        }
     }
 
     /// Get the number of entries in the vector clock
     pub fn len(&self) -> usize {
-        self.clocks.len()
+        self.clocks.load().len()
     }
 
     /// Check if the vector clock is empty
     pub fn is_empty(&self) -> bool {
-        self.clocks.is_empty()
+        self.clocks.load().is_empty()
     }
 
     /// Compact the vector clock if it exceeds the maximum size (thread-safe)
     pub fn compact(&self, max_size: usize) {
-        if self.clocks.len() <= max_size {
-            return;
-        }
+        loop {
+            let current = self.clocks.load();
+            if current.len() <= max_size {
+                break;
+            }
 
-        // Collect all entries and sort by clock value
-        let mut entries: Vec<(NodeId, u64)> = self
-            .clocks
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+            // Collect all entries and sort by clock value desc (drop small entries first).
+            let mut entries: Vec<(NodeId, u64)> = current.iter().map(|(k, v)| (*k, *v)).collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.truncate(max_size);
 
-        // Keep only the top max_size entries
-        entries.truncate(max_size);
+            let mut next = BTreeMap::new();
+            for (node_id, clock) in entries {
+                next.insert(node_id, clock);
+            }
 
-        // Clear and rebuild the map
-        self.clocks.clear();
-        for (node_id, clock) in entries {
-            self.clocks.insert(node_id, clock);
+            let swapped = self.clocks.compare_and_swap(&*current, Arc::new(next));
+            if Arc::ptr_eq(&swapped, &current) {
+                break;
+            }
         }
     }
 
     /// Convert to a sorted Vec for serialization
     fn to_vec(&self) -> Vec<(NodeId, u64)> {
-        let mut vec: Vec<(NodeId, u64)> = self
-            .clocks
+        self.clocks
+            .load()
             .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect();
-        vec.sort_by_key(|(node_id, _)| *node_id);
-        vec
+            .map(|(node_id, clock)| (*node_id, *clock))
+            .collect()
     }
 
     /// Create from a Vec (used in deserialization)
     fn from_vec(vec: Vec<(NodeId, u64)>) -> Self {
-        let clocks = Arc::new(DashMap::new());
+        let mut clocks = BTreeMap::new();
         for (node_id, clock) in vec {
             clocks.insert(node_id, clock);
         }
-        Self { clocks }
+        Self {
+            clocks: ArcSwap::from_pointee(clocks),
+        }
     }
 
     /// Get the clock value for a specific node
     pub fn get(&self, node_id: &NodeId) -> u64 {
-        self.clocks.get(node_id).map(|v| *v).unwrap_or(0)
+        self.clocks.load().get(node_id).copied().unwrap_or(0)
     }
 
     /// Check if this vector clock happened before another
@@ -396,12 +429,12 @@ impl VectorClock {
 
     /// Get all nodes referenced in this vector clock
     pub fn get_nodes(&self) -> std::collections::HashSet<NodeId> {
-        self.clocks.iter().map(|entry| *entry.key()).collect()
+        self.clocks.load().keys().copied().collect()
     }
 
     /// Check if this vector clock is "empty" (only has zero entries)
     pub fn is_effectively_empty(&self) -> bool {
-        self.clocks.iter().all(|entry| *entry.value() == 0)
+        self.clocks.load().values().all(|v| *v == 0)
     }
 }
 
@@ -712,7 +745,9 @@ impl Peer {
         // First configure the address for this peer
         {
             let pool = &self.registry.connection_pool;
-            pool.peer_id_to_addr.insert(self.peer_id.clone(), *addr);
+            let _ = pool
+                .peer_id_to_addr
+                .upsert_sync(self.peer_id.clone(), *addr);
             pool.reindex_connection_addr(&self.peer_id, *addr);
         }
 
@@ -746,6 +781,7 @@ impl Peer {
                     last_sent_sequence: 0,
                     consecutive_deltas: 0,
                     last_failure_time: None,
+                    last_dns_refresh_attempt: None,
                 },
             );
             let peers_after = gossip_state.peers.len();
@@ -922,10 +958,7 @@ impl Peer {
             conn.set_state(crate::connection_pool::ConnectionState::Disconnected);
 
             // Get the peer address for mark_disconnected
-            let peer_addr = pool
-                .peer_id_to_addr
-                .get(&self.peer_id)
-                .map(|addr| *addr.value());
+            let peer_addr = pool.peer_id_to_addr.read_sync(&self.peer_id, |_, v| *v);
             if let Some(addr) = peer_addr {
                 pool.mark_disconnected(addr);
             }

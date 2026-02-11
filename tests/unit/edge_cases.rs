@@ -272,11 +272,11 @@ async fn test_registry_time_edge_cases() {
     let actor_name = "remote_actor".to_string();
     let actor_addr = "127.0.0.1:9001".parse().unwrap();
     let location = create_test_actor_location(actor_addr);
-    
-    {
-        let mut actor_state = registry.actor_state.write().await;
-        actor_state.known_actors.insert(actor_name.clone(), location);
-    }
+
+    let _ = registry
+        .actor_state
+        .known_actors
+        .upsert_sync(actor_name.clone(), location);
     
     // Should find it immediately
     let found = registry.lookup_actor(&actor_name).await;

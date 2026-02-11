@@ -1,28 +1,33 @@
+use arc_swap::{ArcSwapOption, ArcSwapWeak};
 use bytes::{Buf, BufMut};
-use futures::task::AtomicWaker;
 use futures::FutureExt;
+use futures::task::AtomicWaker;
+use scc::HashMap as SccHashMap;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::future::Future;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::task::{Context, Poll};
-use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, time::Duration, time::Instant};
+use std::{
+    collections::HashMap, net::SocketAddr, pin::Pin, sync::Arc, time::Duration, time::Instant,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use tokio::task::JoinHandle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, error, info, trace, warn};
-use std::sync::OnceLock;
 
 #[cfg(any(test, feature = "test-helpers", debug_assertions))]
 use sha2::{Digest, Sha256};
 
 use crate::{
-    current_timestamp, framing,
-    registry::{resolve_peer_addr, GossipRegistry, RegistryMessage},
-    GossipError, Result,
+    GossipError, Result, current_timestamp, framing,
+    registry::{GossipRegistry, RegistryMessage, resolve_peer_addr},
 };
 
 // ==== SINGLE SOURCE OF TRUTH FOR ALL BUFFER SIZES ====
@@ -150,9 +155,8 @@ async fn write_chunks_batched<S: AsyncWrite + Unpin>(
     if idx > 0 {
         let batch = &chunks[batch_start..batch_start + idx];
         let batch_total: usize = batch.iter().map(|c| c.len()).sum();
-        let slices = unsafe {
-            std::slice::from_raw_parts(iov.as_ptr() as *const std::io::IoSlice<'_>, idx)
-        };
+        let slices =
+            unsafe { std::slice::from_raw_parts(iov.as_ptr() as *const std::io::IoSlice<'_>, idx) };
         let n = stream.write_vectored(slices).await?;
         total += n;
         if n < batch_total {
@@ -191,8 +195,9 @@ where
     // Larger iov batches reduce syscalls under heavy ActorAsk load. 256 is well below typical
     // platform limits (often 1024) while keeping stack scratch buffers modest.
     const MAX_IOV: usize = 256;
-    let mut iov: [MaybeUninit<std::io::IoSlice<'_>>; MAX_IOV] =
-        unsafe { MaybeUninit::<[MaybeUninit<std::io::IoSlice<'_>>; MAX_IOV]>::uninit().assume_init() };
+    let mut iov: [MaybeUninit<std::io::IoSlice<'_>>; MAX_IOV] = unsafe {
+        MaybeUninit::<[MaybeUninit<std::io::IoSlice<'_>>; MAX_IOV]>::uninit().assume_init()
+    };
     // Scratch headers for this writev attempt. We regenerate headers from (corr_id, payload_len)
     // so we don't need to store per-response headers on the heap.
     let mut scratch_headers: [MaybeUninit<[u8; HDR_LEN]>; MAX_IOV] =
@@ -247,7 +252,10 @@ where
             std::slice::from_raw_parts(iov.as_ptr() as *const std::io::IoSlice<'_>, iov_len)
         };
 
-        let n = stream.write_vectored(slices).await.map_err(GossipError::Network)?;
+        let n = stream
+            .write_vectored(slices)
+            .await
+            .map_err(GossipError::Network)?;
         if n == 0 {
             return Err(GossipError::Network(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
@@ -338,8 +346,8 @@ impl IoPerfCounters {
 /// - For reconnection: let old tasks complete naturally, then set new handles
 #[derive(Debug, Default)]
 pub struct TaskTracker {
-    writer_handle: Option<JoinHandle<()>>,
-    reader_handle: Option<JoinHandle<()>>,
+    writer: ArcSwapOption<AbortHandle>,
+    reader: ArcSwapOption<AbortHandle>,
 }
 
 impl TaskTracker {
@@ -349,27 +357,25 @@ impl TaskTracker {
     }
 
     /// Set writer handle. Only call for NEW connections, not reconnects.
-    pub fn set_writer(&mut self, handle: JoinHandle<()>) {
-        if let Some(old) = self.writer_handle.take() {
+    pub fn set_writer(&self, handle: AbortHandle) {
+        if let Some(old) = self.writer.swap(Some(Arc::new(handle))) {
             old.abort();
         }
-        self.writer_handle = Some(handle);
     }
 
     /// Set reader handle. Only call for NEW connections, not reconnects.
-    pub fn set_reader(&mut self, handle: JoinHandle<()>) {
-        if let Some(old) = self.reader_handle.take() {
+    pub fn set_reader(&self, handle: AbortHandle) {
+        if let Some(old) = self.reader.swap(Some(Arc::new(handle))) {
             old.abort();
         }
-        self.reader_handle = Some(handle);
     }
 
     /// Abort all tracked tasks.
-    pub fn abort_all(&mut self) {
-        if let Some(h) = self.writer_handle.take() {
+    pub fn abort_all(&self) {
+        if let Some(h) = self.writer.swap(None) {
             h.abort();
         }
-        if let Some(h) = self.reader_handle.take() {
+        if let Some(h) = self.reader.swap(None) {
             h.abort();
         }
     }
@@ -444,6 +450,55 @@ impl WriteQueue {
     }
 
     fn pop(&self) -> Option<WriteCommand> {
+        self.queue.pop()
+    }
+
+    fn notify_space(&self) {
+        self.space_notify.notify_one();
+    }
+}
+
+struct StreamingQueue {
+    queue: crossbeam_queue::ArrayQueue<StreamingCommand>,
+    data_notify: Notify,
+    space_notify: Notify,
+}
+
+impl StreamingQueue {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            queue: crossbeam_queue::ArrayQueue::new(capacity.max(64)),
+            data_notify: Notify::new(),
+            space_notify: Notify::new(),
+        })
+    }
+
+    fn try_push(&self, command: StreamingCommand) -> std::result::Result<(), StreamingCommand> {
+        match self.queue.push(command) {
+            Ok(()) => {
+                self.data_notify.notify_one();
+                Ok(())
+            }
+            Err(cmd) => Err(cmd),
+        }
+    }
+
+    async fn push(&self, mut command: StreamingCommand) -> Result<()> {
+        loop {
+            match self.queue.push(command) {
+                Ok(()) => {
+                    self.data_notify.notify_one();
+                    return Ok(());
+                }
+                Err(cmd) => {
+                    command = cmd;
+                    self.space_notify.notified().await;
+                }
+            }
+        }
+    }
+
+    fn pop(&self) -> Option<StreamingCommand> {
         self.queue.pop()
     }
 
@@ -529,12 +584,10 @@ impl BufferConfig {
         self
     }
 
-
     /// Capacity of the write queue used by the lock-free writer task.
     pub fn write_queue_capacity(&self) -> usize {
         self.write_queue_capacity
     }
-
 
     /// Calculate the streaming threshold based on buffer size
     ///
@@ -666,9 +719,7 @@ pub struct LockFreeConnection {
     /// addr_to_peer_id mapping has been migrated to bind address (ephemeral port removed)
     pub(crate) embedded_peer_id: Option<crate::PeerId>,
     /// Task tracker for background tasks (writer and reader)
-    /// Uses parking_lot::Mutex for better performance than std::sync::Mutex
-    /// (no poisoning overhead, faster lock acquisition)
-    pub task_tracker: parking_lot::Mutex<TaskTracker>,
+    pub task_tracker: TaskTracker,
 }
 
 impl Clone for LockFreeConnection {
@@ -687,7 +738,7 @@ impl Clone for LockFreeConnection {
             // Note: TaskTracker is not cloned - each clone gets a fresh tracker
             // This is intentional: clones are typically used for metadata snapshots,
             // not to transfer task ownership
-            task_tracker: parking_lot::Mutex::new(TaskTracker::new()),
+            task_tracker: TaskTracker::new(),
         }
     }
 }
@@ -705,7 +756,7 @@ impl LockFreeConnection {
             correlation: Some(CorrelationTracker::new()),
             direction,
             embedded_peer_id: None,
-            task_tracker: parking_lot::Mutex::new(TaskTracker::new()),
+            task_tracker: TaskTracker::new(),
         }
     }
 
@@ -724,7 +775,7 @@ impl LockFreeConnection {
         if let Some(correlation) = self.correlation.as_ref() {
             correlation.cancel_all();
         }
-        self.task_tracker.lock().abort_all();
+        self.task_tracker.abort_all();
     }
 
     pub fn get_state(&self) -> ConnectionState {
@@ -797,7 +848,7 @@ pub enum WritePayload {
     HeaderInlinePooled {
         header: [u8; 16],
         header_len: u8,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
     },
@@ -876,75 +927,41 @@ impl std::fmt::Debug for WritePayload {
     }
 }
 
-// Safety: WritePayload is only moved across threads; it is not accessed concurrently.
-unsafe impl Send for WritePayload {}
-unsafe impl Sync for WritePayload {}
+// `WritePayload` is passed across tasks/threads by move.
+// Do not add `Sync` here: the `Buf` variant is not required to be `Sync`.
 
 /// Memory pool for zero-allocation message handling
 #[derive(Debug)]
 pub struct MessageBufferPool {
-    pool: Vec<Vec<u8>>,
-    pool_size: usize,
-    available_buffers: AtomicUsize,
-    next_buffer_idx: AtomicUsize,
+    queue: crossbeam_queue::ArrayQueue<Vec<u8>>,
 }
 
 impl MessageBufferPool {
     pub fn new(pool_size: usize, buffer_size: usize) -> Self {
-        let mut pool = Vec::with_capacity(pool_size);
+        let pool_size = pool_size.max(1);
+        let queue = crossbeam_queue::ArrayQueue::new(pool_size);
         for _ in 0..pool_size {
-            pool.push(Vec::with_capacity(buffer_size));
+            let _ = queue.push(Vec::with_capacity(buffer_size));
         }
-
-        Self {
-            pool,
-            pool_size,
-            available_buffers: AtomicUsize::new(pool_size),
-            next_buffer_idx: AtomicUsize::new(0),
-        }
+        Self { queue }
     }
 
     /// Get a buffer from the pool - returns None if pool is empty
     pub fn get_buffer(&self) -> Option<Vec<u8>> {
-        let available = self.available_buffers.load(Ordering::Acquire);
-        if available == 0 {
-            return None;
-        }
-
-        let idx = self.next_buffer_idx.fetch_add(1, Ordering::AcqRel) % self.pool_size;
-
-        // Try to claim this buffer
-        if self.available_buffers.fetch_sub(1, Ordering::AcqRel) > 0 {
-            // We successfully claimed a buffer
-            unsafe {
-                let buffer_ptr = self.pool.as_ptr().add(idx) as *mut Vec<u8>;
-                let mut buffer = std::ptr::replace(buffer_ptr, Vec::new());
-                buffer.clear(); // Reset length but keep capacity
-                Some(buffer)
-            }
-        } else {
-            // No buffers available, restore count
-            self.available_buffers.fetch_add(1, Ordering::Release);
-            None
-        }
+        self.queue.pop().map(|mut buffer| {
+            buffer.clear();
+            buffer
+        })
     }
 
     /// Return a buffer to the pool
     pub fn return_buffer(&self, mut buffer: Vec<u8>) {
         buffer.clear(); // Reset length but keep capacity
-
-        let idx = self.next_buffer_idx.fetch_add(1, Ordering::AcqRel) % self.pool_size;
-
-        unsafe {
-            let buffer_ptr = self.pool.as_ptr().add(idx) as *mut Vec<u8>;
-            *buffer_ptr = buffer;
-        }
-
-        self.available_buffers.fetch_add(1, Ordering::Release);
+        let _ = self.queue.push(buffer);
     }
 
     pub fn available_count(&self) -> usize {
-        self.available_buffers.load(Ordering::Acquire)
+        self.queue.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1074,11 +1091,7 @@ struct ReadPollResult {
     progressed: bool,
 }
 
-fn poll_read_once<S>(
-    stream: &mut S,
-    cx: &mut Context<'_>,
-    buf: &mut [u8],
-) -> Poll<Result<usize>>
+fn poll_read_once<S>(stream: &mut S, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize>>
 where
     S: AsyncRead + Unpin,
 {
@@ -1099,124 +1112,117 @@ async fn read_message_step_poll<S>(
 where
     S: AsyncRead + Unpin,
 {
-    futures::future::poll_fn(|cx| {
-        match state {
-            ReadState::ReadLen { buf, read } => {
-                let target = &mut buf[*read..];
-                if target.is_empty() {
-                    return Poll::Ready(Ok(ReadPollResult {
-                        result: None,
-                        progressed: false,
-                    }));
-                }
-                match poll_read_once(stream, cx, target) {
-                    Poll::Pending => {
-                        if block_on_pending {
-                            Poll::Pending
-                        } else {
-                            Poll::Ready(Ok(ReadPollResult {
-                                result: None,
-                                progressed: false,
-                            }))
-                        }
-                    }
-                    Poll::Ready(Ok(0)) => Poll::Ready(Err(GossipError::Network(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "connection closed",
-                    )))),
-                    Poll::Ready(Ok(n)) => {
-                        *read += n;
-                        if *read < crate::framing::LENGTH_PREFIX_LEN {
-                            return Poll::Ready(Ok(ReadPollResult {
-                                result: None,
-                                progressed: true,
-                            }));
-                        }
-
-                        let msg_len = u32::from_be_bytes(*buf) as usize;
-                        if msg_len > ctx.max_message_size {
-                            return Poll::Ready(Err(GossipError::MessageTooLarge {
-                                size: msg_len,
-                                max: ctx.max_message_size,
-                            }));
-                        }
-
-                        let total_len = msg_len + crate::framing::LENGTH_PREFIX_LEN;
-                        let mut buffer = crate::PooledAlignedBuffer::with_len(
-                            total_len,
-                            ctx.aligned_pool.clone(),
-                        );
-                        buffer.as_mut_slice()[..crate::framing::LENGTH_PREFIX_LEN]
-                            .copy_from_slice(buf);
-
-                        *state = ReadState::ReadBody {
-                            msg_len,
-                            buffer,
-                            read: 0,
-                        };
+    futures::future::poll_fn(|cx| match state {
+        ReadState::ReadLen { buf, read } => {
+            let target = &mut buf[*read..];
+            if target.is_empty() {
+                return Poll::Ready(Ok(ReadPollResult {
+                    result: None,
+                    progressed: false,
+                }));
+            }
+            match poll_read_once(stream, cx, target) {
+                Poll::Pending => {
+                    if block_on_pending {
+                        Poll::Pending
+                    } else {
                         Poll::Ready(Ok(ReadPollResult {
                             result: None,
-                            progressed: true,
+                            progressed: false,
                         }))
                     }
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 }
-            }
-            ReadState::ReadBody {
-                msg_len,
-                buffer,
-                read,
-            } => {
-                let offset = crate::framing::LENGTH_PREFIX_LEN + *read;
-                let end = crate::framing::LENGTH_PREFIX_LEN + *msg_len;
-                let target = &mut buffer.as_mut_slice()[offset..end];
-                if target.is_empty() {
-                    return Poll::Ready(Ok(ReadPollResult {
+                Poll::Ready(Ok(0)) => Poll::Ready(Err(GossipError::Network(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                )))),
+                Poll::Ready(Ok(n)) => {
+                    *read += n;
+                    if *read < crate::framing::LENGTH_PREFIX_LEN {
+                        return Poll::Ready(Ok(ReadPollResult {
+                            result: None,
+                            progressed: true,
+                        }));
+                    }
+
+                    let msg_len = u32::from_be_bytes(*buf) as usize;
+                    if msg_len > ctx.max_message_size {
+                        return Poll::Ready(Err(GossipError::MessageTooLarge {
+                            size: msg_len,
+                            max: ctx.max_message_size,
+                        }));
+                    }
+
+                    let total_len = msg_len + crate::framing::LENGTH_PREFIX_LEN;
+                    let mut buffer =
+                        crate::PooledAlignedBuffer::with_len(total_len, ctx.aligned_pool.clone());
+                    buffer.as_mut_slice()[..crate::framing::LENGTH_PREFIX_LEN].copy_from_slice(buf);
+
+                    *state = ReadState::ReadBody {
+                        msg_len,
+                        buffer,
+                        read: 0,
+                    };
+                    Poll::Ready(Ok(ReadPollResult {
                         result: None,
-                        progressed: false,
-                    }));
+                        progressed: true,
+                    }))
                 }
-                match poll_read_once(stream, cx, target) {
-                    Poll::Pending => {
-                        if block_on_pending {
-                            Poll::Pending
-                        } else {
-                            Poll::Ready(Ok(ReadPollResult {
-                                result: None,
-                                progressed: false,
-                            }))
-                        }
-                    }
-                    Poll::Ready(Ok(0)) => Poll::Ready(Err(GossipError::Network(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "connection closed",
-                    )))),
-                    Poll::Ready(Ok(n)) => {
-                        *read += n;
-                        if *read < *msg_len {
-                            return Poll::Ready(Ok(ReadPollResult {
-                                result: None,
-                                progressed: true,
-                            }));
-                        }
-
-                        let (msg_len, buffer) = match std::mem::replace(state, ReadState::new()) {
-                            ReadState::ReadBody {
-                                msg_len, buffer, ..
-                            } => (msg_len, buffer),
-                            _ => unreachable!("read state must be ReadBody when complete"),
-                        };
-
-                        let result = crate::handle::parse_message_from_pooled_buffer(
-                            buffer, msg_len,
-                        )?;
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            }
+        }
+        ReadState::ReadBody {
+            msg_len,
+            buffer,
+            read,
+        } => {
+            let offset = crate::framing::LENGTH_PREFIX_LEN + *read;
+            let end = crate::framing::LENGTH_PREFIX_LEN + *msg_len;
+            let target = &mut buffer.as_mut_slice()[offset..end];
+            if target.is_empty() {
+                return Poll::Ready(Ok(ReadPollResult {
+                    result: None,
+                    progressed: false,
+                }));
+            }
+            match poll_read_once(stream, cx, target) {
+                Poll::Pending => {
+                    if block_on_pending {
+                        Poll::Pending
+                    } else {
                         Poll::Ready(Ok(ReadPollResult {
-                            result: Some(result),
-                            progressed: true,
+                            result: None,
+                            progressed: false,
                         }))
                     }
-                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 }
+                Poll::Ready(Ok(0)) => Poll::Ready(Err(GossipError::Network(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                )))),
+                Poll::Ready(Ok(n)) => {
+                    *read += n;
+                    if *read < *msg_len {
+                        return Poll::Ready(Ok(ReadPollResult {
+                            result: None,
+                            progressed: true,
+                        }));
+                    }
+
+                    let (msg_len, buffer) = match std::mem::replace(state, ReadState::new()) {
+                        ReadState::ReadBody {
+                            msg_len, buffer, ..
+                        } => (msg_len, buffer),
+                        _ => unreachable!("read state must be ReadBody when complete"),
+                    };
+
+                    let result = crate::handle::parse_message_from_pooled_buffer(buffer, msg_len)?;
+                    Poll::Ready(Ok(ReadPollResult {
+                        result: Some(result),
+                        progressed: true,
+                    }))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             }
         }
     })
@@ -1274,10 +1280,8 @@ where
                     }
 
                     let total_len = msg_len + crate::framing::LENGTH_PREFIX_LEN;
-                    let mut buffer = crate::PooledAlignedBuffer::with_len(
-                        total_len,
-                        ctx.aligned_pool.clone(),
-                    );
+                    let mut buffer =
+                        crate::PooledAlignedBuffer::with_len(total_len, ctx.aligned_pool.clone());
                     buffer.as_mut_slice()[..crate::framing::LENGTH_PREFIX_LEN].copy_from_slice(buf);
 
                     *state = ReadState::ReadBody {
@@ -1332,8 +1336,7 @@ where
                         _ => unreachable!("read state must be ReadBody when complete"),
                     };
 
-                    let result =
-                        crate::handle::parse_message_from_pooled_buffer(buffer, msg_len)?;
+                    let result = crate::handle::parse_message_from_pooled_buffer(buffer, msg_len)?;
                     Poll::Ready(Ok(ReadPollResult {
                         result: Some(result),
                         progressed: true,
@@ -1366,7 +1369,10 @@ where
         return Ok(());
     }
 
-    let slices = [std::io::IoSlice::new(header), std::io::IoSlice::new(payload)];
+    let slices = [
+        std::io::IoSlice::new(header),
+        std::io::IoSlice::new(payload),
+    ];
     match stream.write_vectored(&slices).await {
         Ok(n) if n == header.len() + payload.len() => {
             bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -1398,10 +1404,8 @@ where
                         .write_all(&payload[payload_offset..])
                         .await
                         .map_err(GossipError::Network)?;
-                    bytes_written_counter.fetch_add(
-                        payload.len() - payload_offset,
-                        Ordering::Relaxed,
-                    );
+                    bytes_written_counter
+                        .fetch_add(payload.len() - payload_offset, Ordering::Relaxed);
                     *bytes_since_flush += payload.len() - payload_offset;
                 }
             }
@@ -1536,7 +1540,8 @@ where
     ) -> bytes::Bytes {
         // Message format: [length:4][type:1][correlation_id:2][reserved:9][header:36]
         let inner_size = 12 + crate::StreamHeader::SERIALIZED_SIZE + chunk_len;
-        let mut message = bytes::BytesMut::with_capacity(4 + 12 + crate::StreamHeader::SERIALIZED_SIZE);
+        let mut message =
+            bytes::BytesMut::with_capacity(4 + 12 + crate::StreamHeader::SERIALIZED_SIZE);
 
         message.put_u32(inner_size as u32);
         message.put_u8(msg_type as u8);
@@ -1637,7 +1642,7 @@ async fn write_streaming_response_direct_pooled<S>(
     bytes_since_flush: &mut usize,
     correlation_id: u16,
     mut payload: crate::typed::PooledPayload,
-    prefix: Option<[u8; 8]>,
+    prefix: Option<[u8; 16]>,
     payload_len: usize,
     max_message_size: usize,
     schema_hash: Option<u64>,
@@ -1960,8 +1965,12 @@ where
                                     // Non-pooled non-hot-path variant: stream by converting to Bytes.
                                     let bytes = match other {
                                         crate::registry::ActorResponse::Bytes(b) => b,
-                                        crate::registry::ActorResponse::Aligned(b) => b.into_bytes(),
-                                        crate::registry::ActorResponse::Pooled { .. } => unreachable!(),
+                                        crate::registry::ActorResponse::Aligned(b) => {
+                                            b.into_bytes()
+                                        }
+                                        crate::registry::ActorResponse::Pooled { .. } => {
+                                            unreachable!()
+                                        }
                                     };
                                     write_streaming_response_direct(
                                         stream,
@@ -1980,17 +1989,17 @@ where
                                 }
                             } else {
                                 write_actor_response_direct(
-                                stream,
-                                bytes_written_counter,
-                                bytes_since_flush,
-                                corr_id,
-                                other,
-                            )
-                            .await?;
-                            if flush_each_actor_response() {
-                                stream.flush().await.map_err(GossipError::Network)?;
-                                *bytes_since_flush = 0;
-                            }
+                                    stream,
+                                    bytes_written_counter,
+                                    bytes_since_flush,
+                                    corr_id,
+                                    other,
+                                )
+                                .await?;
+                                if flush_each_actor_response() {
+                                    stream.flush().await.map_err(GossipError::Network)?;
+                                    *bytes_since_flush = 0;
+                                }
                             }
                         }
                     }
@@ -2061,8 +2070,8 @@ pub struct LockFreeStreamHandle {
     streaming_active: Arc<AtomicBool>,
     /// Lock-free write queue for payload writes
     write_queue: Arc<WriteQueue>,
-    /// Channel to send streaming commands to background task
-    streaming_tx: mpsc::UnboundedSender<StreamingCommand>,
+    /// Bounded streaming command queue for background task.
+    streaming_queue: Arc<StreamingQueue>,
     /// Buffer configuration that determines sizes and thresholds
     buffer_config: BufferConfig,
     /// Max allowed frame payload size (msg_len, excluding 4-byte length prefix).
@@ -2113,7 +2122,7 @@ impl LockFreeStreamHandle {
 
         // Create lock-free queue for payload writes and channel for streaming commands
         let write_queue = WriteQueue::new(buffer_config.write_queue_capacity());
-        let (streaming_tx, streaming_rx) = mpsc::unbounded_channel();
+        let streaming_queue = StreamingQueue::new(buffer_config.write_queue_capacity());
 
         let max_message_size = read_context
             .as_ref()
@@ -2130,7 +2139,7 @@ impl LockFreeStreamHandle {
             let writer_addr = addr;
             let writer_channel_id = channel_id;
             let write_queue = write_queue.clone();
-            let streaming_rx = streaming_rx;
+            let streaming_queue = streaming_queue.clone();
 
             tokio::spawn(async move {
                 info!(
@@ -2145,7 +2154,7 @@ impl LockFreeStreamHandle {
                     flush_pending_for_task,
                     streaming_active_for_task,
                     write_queue,
-                    streaming_rx,
+                    streaming_queue,
                     read_context,
                     instance_id,
                     exit_flag_for_task,
@@ -2176,7 +2185,7 @@ impl LockFreeStreamHandle {
                 ask_permits,
                 streaming_active,
                 write_queue,
-                streaming_tx,
+                streaming_queue,
                 buffer_config,
                 max_message_size,
                 schema_hash,
@@ -2195,7 +2204,7 @@ impl LockFreeStreamHandle {
         flush_pending: Arc<AtomicBool>,
         streaming_active: Arc<AtomicBool>,
         write_queue: Arc<WriteQueue>,
-        mut streaming_rx: mpsc::UnboundedReceiver<StreamingCommand>,
+        streaming_queue: Arc<StreamingQueue>,
         read_context: Option<ReadContext>,
         instance_id: u64,
         exit_flag: Arc<AtomicBool>,
@@ -2281,7 +2290,8 @@ impl LockFreeStreamHandle {
                         let peer_id_hint = self.peer_id.clone();
                         tokio::spawn(async move {
                             let pool = &registry.connection_pool;
-                            let peer_id = peer_id_hint.or_else(|| pool.get_peer_id_by_addr(&peer_addr));
+                            let peer_id =
+                                peer_id_hint.or_else(|| pool.get_peer_id_by_addr(&peer_addr));
 
                             if let Some(peer_id) = peer_id {
                                 if let Some(current) = pool.get_connection_by_peer_id(&peer_id) {
@@ -2344,7 +2354,9 @@ impl LockFreeStreamHandle {
             None
         };
         let mut perf_last = Instant::now();
-        let perf_interval = perf.map(|_| IoPerfCounters::interval()).unwrap_or_else(|| Duration::from_secs(1));
+        let perf_interval = perf
+            .map(|_| IoPerfCounters::interval())
+            .unwrap_or_else(|| Duration::from_secs(1));
         if perf.is_some() {
             if let Some(ctx) = read_context.as_ref() {
                 info!(peer = %ctx.peer_addr, "IO PERF enabled");
@@ -2358,7 +2370,8 @@ impl LockFreeStreamHandle {
         // On tokio-rustls, direct `write_vectored` to the TLS stream tends to degenerate into
         // per-slice writes (effectively non-vectored), which destroys ActorAsk throughput.
         // `BufStream` coalesces writes efficiently and keeps the two-terminal benchmark fast.
-        let mut stream = tokio::io::BufStream::with_capacity(TCP_BUFFER_SIZE, TCP_BUFFER_SIZE, stream);
+        let mut stream =
+            tokio::io::BufStream::with_capacity(TCP_BUFFER_SIZE, TCP_BUFFER_SIZE, stream);
 
         // Larger batches for higher throughput (reduced syscalls)
         const OWNER_BATCH_SIZE: usize = 32;
@@ -2368,24 +2381,24 @@ impl LockFreeStreamHandle {
         let mut bytes_since_flush = 0;
         let mut last_flush = std::time::Instant::now();
 
-	        // Pre-allocate reusable buffers to avoid allocations in the hot loop
-	        let mut write_chunks: Vec<bytes::Bytes> = Vec::with_capacity(OWNER_BATCH_SIZE * 2);
-	        let mut permits: Vec<OwnedSemaphorePermit> = Vec::with_capacity(OWNER_BATCH_SIZE);
-	        let mut owner_batch: Vec<WriteCommand> = Vec::with_capacity(OWNER_BATCH_SIZE);
-	        let mut response_batch = ResponseBatch::new(READ_BATCH_LIMIT);
-	        let mut pending_cmd: Option<WriteCommand> = None;
-	        let mut read_state = read_context.as_ref().map(|_| ReadState::new());
+        // Pre-allocate reusable buffers to avoid allocations in the hot loop
+        let mut write_chunks: Vec<bytes::Bytes> = Vec::with_capacity(OWNER_BATCH_SIZE * 2);
+        let mut permits: Vec<OwnedSemaphorePermit> = Vec::with_capacity(OWNER_BATCH_SIZE);
+        let mut owner_batch: Vec<WriteCommand> = Vec::with_capacity(OWNER_BATCH_SIZE);
+        let mut response_batch = ResponseBatch::new(READ_BATCH_LIMIT);
+        let mut pending_cmd: Option<WriteCommand> = None;
+        let mut read_state = read_context.as_ref().map(|_| ReadState::new());
         let mut streaming_state = read_context
             .as_ref()
             .map(|_| crate::protocol::StreamingState::new());
         let mut last_cleanup = std::time::Instant::now();
 
-	        while !shutdown_signal.load(Ordering::Relaxed) {
-	            let mut total_bytes_written = 0;
-	            let mut did_work = false;
-	            response_batch.clear();
+        while !shutdown_signal.load(Ordering::Relaxed) {
+            let mut total_bytes_written = 0;
+            let mut did_work = false;
+            response_batch.clear();
 
-            while let Ok(cmd) = streaming_rx.try_recv() {
+            while let Some(cmd) = streaming_queue.pop() {
                 did_work = true;
                 match cmd {
                     StreamingCommand::WriteBytes(data) => match stream.write_all(&data).await {
@@ -2516,6 +2529,7 @@ impl LockFreeStreamHandle {
                         }
                     }
                 }
+                streaming_queue.notify_space();
             }
 
             if !streaming_active.load(Ordering::Acquire) {
@@ -2558,13 +2572,15 @@ impl LockFreeStreamHandle {
                                 payload,
                             } => {
                                 if !write_chunks.is_empty() {
-                                    let bytes_written =
-                                        match write_chunks_batched(&mut stream, &write_chunks)
-                                            .await
-                                        {
-                                            Ok(n) => n,
-                                            Err(_) => return,
-                                        };
+                                    let bytes_written = match write_chunks_batched(
+                                        &mut stream,
+                                        &write_chunks,
+                                    )
+                                    .await
+                                    {
+                                        Ok(n) => n,
+                                        Err(_) => return,
+                                    };
                                     bytes_written_counter
                                         .fetch_add(bytes_written, Ordering::Relaxed);
                                     total_bytes_written += bytes_written;
@@ -2590,7 +2606,9 @@ impl LockFreeStreamHandle {
                                         2
                                     };
 
-                                    match write_vectored_all(&mut stream, &slices[..slice_count]).await {
+                                    match write_vectored_all(&mut stream, &slices[..slice_count])
+                                        .await
+                                    {
                                         Ok(0) => break,
                                         Ok(n) => {
                                             bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -2618,13 +2636,15 @@ impl LockFreeStreamHandle {
                                 payload,
                             } => {
                                 if !write_chunks.is_empty() {
-                                    let bytes_written =
-                                        match write_chunks_batched(&mut stream, &write_chunks)
-                                            .await
-                                        {
-                                            Ok(n) => n,
-                                            Err(_) => return,
-                                        };
+                                    let bytes_written = match write_chunks_batched(
+                                        &mut stream,
+                                        &write_chunks,
+                                    )
+                                    .await
+                                    {
+                                        Ok(n) => n,
+                                        Err(_) => return,
+                                    };
                                     bytes_written_counter
                                         .fetch_add(bytes_written, Ordering::Relaxed);
                                     total_bytes_written += bytes_written;
@@ -2651,7 +2671,9 @@ impl LockFreeStreamHandle {
                                         2
                                     };
 
-                                    match write_vectored_all(&mut stream, &slices[..slice_count]).await {
+                                    match write_vectored_all(&mut stream, &slices[..slice_count])
+                                        .await
+                                    {
                                         Ok(0) => break,
                                         Ok(n) => {
                                             bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -2675,13 +2697,15 @@ impl LockFreeStreamHandle {
                             }
                             WritePayload::HeaderInline32 { header, payload } => {
                                 if !write_chunks.is_empty() {
-                                    let bytes_written =
-                                        match write_chunks_batched(&mut stream, &write_chunks)
-                                            .await
-                                        {
-                                            Ok(n) => n,
-                                            Err(_) => return,
-                                        };
+                                    let bytes_written = match write_chunks_batched(
+                                        &mut stream,
+                                        &write_chunks,
+                                    )
+                                    .await
+                                    {
+                                        Ok(n) => n,
+                                        Err(_) => return,
+                                    };
                                     bytes_written_counter
                                         .fetch_add(bytes_written, Ordering::Relaxed);
                                     total_bytes_written += bytes_written;
@@ -2707,7 +2731,9 @@ impl LockFreeStreamHandle {
                                         2
                                     };
 
-                                    match write_vectored_all(&mut stream, &slices[..slice_count]).await {
+                                    match write_vectored_all(&mut stream, &slices[..slice_count])
+                                        .await
+                                    {
                                         Ok(0) => break,
                                         Ok(n) => {
                                             bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -2855,7 +2881,12 @@ impl LockFreeStreamHandle {
                                             2
                                         };
 
-                                        match write_vectored_all(&mut stream, &slices[..slice_count]).await {
+                                        match write_vectored_all(
+                                            &mut stream,
+                                            &slices[..slice_count],
+                                        )
+                                        .await
+                                        {
                                             Ok(0) => break,
                                             Ok(n) => {
                                                 bytes_written_counter
@@ -2880,7 +2911,9 @@ impl LockFreeStreamHandle {
                                 } else {
                                     while header_off < header_len {
                                         let h = &header[header_off..header_len];
-                                        match write_vectored_all(&mut stream, &[IoSlice::new(h)]).await {
+                                        match write_vectored_all(&mut stream, &[IoSlice::new(h)])
+                                            .await
+                                        {
                                             Ok(0) => break,
                                             Ok(n) => {
                                                 bytes_written_counter
@@ -2972,7 +3005,9 @@ impl LockFreeStreamHandle {
                                         2
                                     };
 
-                                    match write_vectored_all(&mut stream, &slices[..slice_count]).await {
+                                    match write_vectored_all(&mut stream, &slices[..slice_count])
+                                        .await
+                                    {
                                         Ok(0) => break,
                                         Ok(n) => {
                                             bytes_written_counter.fetch_add(n, Ordering::Relaxed);
@@ -2999,11 +3034,11 @@ impl LockFreeStreamHandle {
                 }
 
                 if !write_chunks.is_empty() {
-                    let bytes_written =
-                        match write_chunks_batched(&mut stream, &write_chunks).await {
-                            Ok(n) => n,
-                            Err(_) => return,
-                        };
+                    let bytes_written = match write_chunks_batched(&mut stream, &write_chunks).await
+                    {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
                     bytes_written_counter.fetch_add(bytes_written, Ordering::Relaxed);
                     total_bytes_written += bytes_written;
                     write_chunks.clear();
@@ -3041,21 +3076,23 @@ impl LockFreeStreamHandle {
                         let read_start = perf.map(|_| Instant::now());
                         let read_result =
                             match read_message_step_nonblocking(&mut stream, state, ctx).await {
-                            Ok(result) => result,
-                            Err(e) => {
-                                warn!(
-                                    peer = %ctx.peer_addr,
-                                    error = %e,
-                                    "IO task read error"
-                                );
-                                return;
-                            }
-                        };
+                                Ok(result) => result,
+                                Err(e) => {
+                                    warn!(
+                                        peer = %ctx.peer_addr,
+                                        error = %e,
+                                        "IO task read error"
+                                    );
+                                    return;
+                                }
+                            };
                         if let (Some(perf), Some(start)) = (perf, read_start) {
                             if read_result.progressed || read_result.result.is_some() {
                                 perf.read_calls.fetch_add(1, Ordering::Relaxed);
-                                perf.read_ns
-                                    .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                                perf.read_ns.fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
                             }
                         }
 
@@ -3082,7 +3119,6 @@ impl LockFreeStreamHandle {
                                         "Failed to process message on IO task"
                                     );
                                 }
-
                             } else {
                                 warn!(
                                     peer = %ctx.peer_addr,
@@ -3283,157 +3319,15 @@ impl LockFreeStreamHandle {
                         _ = write_queue.space_notify.notified() => {
                             // Producer wakeup only; no action needed.
                         }
-                        Some(cmd) = streaming_rx.recv() => {
-                            match cmd {
-                                StreamingCommand::WriteBytes(data) => {
-                                    if stream.write_all(&data).await.is_err() {
-                                        return;
-                                    }
-                                    bytes_written_counter.fetch_add(data.len(), Ordering::Relaxed);
-                                    bytes_since_flush += data.len();
-                                    last_flush = std::time::Instant::now();
-                                }
-                                StreamingCommand::Flush => {
-                                    let _ = stream.flush().await;
-                                    flush_pending.store(false, Ordering::Release);
-                                    bytes_since_flush = 0;
-                                    last_flush = std::time::Instant::now();
-                                }
-                                StreamingCommand::VectoredWrite(cmd) => {
-                                    // Handle short writes with fallback to sequential write
-                                    let total_len = cmd.header.len() + cmd.payload.len();
-                                    let header_slice = std::io::IoSlice::new(&cmd.header);
-                                    let payload_slice = std::io::IoSlice::new(&cmd.payload);
-                                    let bufs = &[header_slice, payload_slice];
-                                    match write_vectored_all(&mut stream, bufs).await {
-                                        Ok(n) if n == total_len => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Ok(n) => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            let combined: Vec<u8> = cmd.header.iter().chain(cmd.payload.iter()).copied().collect();
-                                            if stream.write_all(&combined[n..]).await.is_err() {
-                                                return;
-                                            }
-                                            bytes_written_counter.fetch_add(total_len - n, Ordering::Relaxed);
-                                            bytes_since_flush += total_len - n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Err(_) => return,
-                                    }
-                                }
-                                StreamingCommand::OwnedChunks(chunks) => {
-                                    // Handle short writes with fallback
-                                    let total_len: usize = chunks.iter().map(|c| c.len()).sum();
-                                    let slices: Vec<std::io::IoSlice> = chunks
-                                        .iter()
-                                        .map(|chunk| std::io::IoSlice::new(&chunk))
-                                        .collect();
-                                    match write_vectored_all(&mut stream, &slices).await {
-                                        Ok(n) if n == total_len => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Ok(n) => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            let combined: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
-                                            if stream.write_all(&combined[n..]).await.is_err() {
-                                                return;
-                                            }
-                                            bytes_written_counter.fetch_add(total_len - n, Ordering::Relaxed);
-                                            bytes_since_flush += total_len - n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Err(_) => return,
-                                    }
-                                }
-                            }
-                        }
-                        _ = write_queue.data_notify.notified() => {
-                            pending_cmd = write_queue.pop();
-                        }
-                        _ = write_queue.space_notify.notified() => {
-                            // Producer wakeup only; no action needed.
+                        _ = streaming_queue.data_notify.notified() => {
+                            // Wake on streaming commands; drained at the top of the loop.
                         }
                         _ = tokio::time::sleep(WRITER_MAX_LATENCY) => {}
                     }
                 } else {
                     tokio::select! {
-                        Some(cmd) = streaming_rx.recv() => {
-                            match cmd {
-                                StreamingCommand::WriteBytes(data) => {
-                                    if stream.write_all(&data).await.is_err() {
-                                        return;
-                                    }
-                                    bytes_written_counter.fetch_add(data.len(), Ordering::Relaxed);
-                                    bytes_since_flush += data.len();
-                                    last_flush = std::time::Instant::now();
-                                }
-                                StreamingCommand::Flush => {
-                                    let _ = stream.flush().await;
-                                    flush_pending.store(false, Ordering::Release);
-                                    bytes_since_flush = 0;
-                                    last_flush = std::time::Instant::now();
-                                }
-                                StreamingCommand::VectoredWrite(cmd) => {
-                                    // Handle short writes with fallback to sequential write
-                                    let total_len = cmd.header.len() + cmd.payload.len();
-                                    let header_slice = std::io::IoSlice::new(&cmd.header);
-                                    let payload_slice = std::io::IoSlice::new(&cmd.payload);
-                                    let bufs = &[header_slice, payload_slice];
-                                    match write_vectored_all(&mut stream, bufs).await {
-                                        Ok(n) if n == total_len => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Ok(n) => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            let combined: Vec<u8> = cmd.header.iter().chain(cmd.payload.iter()).copied().collect();
-                                            if stream.write_all(&combined[n..]).await.is_err() {
-                                                return;
-                                            }
-                                            bytes_written_counter.fetch_add(total_len - n, Ordering::Relaxed);
-                                            bytes_since_flush += total_len - n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Err(_) => return,
-                                    }
-                                }
-                                StreamingCommand::OwnedChunks(chunks) => {
-                                    // Handle short writes with fallback
-                                    let total_len: usize = chunks.iter().map(|c| c.len()).sum();
-                                    let slices: Vec<std::io::IoSlice> = chunks
-                                        .iter()
-                                        .map(|chunk| std::io::IoSlice::new(&chunk))
-                                        .collect();
-                                    match write_vectored_all(&mut stream, &slices).await {
-                                        Ok(n) if n == total_len => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Ok(n) => {
-                                            bytes_written_counter.fetch_add(n, Ordering::Relaxed);
-                                            bytes_since_flush += n;
-                                            let combined: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
-                                            if stream.write_all(&combined[n..]).await.is_err() {
-                                                return;
-                                            }
-                                            bytes_written_counter.fetch_add(total_len - n, Ordering::Relaxed);
-                                            bytes_since_flush += total_len - n;
-                                            last_flush = std::time::Instant::now();
-                                        }
-                                        Err(_) => return,
-                                    }
-                                }
-                            }
+                        _ = streaming_queue.data_notify.notified() => {
+                            // Wake on streaming commands; drained at the top of the loop.
                         }
                         _ = write_queue.data_notify.notified() => {
                             pending_cmd = write_queue.pop();
@@ -3469,7 +3363,6 @@ impl LockFreeStreamHandle {
                 }
             }
         }
-
     }
 
     async fn acquire_ask_permit(&self) -> OwnedSemaphorePermit {
@@ -3488,7 +3381,6 @@ impl LockFreeStreamHandle {
             Err(TryAcquireError::Closed) => Err(GossipError::Shutdown),
         }
     }
-
 
     async fn enqueue_write(&self, payload: WritePayload) -> Result<()> {
         if self.exit_flag.load(Ordering::Acquire) {
@@ -3605,6 +3497,18 @@ impl LockFreeStreamHandle {
             .await
     }
 
+    /// Non-blocking variant of `write_header_and_payload_control_inline32`.
+    ///
+    /// This avoids awaiting on the write queue and is useful for building sync `tell` APIs
+    /// on top of the background writer task.
+    pub fn write_header_and_payload_control_inline32_nonblocking(
+        &self,
+        header: [u8; 32],
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        self.enqueue_write_nonblocking(WritePayload::HeaderInline32 { header, payload })
+    }
+
     pub async fn write_header_and_payload_ask(
         &self,
         header: bytes::Bytes,
@@ -3652,11 +3556,8 @@ impl LockFreeStreamHandle {
         payload: bytes::Bytes,
     ) -> Result<()> {
         let permit = self.acquire_ask_permit_fast().await?;
-        self.enqueue_write_with_permit(
-            WritePayload::DirectAskInline { header, payload },
-            permit,
-        )
-        .await
+        self.enqueue_write_with_permit(WritePayload::DirectAskInline { header, payload }, permit)
+            .await
     }
 
     /// Write DirectResponse inline (same format as DirectAsk)
@@ -3688,7 +3589,7 @@ impl LockFreeStreamHandle {
         &self,
         header: [u8; 16],
         header_len: u8,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
     ) -> Result<()> {
@@ -3724,7 +3625,7 @@ impl LockFreeStreamHandle {
         &self,
         header: [u8; 16],
         header_len: u8,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         prefix_len: u8,
         payload: crate::typed::PooledPayload,
     ) -> Result<()> {
@@ -3794,12 +3695,15 @@ impl LockFreeStreamHandle {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            self.streaming_tx
-                .send(StreamingCommand::Flush)
-                .map_err(|_| {
+            match self.streaming_queue.try_push(StreamingCommand::Flush) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    // Queue is full (backpressure). Drop the explicit flush request and allow
+                    // the writer's periodic/threshold flush to handle it.
                     self.flush_pending.store(false, Ordering::Release);
-                    GossipError::Shutdown
-                })
+                    Ok(())
+                }
+            }
         } else {
             Ok(())
         }
@@ -3915,7 +3819,7 @@ impl LockFreeStreamHandle {
         type_hash: u32,
         actor_id: u64,
     ) -> Result<()> {
-        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
+        use crate::{MessageType, StreamHeader, current_timestamp_nanos};
 
         let chunk_size = self.max_stream_chunk_size()?;
 
@@ -3971,10 +3875,11 @@ impl LockFreeStreamHandle {
             actor_id,
         };
 
-        let start_msg = serialize_stream_message(MessageType::StreamStart, &start_header, schema_hash);
-        self.streaming_tx
-            .send(StreamingCommand::WriteBytes(start_msg.into()))
-            .map_err(|_| GossipError::Shutdown)?;
+        let start_msg =
+            serialize_stream_message(MessageType::StreamStart, &start_header, schema_hash);
+        self.streaming_queue
+            .push(StreamingCommand::WriteBytes(start_msg.into()))
+            .await?;
 
         // Stream chunks directly
         for (idx, chunk) in msg.chunks(chunk_size).enumerate() {
@@ -4006,27 +3911,23 @@ impl LockFreeStreamHandle {
             // Chunk data
             chunk_msg.extend_from_slice(chunk); // ALLOW_COPY
 
-            self.streaming_tx
-                .send(StreamingCommand::WriteBytes(chunk_msg.into()))
-                .map_err(|_| GossipError::Shutdown)?;
+            self.streaming_queue
+                .push(StreamingCommand::WriteBytes(chunk_msg.into()))
+                .await?;
 
             // Yield periodically to prevent blocking
             if idx % 10 == 0 {
-                self.streaming_tx
-                    .send(StreamingCommand::Flush)
-                    .map_err(|_| GossipError::Shutdown)?;
+                self.streaming_queue.push(StreamingCommand::Flush).await?;
                 tokio::task::yield_now().await;
             }
         }
 
         // Send StreamEnd
         let end_msg = serialize_stream_message(MessageType::StreamEnd, &start_header, schema_hash);
-        self.streaming_tx
-            .send(StreamingCommand::WriteBytes(end_msg.into()))
-            .map_err(|_| GossipError::Shutdown)?;
-        self.streaming_tx
-            .send(StreamingCommand::Flush)
-            .map_err(|_| GossipError::Shutdown)?;
+        self.streaming_queue
+            .push(StreamingCommand::WriteBytes(end_msg.into()))
+            .await?;
+        self.streaming_queue.push(StreamingCommand::Flush).await?;
 
         debug!(
             "✅ STREAMING: Successfully streamed {} MB in {} chunks",
@@ -4063,7 +3964,7 @@ impl LockFreeStreamHandle {
         payload: bytes::Bytes,
         correlation_id: u16,
     ) -> Result<()> {
-        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
+        use crate::{MessageType, StreamHeader, current_timestamp_nanos};
         use bytes::BufMut;
 
         let chunk_size = self.max_stream_chunk_size()?;
@@ -4131,9 +4032,9 @@ impl LockFreeStreamHandle {
             0,
             schema_hash,
         );
-        self.streaming_tx
-            .send(StreamingCommand::WriteBytes(start_msg))
-            .map_err(|_| GossipError::Shutdown)?;
+        self.streaming_queue
+            .push(StreamingCommand::WriteBytes(start_msg))
+            .await?;
 
         // Stream response chunks using zero-copy slices
         let total_len = payload.len();
@@ -4166,18 +4067,16 @@ impl LockFreeStreamHandle {
             );
 
             // Use vectored write: header + chunk_data (zero-copy)
-            self.streaming_tx
-                .send(StreamingCommand::VectoredWrite(VectoredSendItem {
+            self.streaming_queue
+                .push(StreamingCommand::VectoredWrite(VectoredSendItem {
                     header: header_bytes,
                     payload: chunk_data,
                 }))
-                .map_err(|_| GossipError::Shutdown)?;
+                .await?;
 
             // Yield periodically to prevent blocking
             if idx % 10 == 0 {
-                self.streaming_tx
-                    .send(StreamingCommand::Flush)
-                    .map_err(|_| GossipError::Shutdown)?;
+                self.streaming_queue.push(StreamingCommand::Flush).await?;
                 tokio::task::yield_now().await;
             }
         }
@@ -4190,18 +4089,14 @@ impl LockFreeStreamHandle {
             0,
             schema_hash,
         );
-        self.streaming_tx
-            .send(StreamingCommand::WriteBytes(end_msg))
-            .map_err(|_| GossipError::Shutdown)?;
-        self.streaming_tx
-            .send(StreamingCommand::Flush)
-            .map_err(|_| GossipError::Shutdown)?;
+        self.streaming_queue
+            .push(StreamingCommand::WriteBytes(end_msg))
+            .await?;
+        self.streaming_queue.push(StreamingCommand::Flush).await?;
 
         debug!(
             "✅ STREAMING RESPONSE: Successfully streamed {} bytes in {} chunks (correlation_id: {})",
-            total_len,
-            num_chunks,
-            correlation_id
+            total_len, num_chunks, correlation_id
         );
 
         Ok(())
@@ -4261,25 +4156,21 @@ impl LockFreeStreamHandle {
         // Create vectored command that preserves both header and payload as separate Bytes
         let command = VectoredSendItem { header, payload };
 
-        // Try to send via streaming channel first for vectored operations
+        // Prefer the streaming queue for vectored operations; if it's full, fall back
+        // to the normal payload queue (still zero-copy: header + payload remain `Bytes`).
         match self
-            .streaming_tx
-            .send(StreamingCommand::VectoredWrite(command))
+            .streaming_queue
+            .try_push(StreamingCommand::VectoredWrite(command))
         {
-            Ok(_) => Ok(()),
-            Err(send_error) => {
-                // Fallback: combine into single write if streaming channel is closed
-                let cmd = send_error.0;
-                if let StreamingCommand::VectoredWrite(vectored_cmd) = cmd {
-                    self.enqueue_write(WritePayload::HeaderPayload {
-                        header: vectored_cmd.header,
-                        payload: vectored_cmd.payload,
-                    })
-                    .await
-                } else {
-                    Err(GossipError::Shutdown)
-                }
+            Ok(()) => Ok(()),
+            Err(StreamingCommand::VectoredWrite(vectored_cmd)) => {
+                self.enqueue_write(WritePayload::HeaderPayload {
+                    header: vectored_cmd.header,
+                    payload: vectored_cmd.payload,
+                })
+                .await
             }
+            Err(_) => Err(GossipError::Shutdown),
         }
     }
 
@@ -4289,11 +4180,11 @@ impl LockFreeStreamHandle {
             return Ok(());
         }
 
-        // Send chunks as a batch via streaming channel for optimal vectored I/O
+        // Send chunks as a batch via the bounded streaming queue for optimal vectored I/O.
         let command = StreamingCommand::OwnedChunks(chunks);
-        self.streaming_tx
-            .send(command)
-            .map_err(|_| GossipError::Shutdown)?;
+        self.streaming_queue
+            .try_push(command)
+            .map_err(|_| GossipError::WriteQueueFull)?;
 
         Ok(())
     }
@@ -4359,29 +4250,26 @@ fn parse_direct_message_payload<'a>(
 pub struct ConnectionPool {
     /// PRIMARY: Mapping Peer ID -> LockFreeConnection
     /// This is the main storage - we identify connections by peer ID, not address
-    pub connections_by_peer: dashmap::DashMap<crate::PeerId, Arc<LockFreeConnection>>,
+    pub connections_by_peer: SccHashMap<crate::PeerId, Arc<LockFreeConnection>>,
     /// SECONDARY: Mapping SocketAddr -> Peer ID (for incoming connection identification)
-    pub addr_to_peer_id: dashmap::DashMap<SocketAddr, crate::PeerId>,
+    pub addr_to_peer_id: SccHashMap<SocketAddr, crate::PeerId>,
     /// Configuration: Peer ID -> Expected SocketAddr (where to connect)
-    pub peer_id_to_addr: dashmap::DashMap<crate::PeerId, SocketAddr>,
+    pub peer_id_to_addr: SccHashMap<crate::PeerId, SocketAddr>,
     /// Address-based connection index for fast lookup by SocketAddr
-    pub connections_by_addr: dashmap::DashMap<SocketAddr, Arc<LockFreeConnection>>,
+    pub connections_by_addr: SccHashMap<SocketAddr, Arc<LockFreeConnection>>,
     /// Shared correlation trackers by peer ID - ensures ask/response works across bidirectional connections
-    correlation_trackers: dashmap::DashMap<crate::PeerId, Arc<CorrelationTracker>>,
+    correlation_trackers: SccHashMap<crate::PeerId, Arc<CorrelationTracker>>,
     max_connections: usize,
     connection_timeout: Duration,
     /// Registry reference for handling incoming messages
-    registry: parking_lot::Mutex<Option<std::sync::Weak<GossipRegistry>>>,
+    registry: ArcSwapWeak<GossipRegistry>,
     /// Shared message buffer pool for zero-allocation processing
-    message_buffer_pool: parking_lot::Mutex<Arc<MessageBufferPool>>,
+    message_buffer_pool: Arc<MessageBufferPool>,
     /// Shared aligned bytes pool for zero-copy receive buffers
     aligned_bytes_pool: Arc<crate::AlignedBytesPool>,
     /// Connection counter for load balancing
     connection_counter: AtomicUsize,
 }
-
-unsafe impl Send for ConnectionPool {}
-unsafe impl Sync for ConnectionPool {}
 
 /// Maximum number of pending responses (must be power of 2 for fast modulo)
 const PENDING_RESPONSES_SIZE: usize = 8192;
@@ -4453,8 +4341,7 @@ impl CorrelationTracker {
             {
                 trace!(
                     "CorrelationTracker: Allocated correlation_id {} in slot {}",
-                    id,
-                    slot
+                    id, slot
                 );
                 return id;
             }
@@ -4713,132 +4600,43 @@ impl std::fmt::Debug for ConnectionHandle {
     }
 }
 
-/// Delegated reply sender for asynchronous response handling
-/// Allows passing around the ability to reply to a request without blocking the original caller
-pub struct DelegatedReplySender {
-    sender: tokio::sync::oneshot::Sender<bytes::Bytes>,
-    receiver: tokio::sync::oneshot::Receiver<bytes::Bytes>,
-    request_len: usize,
-    timeout: Option<Duration>,
-    created_at: std::time::Instant,
+/// Deferred ask handle backed by the per-connection correlation tracker.
+///
+/// This is the correct way to "delegate" awaiting a response:
+/// - the request is sent immediately,
+/// - the returned handle can be moved to another task and awaited later,
+/// - dropping the handle cancels the pending slot to keep resources bounded.
+pub struct PendingAsk {
+    correlation_id: u16,
+    correlation: Arc<CorrelationTracker>,
+    timeout: Duration,
 }
 
-impl DelegatedReplySender {
-    /// Create a new delegated reply sender
-    pub fn new(
-        sender: tokio::sync::oneshot::Sender<bytes::Bytes>,
-        receiver: tokio::sync::oneshot::Receiver<bytes::Bytes>,
-        request_len: usize,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
-            request_len,
-            timeout: None,
-            created_at: std::time::Instant::now(),
-        }
+impl PendingAsk {
+    pub fn correlation_id(&self) -> u16 {
+        self.correlation_id
     }
 
-    /// Create a new delegated reply sender with timeout
-    pub fn new_with_timeout(
-        sender: tokio::sync::oneshot::Sender<bytes::Bytes>,
-        receiver: tokio::sync::oneshot::Receiver<bytes::Bytes>,
-        request_len: usize,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            sender,
-            receiver,
-            request_len,
-            timeout: Some(timeout),
-            created_at: std::time::Instant::now(),
-        }
-    }
-
-    /// Send a reply using this delegated sender
-    /// This can be called from anywhere in the code to complete the request-response cycle
-    pub fn reply(self, response: bytes::Bytes) -> Result<()> {
-        match self.sender.send(response) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "Reply receiver was dropped",
-            ))),
-        }
-    }
-
-    /// Send a reply with error
-    pub fn reply_error(self, error: &str) -> Result<()> {
-        let error_response = bytes::Bytes::from(format!("ERROR:{}", error).into_bytes());
-        self.reply(error_response)
-    }
-
-    /// Wait for the reply with optional timeout
-    pub async fn wait_for_reply(self) -> Result<bytes::Bytes> {
-        if let Some(timeout) = self.timeout {
-            match tokio::time::timeout(timeout, self.receiver).await {
-                Ok(Ok(response)) => Ok(response),
-                Ok(Err(_)) => Err(GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Reply sender was dropped",
-                ))),
-                Err(_) => Err(GossipError::Timeout),
-            }
-        } else {
-            match self.receiver.await {
-                Ok(response) => Ok(response),
-                Err(_) => Err(GossipError::Network(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Reply sender was dropped",
-                ))),
-            }
-        }
-    }
-
-    /// Wait for the reply with a custom timeout
-    pub async fn wait_for_reply_with_timeout(self, timeout: Duration) -> Result<bytes::Bytes> {
-        match tokio::time::timeout(timeout, self.receiver).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(GossipError::Network(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "Reply sender was dropped",
-            ))),
-            Err(_) => Err(GossipError::Timeout),
-        }
-    }
-
-    /// Get the original request length (useful for creating mock responses)
-    pub fn request_len(&self) -> usize {
-        self.request_len
-    }
-
-    /// Get the elapsed time since the request was made
-    pub fn elapsed(&self) -> Duration {
-        self.created_at.elapsed()
-    }
-
-    /// Check if this reply sender has timed out
-    pub fn is_timed_out(&self) -> bool {
-        if let Some(timeout) = self.timeout {
-            self.created_at.elapsed() > timeout
-        } else {
-            false
-        }
-    }
-
-    /// Create a mock reply for testing (simulates the original ask() behavior)
-    pub fn create_mock_reply(&self) -> bytes::Bytes {
-        bytes::Bytes::from(format!("RESPONSE:{}", self.request_len).into_bytes())
+    pub async fn wait(self) -> Result<bytes::Bytes> {
+        let response = self
+            .correlation
+            .wait_for_response(self.correlation_id, self.timeout)
+            .await?;
+        Ok(response.into_bytes())
     }
 }
 
-impl std::fmt::Debug for DelegatedReplySender {
+impl Drop for PendingAsk {
+    fn drop(&mut self) {
+        self.correlation.cancel(self.correlation_id);
+    }
+}
+
+impl std::fmt::Debug for PendingAsk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DelegatedReplySender")
-            .field("request_len", &self.request_len)
+        f.debug_struct("PendingAsk")
+            .field("correlation_id", &self.correlation_id)
             .field("timeout", &self.timeout)
-            .field("elapsed", &self.elapsed())
-            .field("is_timed_out", &self.is_timed_out())
             .finish()
     }
 }
@@ -4946,7 +4744,7 @@ impl ConnectionHandle {
         &self,
         correlation_id: u16,
         payload: crate::typed::PooledPayload,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         payload_len: usize,
     ) -> Result<()> {
         let header = framing::write_ask_response_header(
@@ -5014,6 +4812,28 @@ impl ConnectionHandle {
         self.stream_handle
             .write_header_and_payload_control_inline32(header, payload)
             .await
+    }
+
+    /// Try to send an ActorTell frame without awaiting on the write queue.
+    ///
+    /// Returns `GossipError::WriteQueueFull` if the per-connection write queue is full.
+    pub fn try_tell_actor_frame(
+        &self,
+        actor_id: u64,
+        type_hash: u32,
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        let schema_hash = self.stream_handle.schema_hash();
+        let header = crate::framing::write_actor_frame_header(
+            crate::MessageType::ActorTell,
+            0,
+            actor_id,
+            type_hash,
+            schema_hash,
+            payload.len(),
+        );
+        self.stream_handle
+            .write_header_and_payload_control_inline32_nonblocking(header, payload)
     }
 
     /// Ask an actor using the direct actor frame envelope (MessageType::ActorAsk).
@@ -5280,7 +5100,7 @@ impl ConnectionHandle {
     async fn ask_with_timeout_pooled(
         &self,
         payload: crate::typed::PooledPayload,
-        prefix: Option<[u8; 8]>,
+        prefix: Option<[u8; 16]>,
         payload_len: usize,
         timeout: Duration,
     ) -> Result<bytes::Bytes> {
@@ -5418,7 +5238,7 @@ impl ConnectionHandle {
         actor_id: u64,
         timeout: Duration,
     ) -> Result<bytes::Bytes> {
-        use crate::{current_timestamp_nanos, MessageType, StreamHeader};
+        use crate::{MessageType, StreamHeader, current_timestamp_nanos};
 
         let chunk_size = self.stream_handle.max_stream_chunk_size()?;
 
@@ -5509,12 +5329,12 @@ impl ConnectionHandle {
         );
         if self
             .stream_handle
-            .streaming_tx
-            .send(StreamingCommand::WriteBytes(start_msg))
+            .streaming_queue
+            .try_push(StreamingCommand::WriteBytes(start_msg))
             .is_err()
         {
             self.correlation.cancel(correlation_id);
-            return Err(GossipError::Shutdown);
+            return Err(GossipError::WriteQueueFull);
         }
 
         // Stream chunks using zero-copy slicing
@@ -5545,23 +5365,23 @@ impl ConnectionHandle {
             // This avoids copying the chunk data into the header buffer
             if self
                 .stream_handle
-                .streaming_tx
-                .send(StreamingCommand::OwnedChunks(vec![
+                .streaming_queue
+                .try_push(StreamingCommand::OwnedChunks(vec![
                     header_bytes,
                     chunk_data,
                 ]))
                 .is_err()
             {
                 self.correlation.cancel(correlation_id);
-                return Err(GossipError::Shutdown);
+                return Err(GossipError::WriteQueueFull);
             }
 
             // Yield periodically to prevent blocking
             if chunk_index % 10 == 0 {
                 let _ = self
                     .stream_handle
-                    .streaming_tx
-                    .send(StreamingCommand::Flush);
+                    .streaming_queue
+                    .try_push(StreamingCommand::Flush);
                 tokio::task::yield_now().await;
             }
 
@@ -5578,17 +5398,17 @@ impl ConnectionHandle {
         );
         if self
             .stream_handle
-            .streaming_tx
-            .send(StreamingCommand::WriteBytes(end_msg))
+            .streaming_queue
+            .try_push(StreamingCommand::WriteBytes(end_msg))
             .is_err()
         {
             self.correlation.cancel(correlation_id);
-            return Err(GossipError::Shutdown);
+            return Err(GossipError::WriteQueueFull);
         }
         let _ = self
             .stream_handle
-            .streaming_tx
-            .send(StreamingCommand::Flush);
+            .streaming_queue
+            .try_push(StreamingCommand::Flush);
 
         debug!(
             "✅ STREAMING ASK (zero-copy): Streamed {} bytes in {} chunks, waiting for response",
@@ -5603,12 +5423,28 @@ impl ConnectionHandle {
         Ok(response.into_bytes())
     }
 
-    /// Ask method that returns a ReplyTo handle for delegated replies
-    pub async fn ask_with_reply_to(&self, request: &[u8]) -> Result<crate::ReplyTo> {
-        // Allocate correlation ID
+    /// Send an ask and return a handle that can be awaited later.
+    ///
+    /// This is useful for:
+    /// - delegating the "wait for response" to another task,
+    /// - checking correlation IDs for diagnostics/tests without misusing `ReplyTo`,
+    /// - keeping resources bounded (dropping cancels the pending slot).
+    pub async fn ask_deferred(&self, request: &[u8]) -> Result<PendingAsk> {
+        self.ask_deferred_with_timeout_bytes(
+            bytes::Bytes::copy_from_slice(request), /* ALLOW_COPY */
+            Duration::from_secs(30),
+        )
+        .await
+    }
+
+    /// Deferred ask using owned bytes and a custom timeout.
+    pub async fn ask_deferred_with_timeout_bytes(
+        &self,
+        request: bytes::Bytes,
+        timeout: Duration,
+    ) -> Result<PendingAsk> {
         let correlation_id = self.correlation.allocate();
 
-        // Create ask message with length prefix + header + payload
         let header = framing::write_ask_response_header(
             crate::MessageType::Ask,
             correlation_id,
@@ -5617,169 +5453,43 @@ impl ConnectionHandle {
 
         if let Err(e) = self
             .stream_handle
-            .write_header_and_payload_ask_inline(
-                header,
-                16,
-                bytes::Bytes::copy_from_slice(request), // ALLOW_COPY
-            )
+            .write_header_and_payload_ask_inline(header, 16, request)
             .await
         {
             self.correlation.cancel(correlation_id);
             return Err(e);
         }
 
-        // Return ReplyTo handle
-        Ok(crate::ReplyTo {
+        Ok(PendingAsk {
             correlation_id,
-            connection: Arc::new(self.clone()),
+            correlation: self.correlation.clone(),
+            timeout,
         })
     }
 
-    /// Ask method with delegated reply sender for asynchronous response handling
-    /// Returns a DelegatedReplySender that can be passed around to handle the response elsewhere
-    pub async fn ask_with_reply_sender(&self, request: &[u8]) -> Result<DelegatedReplySender> {
-        // Create a oneshot channel for the response
-        let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel::<bytes::Bytes>();
-
-        // Send the request (in a real implementation, this would include correlation ID)
-        self.tell(request).await?;
-
-        // Return the delegated reply sender
-        Ok(DelegatedReplySender::new(
-            reply_sender,
-            reply_receiver,
-            request.len(),
-        ))
-    }
-
-    /// Ask method with timeout and delegated reply
-    pub async fn ask_with_timeout_and_reply(
-        &self,
-        request: &[u8],
-        timeout: Duration,
-    ) -> Result<DelegatedReplySender> {
-        // Create a oneshot channel for the response
-        let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel::<bytes::Bytes>();
-
-        // Send the request
-        self.tell(request).await?;
-
-        // Return the delegated reply sender with timeout
-        Ok(DelegatedReplySender::new_with_timeout(
-            reply_sender,
-            reply_receiver,
-            request.len(),
-            timeout,
-        ))
-    }
-
-    /// Batch ask method for multiple requests in a single network round-trip
-    /// Returns a vector of response futures that can be awaited independently
-    pub async fn ask_batch(
+    /// Batch ask in a single write, returning deferred handles for each request.
+    pub async fn ask_batch_deferred(
         &self,
         requests: &[&[u8]],
-    ) -> Result<Vec<tokio::sync::oneshot::Receiver<bytes::Bytes>>> {
+        timeout: Duration,
+    ) -> Result<Vec<PendingAsk>> {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut receivers = Vec::with_capacity(requests.len());
         let mut correlation_ids = Vec::with_capacity(requests.len());
-        let mut batch_message = Vec::new();
 
-        // Process each request
-        for request in requests {
-            // Create oneshot channel for this response
-            let (_tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
-            receivers.push(rx);
-
-            // Allocate correlation ID
-            let correlation_id = self.correlation.allocate();
-            correlation_ids.push(correlation_id);
-
-            // Build ask message: [type:1][correlation_id:2][pad:1] + payload
-            let header = framing::write_ask_response_header(
-                crate::MessageType::Ask,
-                correlation_id,
-                request.len(),
-            );
-            batch_message.extend_from_slice(&header); // ALLOW_COPY
-            batch_message.extend_from_slice(request); // ALLOW_COPY
-        }
-
-        if let Err(e) = self
-            .stream_handle
-            .write_bytes_ask(bytes::Bytes::from(batch_message))
-            .await
-        {
-            for correlation_id in correlation_ids {
-                self.correlation.cancel(correlation_id);
-            }
-            return Err(e);
-        }
-
-        Ok(receivers)
-    }
-
-    /// Batch ask with timeout - returns Vec<Result<Vec<u8>>> with individual timeout handling
-    pub async fn ask_batch_with_timeout(
-        &self,
-        requests: &[&[u8]],
-        timeout: Duration,
-    ) -> Result<Vec<Result<bytes::Bytes>>> {
-        let receivers = self.ask_batch(requests).await?;
-
-        // Create futures for all responses with timeout
-        let mut response_futures = Vec::with_capacity(receivers.len());
-
-        for receiver in receivers {
-            let timeout_future = async move {
-                match tokio::time::timeout(timeout, receiver).await {
-                    Ok(Ok(response)) => Ok(response),
-                    Ok(Err(_)) => Err(crate::GossipError::Network(std::io::Error::other(
-                        "Response channel closed",
-                    ))),
-                    Err(_) => Err(crate::GossipError::Timeout),
-                }
-            };
-            response_futures.push(timeout_future);
-        }
-
-        // Wait for all responses concurrently
-        let results = futures::future::join_all(response_futures).await;
-        Ok(results)
-    }
-
-    /// High-performance batch ask with pre-allocated buffers
-    /// This version minimizes allocations for maximum throughput
-    pub async fn ask_batch_optimized(
-        &self,
-        requests: &[&[u8]],
-        response_buffer: &mut Vec<tokio::sync::oneshot::Receiver<bytes::Bytes>>,
-    ) -> Result<()> {
-        response_buffer.clear();
-        response_buffer.reserve(requests.len());
-
-        // Pre-calculate total message size
+        // Pre-calculate total message size to avoid growth reallocations.
         let total_size: usize = requests
             .iter()
             .map(|req| framing::ASK_RESPONSE_FRAME_HEADER_LEN + req.len())
             .sum();
-
         let mut batch_message = bytes::BytesMut::with_capacity(total_size);
-        let mut correlation_ids = Vec::with_capacity(requests.len());
 
-        // Build all messages
         for request in requests {
-            // Create oneshot channel for this response
-            let (_tx, rx) = tokio::sync::oneshot::channel::<bytes::Bytes>();
-            response_buffer.push(rx);
-
-            // Allocate correlation ID
             let correlation_id = self.correlation.allocate();
             correlation_ids.push(correlation_id);
 
-            // Build ask message
             let header = framing::write_ask_response_header(
                 crate::MessageType::Ask,
                 correlation_id,
@@ -5800,22 +5510,30 @@ impl ConnectionHandle {
             return Err(e);
         }
 
-        Ok(())
+        let handles = correlation_ids
+            .into_iter()
+            .map(|correlation_id| PendingAsk {
+                correlation_id,
+                correlation: self.correlation.clone(),
+                timeout,
+            })
+            .collect();
+        Ok(handles)
     }
 
     /// High-performance streaming API - send structured data with custom framing - LOCK-FREE
     pub async fn stream_send<T>(&self, data: &T) -> Result<()>
     where
         T: for<'a> rkyv::Serialize<
-            rkyv::rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
+                rkyv::rancor::Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'a>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rkyv::rancor::Error,
                 >,
-                rkyv::rancor::Error,
             >,
-        >,
     {
         // Serialize the data using rkyv for maximum performance
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(data)
@@ -5847,15 +5565,15 @@ impl ConnectionHandle {
     pub async fn stream_send_batch<T>(&self, batch: &[T]) -> Result<()>
     where
         T: for<'a> rkyv::Serialize<
-            rkyv::rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
+                rkyv::rancor::Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'a>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rkyv::rancor::Error,
                 >,
-                rkyv::rancor::Error,
             >,
-        >,
     {
         if batch.is_empty() {
             return Ok(());
@@ -5903,7 +5621,9 @@ impl ConnectionHandle {
         header: bytes::Bytes,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        self.stream_handle.write_bytes_vectored(header, payload).await
+        self.stream_handle
+            .write_bytes_vectored(header, payload)
+            .await
     }
 
     /// Send owned chunks without copying - optimal for streaming large messages
@@ -5929,18 +5649,15 @@ impl ConnectionPool {
         const POOL_SIZE: usize = 256;
         const BUFFER_SIZE: usize = TCP_BUFFER_SIZE / 128; // Smaller pool buffers (8KB default)
         let pool = Self {
-            connections_by_peer: dashmap::DashMap::new(),
-            addr_to_peer_id: dashmap::DashMap::new(),
-            peer_id_to_addr: dashmap::DashMap::new(),
-            connections_by_addr: dashmap::DashMap::new(),
-            correlation_trackers: dashmap::DashMap::new(),
+            connections_by_peer: SccHashMap::default(),
+            addr_to_peer_id: SccHashMap::default(),
+            peer_id_to_addr: SccHashMap::default(),
+            connections_by_addr: SccHashMap::default(),
+            correlation_trackers: SccHashMap::default(),
             max_connections,
             connection_timeout,
-            registry: parking_lot::Mutex::new(None),
-            message_buffer_pool: parking_lot::Mutex::new(Arc::new(MessageBufferPool::new(
-                POOL_SIZE,
-                BUFFER_SIZE,
-            ))),
+            registry: ArcSwapWeak::new(std::sync::Weak::new()),
+            message_buffer_pool: Arc::new(MessageBufferPool::new(POOL_SIZE, BUFFER_SIZE)),
             aligned_bytes_pool: Arc::new(crate::AlignedBytesPool::new(
                 aligned_pool_size.max(crate::aligned::DEFAULT_ALIGNED_POOL_SIZE),
             )),
@@ -5957,7 +5674,7 @@ impl ConnectionPool {
 
     /// Set the registry reference for handling incoming messages
     pub fn set_registry(&self, registry: std::sync::Arc<GossipRegistry>) {
-        *self.registry.lock() = Some(std::sync::Arc::downgrade(&registry));
+        self.registry.store(std::sync::Arc::downgrade(&registry));
     }
 
     /// Shared pool for aligned receive buffers.
@@ -5971,8 +5688,7 @@ impl ConnectionPool {
     }
 
     fn clear_capabilities_for_addr(&self, addr: &SocketAddr) {
-        let registry_guard = self.registry.lock();
-        if let Some(registry) = registry_guard.as_ref().and_then(|w| w.upgrade()) {
+        if let Some(registry) = self.registry.load().upgrade() {
             registry.clear_peer_capabilities(addr);
         }
     }
@@ -5981,16 +5697,22 @@ impl ConnectionPool {
     /// Only updates if no address is already configured for this peer
     pub fn update_node_address(&self, peer_id: &crate::PeerId, addr: SocketAddr) {
         // Check if we already have a configured address for this node
-        if let Some(existing_addr_entry) = self.peer_id_to_addr.get(peer_id) {
-            let existing_addr = *existing_addr_entry.value();
-            debug!("CONNECTION POOL: Node {} already has configured address {}, not updating to ephemeral port {}",
-                   peer_id, existing_addr, addr);
+        if let Some(existing_addr) = self.peer_id_to_addr.read_sync(peer_id, |_, v| *v) {
+            debug!(
+                "CONNECTION POOL: Node {} already has configured address {}, not updating to ephemeral port {}",
+                peer_id, existing_addr, addr
+            );
             return;
         }
 
         // Only update if no address is configured
-        self.peer_id_to_addr.insert(peer_id.clone(), addr);
-        self.addr_to_peer_id.insert(addr, peer_id.clone());
+        if self
+            .peer_id_to_addr
+            .insert_sync(peer_id.clone(), addr)
+            .is_ok()
+        {
+            let _ = self.addr_to_peer_id.upsert_sync(addr, peer_id.clone());
+        }
         debug!(
             "CONNECTION POOL: Set initial address for node {} to {}",
             peer_id, addr
@@ -6005,24 +5727,27 @@ impl ConnectionPool {
     pub fn reindex_connection_addr(&self, peer_id: &crate::PeerId, new_addr: SocketAddr) {
         // First, check if this peer still has an active connection
         // This guards against race conditions where disconnect happens between checks
-        let connection = match self.connections_by_peer.get(peer_id) {
-            Some(entry) => entry.value().clone(),
-            None => {
-                // Peer was disconnected, nothing to reindex
-                return;
-            }
+        let Some(connection) = self
+            .connections_by_peer
+            .read_sync(peer_id, |_, v| v.clone())
+        else {
+            // Peer was disconnected, nothing to reindex.
+            return;
         };
 
         // Check if new_addr is already indexed
-        if let Some(existing_peer_id) = self.addr_to_peer_id.get(&new_addr) {
-            if existing_peer_id.value() == peer_id {
+        if let Some(existing_peer_id) = self.addr_to_peer_id.read_sync(&new_addr, |_, v| v.clone())
+        {
+            if existing_peer_id == *peer_id {
                 // Already indexed under the advertised address for this peer.
                 // But we still need to ensure the OLD (ephemeral) address is indexed too!
                 // Without this, lookups by ephemeral address fail after gossip rounds.
                 let old_addr = connection.addr;
-                if old_addr != new_addr && !self.connections_by_addr.contains_key(&old_addr) {
-                    self.connections_by_addr.insert(old_addr, connection);
-                    self.addr_to_peer_id.insert(old_addr, peer_id.clone());
+                if old_addr != new_addr && !self.connections_by_addr.contains_sync(&old_addr) {
+                    let _ = self
+                        .connections_by_addr
+                        .upsert_sync(old_addr, connection.clone());
+                    let _ = self.addr_to_peer_id.upsert_sync(old_addr, peer_id.clone());
                     debug!(
                         old_addr = %old_addr,
                         new_addr = %new_addr,
@@ -6036,28 +5761,27 @@ impl ConnectionPool {
                 // This can happen if an old connection wasn't fully cleaned up
                 warn!(
                     "CONNECTION POOL: Removing stale address mapping {} (was peer {}, now peer {})",
-                    new_addr,
-                    existing_peer_id.value(),
-                    peer_id
+                    new_addr, existing_peer_id, peer_id
                 );
-                self.connections_by_addr.remove(&new_addr);
-                self.addr_to_peer_id.remove(&new_addr);
+                let _ = self.connections_by_addr.remove_sync(&new_addr);
+                let _ = self.addr_to_peer_id.remove_sync(&new_addr);
             }
         }
 
         let old_addr = connection.addr;
 
         // Double-check peer still exists (guard against concurrent disconnect)
-        if !self.connections_by_peer.contains_key(peer_id) {
+        if !self.connections_by_peer.contains_sync(peer_id) {
             return;
         }
 
         // Insert the connection under the new (advertised) address
-        self.connections_by_addr
-            .insert(new_addr, connection.clone());
-        self.addr_to_peer_id.insert(new_addr, peer_id.clone());
+        let _ = self
+            .connections_by_addr
+            .upsert_sync(new_addr, connection.clone());
+        let _ = self.addr_to_peer_id.upsert_sync(new_addr, peer_id.clone());
         // Also update peer_id_to_addr so disconnect uses the correct address
-        self.peer_id_to_addr.insert(peer_id.clone(), new_addr);
+        let _ = self.peer_id_to_addr.upsert_sync(peer_id.clone(), new_addr);
 
         // IMPORTANT: Keep the old (ephemeral) address entry as well!
         // Inbound messages still arrive with the TCP source address (old_addr),
@@ -6065,9 +5789,9 @@ impl ConnectionPool {
         // The old entry is NOT removed - both addresses are valid for this peer.
         if old_addr != new_addr {
             // Re-insert connection under old addr to ensure both addresses work
-            self.connections_by_addr.insert(old_addr, connection);
+            let _ = self.connections_by_addr.upsert_sync(old_addr, connection);
             // Keep addr_to_peer_id for old_addr so lookups work
-            self.addr_to_peer_id.insert(old_addr, peer_id.clone());
+            let _ = self.addr_to_peer_id.upsert_sync(old_addr, peer_id.clone());
         }
 
         info!(
@@ -6084,8 +5808,10 @@ impl ConnectionPool {
         peer_id: &crate::PeerId,
     ) -> Option<Arc<LockFreeConnection>> {
         // PRIMARY: Look up connection directly by peer ID
-        if let Some(conn_entry) = self.connections_by_peer.get(peer_id) {
-            let conn = conn_entry.value().clone();
+        if let Some(conn) = self
+            .connections_by_peer
+            .read_sync(peer_id, |_, v| v.clone())
+        {
             if conn.is_connected() {
                 debug!("CONNECTION POOL: Found connection for peer '{}'", peer_id);
                 return Some(conn);
@@ -6098,17 +5824,17 @@ impl ConnectionPool {
 
         // FALLBACK: Outbound connections may only be indexed by address.
         // Look up the address via peer_id_to_addr, then get the connection by address.
-        if let Some(addr) = self.peer_id_to_addr.get(peer_id).map(|e| *e.value()) {
-            if let Some(conn_entry) = self.connections_by_addr.get(&addr) {
-                let conn = conn_entry.value().clone();
+        if let Some(addr) = self.peer_id_to_addr.read_sync(peer_id, |_, v| *v) {
+            if let Some(conn) = self.connections_by_addr.read_sync(&addr, |_, v| v.clone()) {
                 if conn.is_connected() {
                     debug!(
                         "CONNECTION POOL: Found connection for peer '{}' via address fallback ({})",
                         peer_id, addr
                     );
                     // Index by peer_id for future lookups
-                    self.connections_by_peer
-                        .insert(peer_id.clone(), conn.clone());
+                    let _ = self
+                        .connections_by_peer
+                        .upsert_sync(peer_id.clone(), conn.clone());
                     return Some(conn);
                 }
             }
@@ -6119,11 +5845,11 @@ impl ConnectionPool {
             peer_id
         );
         // Debug: show what nodes we do have connections for
-        let connected_nodes: Vec<String> = self
-            .connections_by_peer
-            .iter()
-            .map(|entry| entry.key().to_hex())
-            .collect();
+        let mut connected_nodes: Vec<String> = Vec::new();
+        self.connections_by_peer.iter_sync(|peer_id, _| {
+            connected_nodes.push(peer_id.to_hex());
+            true
+        });
         warn!(
             "CONNECTION POOL: Available node connections: {:?}",
             connected_nodes
@@ -6136,19 +5862,13 @@ impl ConnectionPool {
         &self,
         addr: &SocketAddr,
     ) -> Option<Arc<LockFreeConnection>> {
-        self.connections_by_addr.get(addr).and_then(|entry| {
-            let conn = entry.value().clone();
-            if conn.is_connected() {
-                Some(conn)
-            } else {
-                None
-            }
-        })
+        let conn = self.connections_by_addr.read_sync(addr, |_, v| v.clone())?;
+        conn.is_connected().then_some(conn)
     }
 
     /// Get the peer ID for a given socket address
     pub fn get_peer_id_by_addr(&self, addr: &SocketAddr) -> Option<crate::PeerId> {
-        self.addr_to_peer_id.get(addr).map(|e| e.value().clone())
+        self.addr_to_peer_id.read_sync(addr, |_, v| v.clone())
     }
 
     /// Add an additional address mapping for a peer ID.
@@ -6158,7 +5878,7 @@ impl ConnectionPool {
             "CONNECTION POOL: Adding additional address {} -> peer_id {}",
             addr, peer_id
         );
-        self.addr_to_peer_id.insert(addr, peer_id);
+        let _ = self.addr_to_peer_id.upsert_sync(addr, peer_id);
     }
 
     /// Get the shared correlation tracker for a peer ID
@@ -6167,8 +5887,7 @@ impl ConnectionPool {
         peer_id: &crate::PeerId,
     ) -> Option<Arc<CorrelationTracker>> {
         self.correlation_trackers
-            .get(peer_id)
-            .map(|e| e.value().clone())
+            .read_sync(peer_id, |_, v| v.clone())
     }
 
     /// Get or create a correlation tracker for a peer
@@ -6178,7 +5897,7 @@ impl ConnectionPool {
     ) -> Arc<CorrelationTracker> {
         let tracker = self
             .correlation_trackers
-            .entry(peer_id.clone())
+            .entry_sync(peer_id.clone())
             .or_insert_with(|| {
                 debug!(
                     "CONNECTION POOL: Creating new correlation tracker for peer {}",
@@ -6186,6 +5905,7 @@ impl ConnectionPool {
                 );
                 CorrelationTracker::new()
             })
+            .get()
             .clone();
         debug!(
             "CONNECTION POOL: Got correlation tracker for peer {} (total trackers: {})",
@@ -6219,8 +5939,9 @@ impl ConnectionPool {
         } else {
             // Connection already has a correlation tracker - ensure it's registered
             if let Some(ref correlation) = connection.correlation {
-                self.correlation_trackers
-                    .insert(peer_id.clone(), correlation.clone());
+                let _ = self
+                    .correlation_trackers
+                    .upsert_sync(peer_id.clone(), correlation.clone());
                 debug!(
                     "CONNECTION POOL: Registered existing correlation tracker for peer '{}'",
                     peer_id
@@ -6229,7 +5950,7 @@ impl ConnectionPool {
         }
 
         // Update the address mappings
-        self.addr_to_peer_id.insert(addr, peer_id.clone());
+        let _ = self.addr_to_peer_id.upsert_sync(addr, peer_id.clone());
 
         debug!(
             "CONNECTION POOL: Added connection for peer '{}' (address: {})",
@@ -6237,10 +5958,12 @@ impl ConnectionPool {
         );
 
         // PRIMARY: Store the connection by peer ID
-        self.connections_by_peer.insert(peer_id, connection.clone());
+        let _ = self
+            .connections_by_peer
+            .upsert_sync(peer_id, connection.clone());
 
         // Also index by address for direct lookups
-        self.connections_by_addr.insert(addr, connection);
+        let _ = self.connections_by_addr.upsert_sync(addr, connection);
 
         self.connection_counter.fetch_add(1, Ordering::AcqRel);
         true
@@ -6256,7 +5979,7 @@ impl ConnectionPool {
             "CONNECTION POOL: Indexing connection by additional address {}",
             addr
         );
-        self.connections_by_addr.insert(addr, connection);
+        let _ = self.connections_by_addr.upsert_sync(addr, connection);
     }
 
     /// Send data to a peer by ID
@@ -6317,9 +6040,7 @@ impl ConnectionPool {
 
     /// Get or create a lock-free connection - NO MUTEX NEEDED
     pub fn get_lock_free_connection(&self, addr: SocketAddr) -> Option<Arc<LockFreeConnection>> {
-        self.connections_by_addr
-            .get(&addr)
-            .map(|entry| entry.value().clone())
+        self.connections_by_addr.read_sync(&addr, |_, v| v.clone())
     }
 
     /// Add a new lock-free connection - completely lock-free operation
@@ -6338,12 +6059,11 @@ impl ConnectionPool {
             ))));
         }
 
-        // Create lock-free streaming handle with exclusive socket ownership
+        // Create lock-free streaming handle with exclusive socket ownership.
         let (buffer_config, schema_hash, read_context) = self
             .registry
-            .lock()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
+            .load()
+            .upgrade()
             .map(|registry| {
                 let read_context = ReadContext {
                     registry_weak: Arc::downgrade(&registry),
@@ -6377,17 +6097,17 @@ impl ConnectionPool {
         connection.set_state(ConnectionState::Connected);
         connection.update_last_used();
 
-        // Track the writer task handle (H-004)
+        // Track the writer task handle (H-004).
         connection
             .task_tracker
-            .lock()
-            .set_writer(writer_task_handle);
+            .set_writer(writer_task_handle.abort_handle());
 
         let connection_arc = Arc::new(connection);
 
-        // Insert into lock-free hash map
-        self.connections_by_addr
-            .insert(addr, connection_arc.clone());
+        // Insert into lock-free hash map.
+        let _ = self
+            .connections_by_addr
+            .upsert_sync(addr, connection_arc.clone());
         debug!(
             "CONNECTION POOL: Added lock-free connection to {} - pool now has {} connections",
             addr,
@@ -6409,13 +6129,12 @@ impl ConnectionPool {
             }
         } else {
             warn!(addr = %addr, "No connection found for address");
-            warn!(
-                "Available connections: {:?}",
-                self.connections_by_addr
-                    .iter()
-                    .map(|e| *e.key())
-                    .collect::<Vec<_>>()
-            );
+            let mut addrs: Vec<SocketAddr> = Vec::new();
+            self.connections_by_addr.iter_sync(|addr, _| {
+                addrs.push(*addr);
+                true
+            });
+            warn!("Available connections: {:?}", addrs);
         }
         Err(crate::GossipError::Network(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -6473,7 +6192,7 @@ impl ConnectionPool {
     /// Remove a connection from the pool - lock-free operation
     pub fn remove_connection(&self, addr: SocketAddr) -> Option<Arc<LockFreeConnection>> {
         // First remove from address-based map
-        if let Some((_, connection)) = self.connections_by_addr.remove(&addr) {
+        if let Some((_, connection)) = self.connections_by_addr.remove_sync(&addr) {
             debug!(
                 "CONNECTION POOL: Removed connection to {} - pool now has {} connections",
                 addr,
@@ -6481,9 +6200,8 @@ impl ConnectionPool {
             );
 
             // Also remove from node ID mapping
-            if let Some(node_id_entry) = self.addr_to_peer_id.remove(&addr) {
-                let (_, node_id) = node_id_entry;
-                if let Some((_, _)) = self.connections_by_peer.remove(&node_id) {
+            if let Some((_, node_id)) = self.addr_to_peer_id.remove_sync(&addr) {
+                if self.connections_by_peer.remove_sync(&node_id).is_some() {
                     debug!(
                         "CONNECTION POOL: Also removed connection by node ID '{}'",
                         node_id
@@ -6508,12 +6226,12 @@ impl ConnectionPool {
         &self,
         peer_id: &crate::PeerId,
     ) -> Option<Arc<LockFreeConnection>> {
-        if let Some((_, connection)) = self.connections_by_peer.remove(peer_id) {
+        if let Some((_, connection)) = self.connections_by_peer.remove_sync(peer_id) {
             // Remove peer_id_to_addr entry
-            self.peer_id_to_addr.remove(peer_id);
+            let _ = self.peer_id_to_addr.remove_sync(peer_id);
 
             // Remove correlation tracker to prevent memory leak (LEAK-001 fix)
-            if self.correlation_trackers.remove(peer_id).is_some() {
+            if self.correlation_trackers.remove_sync(peer_id).is_some() {
                 debug!(
                     peer_id = %peer_id,
                     "Cleaned up correlation tracker for disconnected peer"
@@ -6522,16 +6240,17 @@ impl ConnectionPool {
 
             // Remove ALL addr_to_peer_id entries for this peer
             // (may have multiple due to reindexing keeping both ephemeral and bind addresses)
-            let addrs_to_remove: Vec<SocketAddr> = self
-                .addr_to_peer_id
-                .iter()
-                .filter(|entry| entry.value() == peer_id)
-                .map(|entry| *entry.key())
-                .collect();
+            let mut addrs_to_remove: Vec<SocketAddr> = Vec::new();
+            self.addr_to_peer_id.iter_sync(|addr, pid| {
+                if pid == peer_id {
+                    addrs_to_remove.push(*addr);
+                }
+                true
+            });
 
             for addr in &addrs_to_remove {
-                self.addr_to_peer_id.remove(addr);
-                self.connections_by_addr.remove(addr);
+                let _ = self.addr_to_peer_id.remove_sync(addr);
+                let _ = self.connections_by_addr.remove_sync(addr);
                 self.clear_capabilities_for_addr(addr);
             }
 
@@ -6548,43 +6267,47 @@ impl ConnectionPool {
 
     /// Get connection count - lock-free operation
     pub fn connection_count(&self) -> usize {
-        self.connections_by_peer
-            .iter()
-            .filter(|entry| entry.value().is_connected())
-            .count()
+        let mut count = 0usize;
+        self.connections_by_peer.iter_sync(|_, conn| {
+            if conn.is_connected() {
+                count += 1;
+            }
+            true
+        });
+        count
     }
 
     /// Get all connected peers - lock-free operation
     pub fn get_connected_peers(&self) -> Vec<SocketAddr> {
-        self.connections_by_addr
-            .iter()
-            .filter_map(|entry| {
-                if entry.value().is_connected() {
-                    Some(*entry.key())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        let mut peers: Vec<SocketAddr> = Vec::new();
+        self.connections_by_addr.iter_sync(|addr, conn| {
+            if conn.is_connected() {
+                peers.push(*addr);
+            }
+            true
+        });
+        peers
     }
 
     /// Get all connections (including disconnected) - for debugging
     pub fn get_all_connections(&self) -> Vec<SocketAddr> {
-        self.connections_by_addr
-            .iter()
-            .map(|entry| *entry.key())
-            .collect()
+        let mut peers: Vec<SocketAddr> = Vec::new();
+        self.connections_by_addr.iter_sync(|addr, _| {
+            peers.push(*addr);
+            true
+        });
+        peers
     }
 
     /// Get a buffer from the pool or create a new one
     pub fn get_buffer(&mut self, min_capacity: usize) -> Vec<u8> {
         // Use the message buffer pool for lock-free buffer management
-        if let Some(buffer) = self.message_buffer_pool.lock().get_buffer() {
+        if let Some(buffer) = self.message_buffer_pool.get_buffer() {
             if buffer.capacity() >= min_capacity {
                 return buffer;
             }
             // Buffer too small, return it and create new one
-            self.message_buffer_pool.lock().return_buffer(buffer);
+            self.message_buffer_pool.return_buffer(buffer);
         }
         Vec::with_capacity(min_capacity.max(1024)) // Minimum 1KB buffers
     }
@@ -6593,7 +6316,7 @@ impl ConnectionPool {
     pub fn return_buffer(&mut self, buffer: Vec<u8>) {
         if buffer.capacity() >= 1024 && buffer.capacity() <= TCP_BUFFER_SIZE {
             // Return to the lock-free message buffer pool (up to TCP_BUFFER_SIZE)
-            self.message_buffer_pool.lock().return_buffer(buffer);
+            self.message_buffer_pool.return_buffer(buffer);
         }
         // Otherwise let the buffer drop
     }
@@ -6601,7 +6324,6 @@ impl ConnectionPool {
     /// Get a message buffer from the pool for zero-copy processing
     pub fn get_message_buffer(&self) -> Vec<u8> {
         self.message_buffer_pool
-            .lock()
             .get_buffer()
             .unwrap_or_else(|| Vec::with_capacity(TCP_BUFFER_SIZE / 256)) // Default small buffer
     }
@@ -6610,7 +6332,7 @@ impl ConnectionPool {
     pub fn return_message_buffer(&self, buffer: Vec<u8>) {
         if buffer.capacity() >= 1024 && buffer.capacity() <= TCP_BUFFER_SIZE {
             // Keep buffers with reasonable size (up to TCP_BUFFER_SIZE)
-            self.message_buffer_pool.lock().return_buffer(buffer);
+            self.message_buffer_pool.return_buffer(buffer);
         }
         // Otherwise let the buffer drop
     }
@@ -6620,7 +6342,6 @@ impl ConnectionPool {
         let header = framing::write_gossip_frame_prefix(data.len());
         let mut buffer = self
             .message_buffer_pool
-            .lock()
             .get_buffer()
             .unwrap_or_else(|| Vec::with_capacity(header.len() + data.len()));
         buffer.extend_from_slice(&header); // ALLOW_COPY
@@ -6633,41 +6354,37 @@ impl ConnectionPool {
     pub fn get_existing_connection(&self, addr: SocketAddr) -> Option<ConnectionHandle> {
         let _current_time = current_timestamp();
 
-        if let Some(conn) = self.connections_by_addr.get_mut(&addr) {
-            // The connection here is a mutable reference to Arc<LockFreeConnection>
-            if conn.value().is_connected() {
-                conn.value().update_last_used();
-                debug!(addr = %addr, "using existing persistent connection (fast path)");
-                if let Some(ref stream_handle) = conn.value().stream_handle {
-                    // Look up peer_id to get shared correlation tracker
-                    let peer_id = self.addr_to_peer_id.get(&addr).map(|e| e.clone());
-
-                    // Use shared correlation tracker if we have a peer_id, otherwise use connection's tracker
-                    let correlation = if let Some(pid) = peer_id {
-                        self.get_or_create_correlation_tracker(&pid)
-                    } else {
-                        conn.value()
-                            .correlation
-                            .clone()
-                            .unwrap_or_else(CorrelationTracker::new)
-                    };
-
-                    return Some(ConnectionHandle {
-                        addr,
-                        stream_handle: stream_handle.clone(),
-                        correlation,
-                    });
-                }
-
-                debug!(addr = %addr, "existing connection missing stream handle");
-                return None;
-            } else {
-                // Remove disconnected connection
-                debug!(addr = %addr, "removing disconnected connection");
-                self.connections_by_addr.remove(&addr);
-            }
+        let conn = self
+            .connections_by_addr
+            .read_sync(&addr, |_, v| v.clone())?;
+        if !conn.is_connected() {
+            debug!(addr = %addr, "removing disconnected connection");
+            let _ = self.connections_by_addr.remove_sync(&addr);
+            return None;
         }
-        None
+
+        conn.update_last_used();
+        debug!(addr = %addr, "using existing persistent connection (fast path)");
+
+        let stream_handle = conn.stream_handle.as_ref()?.clone();
+
+        // Look up peer_id to get shared correlation tracker.
+        let peer_id = self.addr_to_peer_id.read_sync(&addr, |_, v| v.clone());
+
+        // Use shared correlation tracker if we have a peer_id, otherwise use connection's tracker.
+        let correlation = if let Some(pid) = peer_id {
+            self.get_or_create_correlation_tracker(&pid)
+        } else {
+            conn.correlation
+                .clone()
+                .unwrap_or_else(CorrelationTracker::new)
+        };
+
+        Some(ConnectionHandle {
+            addr,
+            stream_handle,
+            correlation,
+        })
     }
 
     /// Get or create a connection to a peer by its ID
@@ -6681,8 +6398,10 @@ impl ConnectionPool {
         );
 
         // First check if we already have a connection to this node
-        if let Some(conn_entry) = self.connections_by_peer.get(peer_id) {
-            let conn = conn_entry.value();
+        if let Some(conn) = self
+            .connections_by_peer
+            .read_sync(peer_id, |_, v| v.clone())
+        {
             if conn.is_connected() {
                 conn.update_last_used();
                 debug!(
@@ -6700,18 +6419,17 @@ impl ConnectionPool {
                             addr = %addr,
                             "CONNECTION POOL: existing peer entry has exited IO task; evicting"
                         );
-                        drop(conn_entry);
                         let _ = self.remove_connection(addr);
                     } else {
-                    // Need to get the address for ConnectionHandle
-                    let addr = conn.addr;
-                    // Use shared correlation tracker
-                    let correlation = self.get_or_create_correlation_tracker(peer_id);
-                    return Ok(ConnectionHandle {
-                        addr,
-                        stream_handle: stream_handle.clone(),
-                        correlation,
-                    });
+                        // Need to get the address for ConnectionHandle
+                        let addr = conn.addr;
+                        // Use shared correlation tracker
+                        let correlation = self.get_or_create_correlation_tracker(peer_id);
+                        return Ok(ConnectionHandle {
+                            addr,
+                            stream_handle: stream_handle.clone(),
+                            correlation,
+                        });
                     }
                 } else {
                     return Err(crate::GossipError::Network(std::io::Error::other(
@@ -6724,14 +6442,13 @@ impl ConnectionPool {
                     "CONNECTION POOL: Removing disconnected connection to peer '{}'",
                     peer_id
                 );
-                drop(conn_entry);
-                self.connections_by_peer.remove(peer_id);
+                let _ = self.connections_by_peer.remove_sync(peer_id);
             }
         }
 
         // Look up the address for this node
-        let addr = if let Some(addr_entry) = self.peer_id_to_addr.get(peer_id) {
-            *addr_entry.value()
+        let addr = if let Some(addr) = self.peer_id_to_addr.read_sync(peer_id, |_, v| *v) {
+            addr
         } else {
             return Err(crate::GossipError::Network(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -6754,10 +6471,9 @@ impl ConnectionPool {
             .await?;
 
         // After successful connection, ensure it's indexed by node ID
-        if let Some(conn) = self.connections_by_addr.get(&addr) {
-            self.connections_by_peer
-                .insert(peer_id.clone(), conn.value().clone());
-            self.addr_to_peer_id.insert(addr, peer_id.clone());
+        if let Some(conn) = self.connections_by_addr.read_sync(&addr, |_, v| v.clone()) {
+            let _ = self.connections_by_peer.upsert_sync(peer_id.clone(), conn);
+            let _ = self.addr_to_peer_id.upsert_sync(addr, peer_id.clone());
             debug!(
                 "CONNECTION POOL: Indexed new connection under peer ID '{}'",
                 peer_id
@@ -6777,32 +6493,31 @@ impl ConnectionPool {
         node_id: Option<crate::NodeId>,
     ) -> Result<ConnectionHandle> {
         let _current_time = current_timestamp();
+        let mut addr = addr;
         // Debug logging removed for performance - these logs were too verbose
         // debug!("CONNECTION POOL: get_connection called on pool at {:p} for {}", self as *const _, addr);
         // debug!("CONNECTION POOL: This pool instance has {} connections stored", self.connections_by_addr.len());
 
         // Use address index to reuse existing connections when available
 
-        // Check if we already have a lock-free connection
-        if let Some(entry) = self.connections_by_addr.get(&addr) {
-            let conn = entry.value();
+        // Check if we already have a lock-free connection (fast path).
+        if let Some(conn) = self.connections_by_addr.read_sync(&addr, |_, v| v.clone()) {
             if conn.is_connected() {
-                // If IO task exited, treat as disconnected and force a fresh dial.
                 if let Some(ref stream_handle) = conn.stream_handle {
+                    // If IO task exited, treat as disconnected and force a fresh dial.
                     if stream_handle.exit_flag.load(Ordering::Acquire) {
                         debug!(addr = %addr, "found closed stream handle, removing stale connection");
                         conn.set_state(ConnectionState::Disconnected);
-                        drop(entry);
-                        self.connections_by_addr.remove(&addr);
+                        let _ = self.connections_by_addr.remove_sync(&addr);
                     } else {
                         conn.update_last_used();
                         debug!(addr = %addr, "found existing lock-free connection, reusing handle");
 
-                        // Return the existing lock-free connection handle
-                        // Look up peer_id to get shared correlation tracker
-                        let peer_id = self.addr_to_peer_id.get(&addr).map(|e| e.clone());
+                        // Return the existing lock-free connection handle.
+                        // Look up peer_id to get shared correlation tracker.
+                        let peer_id = self.addr_to_peer_id.read_sync(&addr, |_, v| v.clone());
 
-                        // Use shared correlation tracker if we have a peer_id, otherwise use connection's tracker
+                        // Use shared correlation tracker if we have a peer_id, otherwise use connection's tracker.
                         let correlation = if let Some(pid) = peer_id {
                             self.get_or_create_correlation_tracker(&pid)
                         } else {
@@ -6818,32 +6533,30 @@ impl ConnectionPool {
                         });
                     }
                 } else {
-                    // Connection exists but no stream handle - this shouldn't happen
+                    // Connection exists but no stream handle - this shouldn't happen.
                     return Err(crate::GossipError::Network(std::io::Error::other(
                         "Connection exists but no stream handle",
                     )));
                 }
             } else {
-                // Remove disconnected connection
+                // Remove disconnected connection.
                 debug!(addr = %addr, "removing disconnected connection");
-                drop(entry);
-                self.connections_by_addr.remove(&addr);
+                let _ = self.connections_by_addr.remove_sync(&addr);
             }
         }
 
         // Extract what we need before any await points to avoid Send issues
         let max_connections = self.max_connections;
         let connection_timeout = self.connection_timeout;
-        let registry_weak = self.registry.lock().clone();
+        let registry_weak = self.registry.load_full();
         let resolved_node_id = match node_id {
             Some(node_id) => Some(node_id),
             None => {
-                if let Some(registry_arc) = registry_weak.as_ref().and_then(|w| w.upgrade()) {
+                if let Some(registry_arc) = registry_weak.upgrade() {
                     registry_arc.lookup_node_id(&addr).await.or_else(|| {
                         registry_arc
                             .peer_capability_addr_to_node
-                            .get(&addr)
-                            .map(|entry| *entry.value())
+                            .read_sync(&addr, |_, v| *v)
                     })
                 } else {
                     None
@@ -6851,25 +6564,32 @@ impl ConnectionPool {
             }
         };
 
-        // Make room if necessary - operate on self.connections_by_addr directly!
+        // Make room if necessary - evict the least-recently-used connection.
         if self.connections_by_addr.len() >= max_connections {
-            let oldest_addr = self
-                .connections_by_addr
-                .iter()
-                .min_by_key(|entry| entry.value().last_used.load(Ordering::Acquire))
-                .map(|entry| *entry.key());
+            let mut oldest: Option<(SocketAddr, usize)> = None;
+            self.connections_by_addr.iter_sync(|addr, conn| {
+                let last_used = conn.last_used.load(Ordering::Acquire);
+                match oldest {
+                    None => oldest = Some((*addr, last_used)),
+                    Some((_, best_last_used)) => {
+                        if last_used < best_last_used {
+                            oldest = Some((*addr, last_used));
+                        }
+                    }
+                }
+                true
+            });
 
-            if let Some(oldest) = oldest_addr {
-                self.connections_by_addr.remove(&oldest);
-                warn!(addr = %oldest, "removed oldest connection to make room");
+            if let Some((oldest_addr, _)) = oldest {
+                let _ = self.remove_connection(oldest_addr);
+                warn!(addr = %oldest_addr, "removed oldest connection to make room");
             }
         }
 
         // Duplicate connection tie-breaker: decide whether to reuse an existing link
-        if let (Some(registry_arc), Some(node_id_value)) = (
-            registry_weak.as_ref().and_then(|w| w.upgrade()),
-            resolved_node_id.as_ref(),
-        ) {
+        if let (Some(registry_arc), Some(node_id_value)) =
+            (registry_weak.upgrade(), resolved_node_id.as_ref())
+        {
             let remote_peer_id = crate::PeerId::from(node_id_value);
             if let Some(existing_conn) = self.get_connection_by_peer_id(&remote_peer_id) {
                 let alive = existing_conn.is_connected()
@@ -6917,209 +6637,246 @@ impl ConnectionPool {
             }
         }
 
-        // Connect with timeout
-        debug!("CONNECTION POOL: Attempting to connect to {}", addr);
-        let stream = tokio::time::timeout(connection_timeout, TcpStream::connect(addr))
-            .await
-            .map_err(|_| {
-                debug!("CONNECTION POOL: Connection to {} timed out after {:?}", addr, connection_timeout);
-                GossipError::Timeout
-            })?
-            .map_err(|e| {
-                debug!("CONNECTION POOL: Connection to {} failed: {} (will retry in {}s if this is a gossip peer)",
-                      addr, e, 5); // 5s is the default retry interval
-                GossipError::Network(e)
-            })?;
-        debug!("CONNECTION POOL: Successfully connected to {}", addr);
+        let mut dns_refreshed = false;
+        let tls_stream = loop {
+            let attempt: Result<_> = async {
+                debug!("CONNECTION POOL: Attempting to connect to {}", addr);
+                let stream = tokio::time::timeout(connection_timeout, TcpStream::connect(addr))
+                    .await
+                    .map_err(|_| {
+                        debug!(
+                            "CONNECTION POOL: Connection to {} timed out after {:?}",
+                            addr, connection_timeout
+                        );
+                        GossipError::Timeout
+                    })?
+                    .map_err(|e| {
+                        debug!(
+                            "CONNECTION POOL: Connection to {} failed: {} (will retry in {}s if this is a gossip peer)",
+                            addr, e, 5
+                        ); // 5s is the default retry interval
+                        GossipError::Network(e)
+                    })?;
+                debug!("CONNECTION POOL: Successfully connected to {}", addr);
 
-        // Configure socket
-        stream.set_nodelay(true).map_err(GossipError::Network)?;
-        if let Some(registry_arc) = registry_weak.as_ref().and_then(|w| w.upgrade()) {
-            crate::net::apply_tcp_keepalive(&stream, &registry_arc.config);
-        }
+                // Configure socket
+                stream.set_nodelay(true).map_err(GossipError::Network)?;
+                if let Some(registry_arc) = registry_weak.upgrade() {
+                    crate::net::apply_tcp_keepalive(&stream, &registry_arc.config);
+                }
 
-        // Check if TLS is enabled
-        let tls_stream = if let Some(registry_arc) = registry_weak
-            .as_ref()
-            .and_then(|w| w.upgrade())
-        {
-            if let Some(tls_config) = &registry_arc.tls_config {
-                // TLS is enabled - perform handshake as client
-                debug!("CONNECTION POOL: TLS enabled, checking for peer NodeId");
+                // Check if TLS is enabled
+                let tls_stream = if let Some(registry_arc) = registry_weak.upgrade() {
+                    if let Some(tls_config) = &registry_arc.tls_config {
+                        // TLS is enabled - perform handshake as client
+                        debug!("CONNECTION POOL: TLS enabled, checking for peer NodeId");
 
-                // Use provided NodeId if available, otherwise look it up from gossip state
-                let peer_node_id = resolved_node_id.or_else(|| {
-                    registry_arc
-                        .peer_capability_addr_to_node
-                        .get(&addr)
-                        .map(|entry| *entry.value())
-                });
+                        // Use provided NodeId if available, otherwise look it up from gossip state
+                        let peer_node_id = resolved_node_id.or_else(|| {
+                            registry_arc
+                                .peer_capability_addr_to_node
+                                .read_sync(&addr, |_, v| *v)
+                        });
 
-                let mut discovered_node_id = peer_node_id;
-                let (server_name, server_name_label) = if let Some(node_id) = discovered_node_id {
-                    debug!(
-                        "CONNECTION POOL: Found NodeId for peer {}, performing TLS handshake",
-                        addr
-                    );
-                    let dns_name = crate::tls::name::encode(&node_id);
-                    let server_name = rustls::pki_types::ServerName::try_from(dns_name)
-                        .map_err(|e| GossipError::TlsError(format!("Invalid DNS name: {}", e)))?;
-                    (server_name, format!("NodeId {}", node_id.fmt_short()))
-                } else {
-                    // Use placeholder DNS name so TLS can still negotiate; verifier will extract NodeId from cert
-                    let placeholder = format!("peer-{}.kameo.invalid", addr.port());
-                    let server_name = rustls::pki_types::ServerName::try_from(placeholder.clone())
-                        .map_err(|e| {
-                            GossipError::TlsError(format!("Invalid fallback DNS name: {}", e))
-                        })?;
-                    (
-                        server_name,
-                        format!("placeholder SNI {} (NodeId unknown)", placeholder),
-                    )
-                };
+                        let mut discovered_node_id = peer_node_id;
+                        let (server_name, server_name_label) =
+                            if let Some(node_id) = discovered_node_id {
+                                debug!(
+                                    "CONNECTION POOL: Found NodeId for peer {}, performing TLS handshake",
+                                    addr
+                                );
+                                let dns_name = crate::tls::name::encode(&node_id);
+                                let server_name =
+                                    rustls::pki_types::ServerName::try_from(dns_name).map_err(
+                                        |e| GossipError::TlsError(format!("Invalid DNS name: {}", e)),
+                                    )?;
+                                (server_name, format!("NodeId {}", node_id.fmt_short()))
+                            } else {
+                                // Use placeholder DNS name so TLS can still negotiate; verifier will extract NodeId from cert
+                                let placeholder = format!("peer-{}.kameo.invalid", addr.port());
+                                let server_name =
+                                    rustls::pki_types::ServerName::try_from(placeholder.clone())
+                                        .map_err(|e| {
+                                            GossipError::TlsError(format!(
+                                                "Invalid fallback DNS name: {}",
+                                                e
+                                            ))
+                                        })?;
+                                (
+                                    server_name,
+                                    format!("placeholder SNI {} (NodeId unknown)", placeholder),
+                                )
+                            };
 
-                info!(
-                    "🔐 TLS ENABLED: Initiating TLS connection to {} using {}",
-                    addr, server_name_label
-                );
-                let connector = tokio_rustls::TlsConnector::from(tls_config.client_config.clone());
+                        info!(
+                            "🔐 TLS ENABLED: Initiating TLS connection to {} using {}",
+                            addr, server_name_label
+                        );
+                        let connector =
+                            tokio_rustls::TlsConnector::from(tls_config.client_config.clone());
 
-                match tokio::time::timeout(
-                    Duration::from_secs(10),
-                    connector.connect(server_name, stream),
-                )
-                .await
-                {
-                    Ok(Ok(mut tls_stream)) => {
-                        if discovered_node_id.is_none() {
-                            if let Some(certs) = tls_stream.get_ref().1.peer_certificates() {
-                                if let Some(cert) = certs.first() {
-                                    match crate::tls::extract_node_id_from_cert(cert) {
-                                        Ok(node_id) => {
-                                            debug!(
-                                                addr = %addr,
-                                                "Extracted NodeId {} from peer certificate",
-                                                node_id.fmt_short()
-                                            );
-                                            // Spawn to avoid deadlock: get_connection_with_node_id holds pool lock,
-                                            // and add_peer_with_node_id tries to acquire it.
-                                            let registry_clone = registry_arc.clone();
-                                            if registry_arc.lookup_node_id(&addr).await.is_none() {
-                                                tokio::spawn(async move {
-                                                    registry_clone
-                                                        .add_peer_with_node_id(addr, Some(node_id))
-                                                        .await;
-                                                });
-                                            }
-                                            discovered_node_id = Some(node_id);
-                                        }
-                                        Err(err) => {
-                                            warn!(
-                                                addr = %addr,
-                                                error = %err,
-                                                "Failed to extract NodeId from peer certificate"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(node_id) = discovered_node_id {
-                            info!(
-                                "✅ TLS handshake successful with {} (NodeId: {})",
-                                addr,
-                                node_id.fmt_short()
-                            );
-                        } else {
-                            info!("✅ TLS handshake successful with {} (NodeId unknown)", addr);
-                        }
-
-                        let negotiated_alpn = tls_stream
-                            .get_ref()
-                            .1
-                            .alpn_protocol()
-                            .map(|proto| proto.to_vec());
-
-                        let enable_peer_discovery = registry_arc.config.enable_peer_discovery;
-                        let peer_caps = match crate::handshake::perform_hello_handshake(
-                            &mut tls_stream,
-                            negotiated_alpn.as_deref(),
-                            enable_peer_discovery,
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            connector.connect(server_name, stream),
                         )
                         .await
                         {
-                            Ok(caps) => caps,
-                            Err(err) => {
-                                warn!(
-                                    addr = %addr,
-                                    error = %err,
-                                    "Hello handshake failed after TLS session establishment"
-                                );
-                                return Err(err);
+                            Ok(Ok(mut tls_stream)) => {
+                                if discovered_node_id.is_none() {
+                                    if let Some(certs) =
+                                        tls_stream.get_ref().1.peer_certificates()
+                                    {
+                                        if let Some(cert) = certs.first() {
+                                            match crate::tls::extract_node_id_from_cert(cert) {
+                                                Ok(node_id) => {
+                                                    debug!(
+                                                        addr = %addr,
+                                                        "Extracted NodeId {} from peer certificate",
+                                                        node_id.fmt_short()
+                                                    );
+                                                    // Spawn to avoid deadlock: get_connection_with_node_id holds pool lock,
+                                                    // and add_peer_with_node_id tries to acquire it.
+                                                    let registry_clone = registry_arc.clone();
+                                                    if registry_arc.lookup_node_id(&addr).await.is_none()
+                                                    {
+                                                        tokio::spawn(async move {
+                                                            registry_clone
+                                                                .add_peer_with_node_id(
+                                                                    addr,
+                                                                    Some(node_id),
+                                                                )
+                                                                .await;
+                                                        });
+                                                    }
+                                                    discovered_node_id = Some(node_id);
+                                                }
+                                                Err(err) => {
+                                                    warn!(
+                                                        addr = %addr,
+                                                        error = %err,
+                                                        "Failed to extract NodeId from peer certificate"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(node_id) = discovered_node_id {
+                                    info!(
+                                        "✅ TLS handshake successful with {} (NodeId: {})",
+                                        addr,
+                                        node_id.fmt_short()
+                                    );
+                                } else {
+                                    info!(
+                                        "✅ TLS handshake successful with {} (NodeId unknown)",
+                                        addr
+                                    );
+                                }
+
+                                let negotiated_alpn = tls_stream
+                                    .get_ref()
+                                    .1
+                                    .alpn_protocol()
+                                    .map(|proto| proto.to_vec());
+
+                                let enable_peer_discovery = registry_arc.config.enable_peer_discovery;
+                                let peer_caps = crate::handshake::perform_hello_handshake(
+                                    &mut tls_stream,
+                                    negotiated_alpn.as_deref(),
+                                    enable_peer_discovery,
+                                )
+                                .await?;
+                                registry_arc.set_peer_capabilities(addr, peer_caps);
+
+                                if let Some(node_id) = discovered_node_id.or_else(|| {
+                                    registry_arc
+                                        .lookup_node_id(&addr)
+                                        .now_or_never()
+                                        .flatten()
+                                }) {
+                                    registry_arc
+                                        .associate_peer_capabilities_with_node(addr, node_id)
+                                        .await;
+
+                                    // Notify peer discovery that a connection is established (outgoing)
+                                    // H-004: Spawn to avoid potential deadlock as we currently hold the Pool lock
+                                    // and mark_peer_connected locks GossipState (safe) but potentially interacts back
+                                    let registry_clone_for_mark = registry_arc.clone();
+                                    tokio::spawn(async move {
+                                        registry_clone_for_mark.mark_peer_connected(addr).await;
+                                    });
+                                }
+
+                                Ok::<_, GossipError>(tls_stream)
                             }
-                        };
-                        registry_arc.set_peer_capabilities(addr, peer_caps.clone());
-
-                        if let Some(node_id) = discovered_node_id
-                            .or_else(|| registry_arc.lookup_node_id(&addr).now_or_never().flatten())
-                        {
-                            registry_arc
-                                .associate_peer_capabilities_with_node(addr, node_id)
-                                .await;
-
-                            // Notify peer discovery that a connection is established (outgoing)
-                            // H-004: Spawn to avoid potential deadlock as we currently hold the Pool lock
-                            // and mark_peer_connected locks GossipState (safe) but potentially interacts back
-                            let registry_clone_for_mark = registry_arc.clone();
-                            tokio::spawn(async move {
-                                registry_clone_for_mark.mark_peer_connected(addr).await;
-                            });
-                        }
-
-                        tls_stream
-                    }
-                    Ok(Err(e)) => {
-                        error!(addr = %addr, error = %e, "❌ TLS handshake failed");
-                        return Err(GossipError::TlsError(format!(
-                            "TLS handshake failed: {}",
-                            e
+                            Ok(Err(e)) => {
+                                error!(addr = %addr, error = %e, "❌ TLS handshake failed");
+                                Err(GossipError::TlsError(format!(
+                                    "TLS handshake failed: {}",
+                                    e
+                                )))
+                            }
+                            Err(_) => {
+                                error!(
+                                    addr = %addr,
+                                    "⏱️ TLS handshake timed out (NodeId hint: {:?})",
+                                    discovered_node_id.as_ref().map(|id| id.fmt_short())
+                                );
+                                Err(GossipError::Timeout)
+                            }
+                        }?
+                    } else {
+                        // TLS is required for kameo_remote connections. Don't panic in background IO tasks;
+                        // return a typed error so callers can mark the peer as failed / retry.
+                        return Err(GossipError::TlsConfigError(format!(
+                            "TLS is required but not configured (addr={})",
+                            addr
                         )));
                     }
-                    Err(_) => {
-                        error!(
-                            addr = %addr,
-                            "⏱️ TLS handshake timed out (NodeId hint: {:?})",
-                            discovered_node_id.as_ref().map(|id| id.fmt_short())
-                        );
-                        return Err(GossipError::Timeout);
-                    }
-                }
-            } else {
-                // TLS is required for kameo_remote connections. Don't panic in background IO tasks;
-                // return a typed error so callers can mark the peer as failed / retry.
-                return Err(GossipError::TlsConfigError(format!(
-                    "TLS is required but not configured (addr={})",
-                    addr
-                )));
+                } else {
+                    // This can happen during shutdown or mis-wiring (pool used before registry sets the weak ref).
+                    // Returning Shutdown avoids panics from background connection attempts.
+                    return Err(GossipError::Shutdown);
+                };
+
+                Ok(tls_stream)
             }
-        } else {
-            // This can happen during shutdown or mis-wiring (pool used before registry sets the weak ref).
-            // Returning Shutdown avoids panics from background connection attempts.
-            return Err(GossipError::Shutdown);
+            .await;
+
+            match attempt {
+                Ok(s) => break s,
+                Err(e) => {
+                    if !dns_refreshed {
+                        if let Some(registry_arc) = registry_weak.upgrade() {
+                            if let Some(new_addr) = registry_arc.refresh_peer_dns(addr).await {
+                                addr = new_addr;
+                                dns_refreshed = true;
+                                continue;
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
         };
 
         // Determine peer ID (if known) before creating the stream handle.
         let peer_id_opt = self
             .addr_to_peer_id
-            .get(&addr)
-            .map(|entry| entry.clone())
+            .read_sync(&addr, |_, v| v.clone())
             .or_else(|| {
-                // Try reverse lookup: find peer ID that maps to this address
-                self.peer_id_to_addr
-                    .iter()
-                    .find(|entry| entry.value() == &addr)
-                    .map(|entry| entry.key().clone())
+                // Try reverse lookup: find peer ID that maps to this address.
+                let mut found: Option<crate::PeerId> = None;
+                self.peer_id_to_addr.iter_sync(|peer_id, peer_addr| {
+                    if peer_addr == &addr {
+                        found = Some(peer_id.clone());
+                        return false;
+                    }
+                    true
+                });
+                found
             });
 
         let correlation_tracker = peer_id_opt
@@ -7128,11 +6885,8 @@ impl ConnectionPool {
             .unwrap_or_else(CorrelationTracker::new);
 
         // Create lock-free connection for receiving
-        let (buffer_config, schema_hash, read_context) = self
-            .registry
-            .lock()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
+        let (buffer_config, schema_hash, read_context) = registry_weak
+            .upgrade()
             .map(|registry| {
                 let read_context = ReadContext {
                     registry_weak: Arc::downgrade(&registry),
@@ -7165,8 +6919,9 @@ impl ConnectionPool {
         conn.set_state(ConnectionState::Connected);
         conn.update_last_used();
 
-        // Track the writer task handle (H-004)
-        conn.task_tracker.lock().set_writer(writer_task_handle);
+        // Track the writer task handle (H-004).
+        conn.task_tracker
+            .set_writer(writer_task_handle.abort_handle());
 
         // For outgoing connections, we might know the peer ID from configuration
         if let Some(peer_id) = peer_id_opt.clone() {
@@ -7189,27 +6944,31 @@ impl ConnectionPool {
 
         let connection_arc = Arc::new(conn);
 
-        // Insert into lock-free map before spawning
-        self.connections_by_addr
-            .insert(addr, connection_arc.clone());
-        debug!("CONNECTION POOL: Added connection via get_connection to {} - pool now has {} connections",
-              addr, self.connections_by_addr.len());
+        // Insert into lock-free map before spawning.
+        let _ = self
+            .connections_by_addr
+            .upsert_sync(addr, connection_arc.clone());
+        debug!(
+            "CONNECTION POOL: Added connection via get_connection to {} - pool now has {} connections",
+            addr,
+            self.connections_by_addr.len()
+        );
         // Double check it's really there
         assert!(
-            self.connections_by_addr.contains_key(&addr),
+            self.connections_by_addr.contains_sync(&addr),
             "Connection was not added to pool!"
         );
         debug!("CONNECTION POOL: Verified connection exists for {}", addr);
 
         // Send initial FullSync message to identify ourselves
-        if let Some(registry_arc) = registry_weak.as_ref().and_then(|w| w.upgrade()) {
+        if let Some(registry_arc) = registry_weak.upgrade() {
             let initial_msg = {
-                let actor_state = registry_arc.actor_state.read().await;
+                let (local_actors, known_actors) = registry_arc.snapshot_actor_pairs();
                 let gossip_state = registry_arc.gossip_state.lock().await;
 
                 RegistryMessage::FullSync {
-                    local_actors: actor_state.local_actors.clone().into_iter().collect(),
-                    known_actors: actor_state.known_actors.clone().into_iter().collect(),
+                    local_actors,
+                    known_actors,
                     sender_peer_id: registry_arc.peer_id.clone(),
                     sender_bind_addr: Some(registry_arc.bind_addr.to_string()), // Use our listening address, not ephemeral port
                     sequence: gossip_state.gossip_sequence,
@@ -7249,38 +7008,36 @@ impl ConnectionPool {
         // Note: actor_message_handler is fetched from registry on each message to handle
         // cases where the handler is registered after connection establishment
 
-        // Reset failure state for this peer since we successfully connected
-        if let Some(ref registry_weak) = registry_weak {
-            if let Some(registry) = registry_weak.upgrade() {
-                let registry_clone = registry.clone();
-                let peer_addr = addr;
-                tokio::spawn(async move {
-                    let mut gossip_state = registry_clone.gossip_state.lock().await;
+        // Reset failure state for this peer since we successfully connected.
+        if let Some(registry) = registry_weak.upgrade() {
+            let registry_clone = registry.clone();
+            let peer_addr = addr;
+            tokio::spawn(async move {
+                let mut gossip_state = registry_clone.gossip_state.lock().await;
 
-                    // Check if we need to reset failures and clear pending
-                    let need_to_clear_pending = if let Some(peer_info) =
-                        gossip_state.peers.get_mut(&peer_addr)
-                    {
-                        let had_failures = peer_info.failures > 0;
-                        if had_failures {
-                            info!(peer = %peer_addr,
+                // Check if we need to reset failures and clear pending
+                let need_to_clear_pending = if let Some(peer_info) =
+                    gossip_state.peers.get_mut(&peer_addr)
+                {
+                    let had_failures = peer_info.failures > 0;
+                    if had_failures {
+                        info!(peer = %peer_addr,
                                   prev_failures = peer_info.failures,
                                   "✅ Successfully established outgoing connection - resetting failure state");
-                            peer_info.failures = 0;
-                            peer_info.last_failure_time = None;
-                        }
-                        peer_info.last_success = crate::current_timestamp();
-                        had_failures
-                    } else {
-                        false
-                    };
-
-                    // Clear pending failure record if needed
-                    if need_to_clear_pending {
-                        gossip_state.pending_peer_failures.remove(&peer_addr);
+                        peer_info.failures = 0;
+                        peer_info.last_failure_time = None;
                     }
-                });
-            }
+                    peer_info.last_success = crate::current_timestamp();
+                    had_failures
+                } else {
+                    false
+                };
+
+                // Clear pending failure record if needed
+                if need_to_clear_pending {
+                    gossip_state.pending_peer_failures.remove(&peer_addr);
+                }
+            });
         }
 
         info!(peer = %addr, "successfully created new persistent connection");
@@ -7293,7 +7050,7 @@ impl ConnectionPool {
         debug!(
             "CONNECTION POOL: Pool contains connection to {}? {}",
             addr,
-            self.connections_by_addr.contains_key(&addr)
+            self.connections_by_addr.contains_sync(&addr)
         );
 
         // Return a lock-free ConnectionHandle
@@ -7309,15 +7066,15 @@ impl ConnectionPool {
 
     /// Mark a connection as disconnected
     pub fn mark_disconnected(&self, addr: SocketAddr) {
-        if let Some(entry) = self.connections_by_addr.get(&addr) {
-            entry.value().set_state(ConnectionState::Disconnected);
+        if let Some(conn) = self.connections_by_addr.read_sync(&addr, |_, v| v.clone()) {
+            conn.set_state(ConnectionState::Disconnected);
             info!(peer = %addr, "marked connection as disconnected");
         }
     }
 
     /// Remove a connection from the pool by address
     pub fn remove_connection_mut(&mut self, addr: SocketAddr) {
-        if let Some((_, conn)) = self.connections_by_addr.remove(&addr) {
+        if let Some((_, conn)) = self.connections_by_addr.remove_sync(&addr) {
             // H-004: Abort background tasks (writer, reader) to prevent resource leaks
             conn.abort_tasks();
 
@@ -7332,16 +7089,14 @@ impl ConnectionPool {
     /// Check if we have a connection to a peer by address
     pub fn has_connection(&self, addr: &SocketAddr) -> bool {
         self.connections_by_addr
-            .get(addr)
-            .map(|entry| entry.value().is_connected())
+            .read_sync(addr, |_, v| v.is_connected())
             .unwrap_or(false)
     }
 
     /// Check if we have a connection to a peer by peer ID
     pub fn has_connection_by_peer_id(&self, peer_id: &crate::PeerId) -> bool {
         self.connections_by_peer
-            .get(peer_id)
-            .map(|entry| entry.value().is_connected())
+            .read_sync(peer_id, |_, v| v.is_connected())
             .unwrap_or(false)
     }
 
@@ -7354,12 +7109,13 @@ impl ConnectionPool {
     /// Clean up stale connections
     pub fn cleanup_stale_connections(&self) {
         // Find disconnected peers and use peer-id-based removal to clean up all maps
-        let stale_peer_ids: Vec<_> = self
-            .connections_by_peer
-            .iter()
-            .filter(|entry| !entry.value().is_connected())
-            .map(|entry| entry.key().clone())
-            .collect();
+        let mut stale_peer_ids: Vec<crate::PeerId> = Vec::new();
+        self.connections_by_peer.iter_sync(|peer_id, conn| {
+            if !conn.is_connected() {
+                stale_peer_ids.push(peer_id.clone());
+            }
+            true
+        });
 
         for peer_id in stale_peer_ids {
             if let Some(_conn) = self.disconnect_connection_by_peer_id(&peer_id) {
@@ -7373,18 +7129,22 @@ impl ConnectionPool {
         // Use peer-id-based removal to properly clean up all address aliases
         // This avoids double-decrement of connection_counter when a connection
         // has both ephemeral and bind addresses after reindexing
-        let peer_ids: Vec<_> = self
-            .connections_by_peer
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
+        let mut peer_ids: Vec<crate::PeerId> = Vec::new();
+        self.connections_by_peer.iter_sync(|peer_id, _| {
+            peer_ids.push(peer_id.clone());
+            true
+        });
         let count = peer_ids.len();
         for peer_id in peer_ids {
             self.disconnect_connection_by_peer_id(&peer_id);
         }
         // Also remove any remaining connections that were not indexed by peer_id
         // (e.g., outbound connections established before peer_id mapping exists).
-        let addrs: Vec<_> = self.connections_by_addr.iter().map(|e| *e.key()).collect();
+        let mut addrs: Vec<SocketAddr> = Vec::new();
+        self.connections_by_addr.iter_sync(|addr, _| {
+            addrs.push(*addr);
+            true
+        });
         let mut addr_count = 0usize;
         for addr in addrs {
             if self.remove_connection(addr).is_some() {
@@ -7476,8 +7236,7 @@ async fn resolve_peer_state_addr(
         if let Some(addr) = {
             let pool = &registry.connection_pool;
             pool.peer_id_to_addr
-                .get(peer_id)
-                .map(|entry| *entry.value())
+                .read_sync(peer_id, |_, v| *v)
                 .filter(|addr| addr.port() != 0)
         } {
             return addr;
@@ -7490,8 +7249,7 @@ async fn resolve_peer_state_addr(
 
     if let Some(node_id) = registry
         .peer_capability_addr_to_node
-        .get(&socket_addr)
-        .map(|entry| *entry.value())
+        .read_sync(&socket_addr, |_, v| *v)
     {
         if let Some(addr) = registry.lookup_advertised_addr(&node_id).await {
             return addr;
@@ -7543,6 +7301,7 @@ pub(crate) fn handle_incoming_message(
                                 last_sent_sequence: 0,
                                 consecutive_deltas: 0,
                                 last_failure_time: None,
+                                last_dns_refresh_attempt: None,
                             });
                         }
                     }
@@ -7599,351 +7358,44 @@ pub(crate) fn handle_incoming_message(
                     gossip_state.delta_exchanges += 1;
                 }
 
-                // CRITICAL OPTIMIZATION: Inline apply_delta to eliminate function call overhead
-                // Apply the delta directly here to minimize async scheduling delays
-                {
-                    let total_changes = delta.changes.len();
-                    let sender_addr = sender_socket_addr;
-
-                    // Pre-compute priority flags to avoid redundant checks
-                    let has_immediate = delta.changes.iter().any(|change| match change {
-                        crate::registry::RegistryChange::ActorAdded { priority, .. } => {
-                            priority.should_trigger_immediate_gossip()
-                        }
-                        crate::registry::RegistryChange::ActorRemoved { priority, .. } => {
-                            priority.should_trigger_immediate_gossip()
-                        }
-                    });
-
-                    if has_immediate {
-                        info!(
-                            "🎯 RECEIVING IMMEDIATE CHANGES: {} total changes from {}",
-                            total_changes, sender_addr
-                        );
-                    }
-
-                    // Pre-capture timing info outside lock for better performance - use high resolution timing
-                    let _received_instant = std::time::Instant::now();
-                    let received_timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos();
-
-                    // eprintln!("🔍 RECEIVED_TIMESTAMP: {}ns", received_timestamp);
-
-                    // Collect immediate actors for ACK before consuming changes
-                    let mut immediate_actors = Vec::new();
-                    for change in &delta.changes {
-                        if let crate::registry::RegistryChange::ActorAdded {
-                            name, priority, ..
-                        } = change
-                        {
-                            if priority.should_trigger_immediate_gossip() {
-                                immediate_actors.push(name.clone());
-                            }
+                // Collect immediate actors for ACK before consuming delta.
+                let mut immediate_actors = Vec::new();
+                for change in &delta.changes {
+                    if let crate::registry::RegistryChange::ActorAdded { name, priority, .. } =
+                        change
+                    {
+                        if priority.should_trigger_immediate_gossip() {
+                            immediate_actors.push(name.clone());
                         }
                     }
+                }
 
-                    // OPTIMIZATION: Fast-path state updates with try_lock to avoid blocking
-                    let (applied_count, _pending_updates) = {
-                        // Try non-blocking access first
-                        if let Ok(mut actor_state) = registry.actor_state.try_write() {
-                            // Fast path - direct update without batching overhead
-                            let mut applied = 0;
-                            for change in delta.changes {
-                                match change {
-                                    crate::registry::RegistryChange::ActorAdded {
-                                        name,
-                                        location,
-                                        priority: _,
-                                    } => {
-                                        // Don't override local actors
-                                        if actor_state.local_actors.contains_key(name.as_str()) {
-                                            continue;
-                                        }
+                // Apply the delta using the canonical registry logic (vector clocks +
+                // deterministic tiebreakers). The previous "inline apply" fast-path had
+                // multiple conflict-resolution implementations depending on lock contention,
+                // which could cause nodes to diverge.
+                registry.apply_delta(delta).await?;
 
-                                        // Quick conflict check
-                                        let should_apply =
-                                            match actor_state.known_actors.get(name.as_str()) {
-                                                Some(existing) => {
-                                                    location.wall_clock_time
-                                                        > existing.wall_clock_time
-                                                        || (location.wall_clock_time
-                                                            == existing.wall_clock_time
-                                                            && location.address > existing.address)
-                                                }
-                                                None => true,
-                                            };
+                // NEW: Send ACK back for immediate registrations
+                if !immediate_actors.is_empty() {
+                    // Send ACKs for immediate priority actor additions
+                    // Use lock-free send since we're responding on the same connection
+                    for actor_name in immediate_actors {
+                        // Send lightweight ACK immediately
+                        let ack = crate::registry::RegistryMessage::ImmediateAck {
+                            actor_name: actor_name.clone(),
+                            success: true,
+                        };
 
-                                        if should_apply {
-                                            actor_state
-                                                .known_actors
-                                                .insert(name.clone(), location.clone());
-                                            applied += 1;
-
-                                            // Inline timing calculation for immediate priority
-                                            if location.priority.should_trigger_immediate_gossip() {
-                                                let network_time_nanos = received_timestamp
-                                                    - delta.precise_timing_nanos as u128;
-                                                let network_time_ms =
-                                                    network_time_nanos as f64 / 1_000_000.0;
-                                                let propagation_time_ms = network_time_ms; // Same as network time for now
-                                                let processing_only_time_ms = 0.0; // No additional processing time beyond network
-
-                                                info!(
-                                                    actor_name = %name,
-                                                    priority = ?location.priority,
-                                                    propagation_time_ms = propagation_time_ms,
-                                                    network_processing_time_ms = network_time_ms,
-                                                    processing_only_time_ms = processing_only_time_ms,
-                                                    "RECEIVED_ACTOR"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    crate::registry::RegistryChange::ActorRemoved {
-                                        name,
-                                        vector_clock,
-                                        removing_node_id,
-                                        priority: _,
-                                    } => {
-                                        // Check vector clock ordering before applying removal
-                                        let should_remove =
-                                            match actor_state.known_actors.get(name.as_str()) {
-                                                Some(existing_location) => {
-                                                    match vector_clock
-                                                        .compare(&existing_location.vector_clock)
-                                                    {
-                                                        crate::ClockOrdering::After => true,
-                                                        crate::ClockOrdering::Concurrent => {
-                                                            // For concurrent removals, use node_id as deterministic tiebreaker
-                                                            // This ensures all nodes make the same decision
-                                                            removing_node_id
-                                                                > existing_location.node_id
-                                                        }
-                                                        _ => false, // Ignore outdated removals (Before or Equal)
-                                                    }
-                                                }
-                                                None => false, // Actor doesn't exist
-                                            };
-
-                                        if should_remove
-                                            && actor_state
-                                                .known_actors
-                                                .remove(name.as_str())
-                                                .is_some()
-                                        {
-                                            applied += 1;
-                                        }
-                                    }
-                                }
-                            }
-                            (applied, Vec::new())
-                        } else {
-                            // Fallback to batched approach if lock is contended
-                            let actor_state = registry.actor_state.read().await;
-                            let mut pending_updates = Vec::new();
-                            let mut pending_removals = Vec::new();
-
-                            for change in &delta.changes {
-                                match change {
-                                    crate::registry::RegistryChange::ActorAdded {
-                                        name,
-                                        location,
-                                        priority: _,
-                                    } => {
-                                        // Don't override local actors - early exit
-                                        if actor_state.local_actors.contains_key(name.as_str()) {
-                                            debug!(
-                                                actor_name = %name,
-                                                "skipping remote actor update - actor is local"
-                                            );
-                                            continue;
-                                        }
-
-                                        // Check if we already know about this actor
-                                        let should_apply =
-                                            match actor_state.known_actors.get(name.as_str()) {
-                                                Some(existing_location) => {
-                                                    // Use vector clock for causal ordering
-                                                    match location
-                                                        .vector_clock
-                                                        .compare(&existing_location.vector_clock)
-                                                    {
-                                                        crate::ClockOrdering::After => true,
-                                                        crate::ClockOrdering::Concurrent => {
-                                                            // For concurrent updates, use node_id as tiebreaker
-                                                            location.node_id
-                                                                > existing_location.node_id
-                                                        }
-                                                        _ => false, // Keep existing for Before or Equal
-                                                    }
-                                                }
-                                                None => {
-                                                    debug!(
-                                                        actor_name = %name,
-                                                        "applying new actor"
-                                                    );
-                                                    true // New actor
-                                                }
-                                            };
-
-                                        if should_apply {
-                                            pending_updates.push((name.clone(), location.clone()));
-                                        }
-                                    }
-                                    crate::registry::RegistryChange::ActorRemoved {
-                                        name,
-                                        vector_clock,
-                                        removing_node_id,
-                                        priority: _,
-                                    } => {
-                                        // Check vector clock ordering before queueing removal
-                                        if let Some(existing_location) =
-                                            actor_state.known_actors.get(name.as_str())
-                                        {
-                                            match vector_clock
-                                                .compare(&existing_location.vector_clock)
-                                            {
-                                                crate::ClockOrdering::After => {
-                                                    // Queue removal if it's after
-                                                    pending_removals.push((
-                                                        name.clone(),
-                                                        vector_clock.clone(),
-                                                        *removing_node_id,
-                                                    ));
-                                                }
-                                                crate::ClockOrdering::Concurrent => {
-                                                    // For concurrent removals, use node_id as tiebreaker
-                                                    if removing_node_id > &existing_location.node_id
-                                                    {
-                                                        pending_removals.push((
-                                                            name.clone(),
-                                                            vector_clock.clone(),
-                                                            *removing_node_id,
-                                                        ));
-                                                    }
-                                                }
-                                                _ => {} // Ignore outdated removals (Before or Equal)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Drop read lock before acquiring write lock
-                            drop(actor_state);
-
-                            // Second pass: apply all updates under write lock with re-validation
-                            let mut actor_state = registry.actor_state.write().await;
-                            let mut applied = 0;
-
-                            // Re-validate and apply actor additions
-                            for (name, location) in &pending_updates {
-                                // Re-check if this is still valid (state may have changed)
-                                let still_valid = match actor_state.known_actors.get(name.as_str())
-                                {
-                                    Some(existing_location) => {
-                                        match location
-                                            .vector_clock
-                                            .compare(&existing_location.vector_clock)
-                                        {
-                                            crate::ClockOrdering::After => true,
-                                            crate::ClockOrdering::Concurrent => {
-                                                location.node_id > existing_location.node_id
-                                            }
-                                            _ => false,
-                                        }
-                                    }
-                                    None => !actor_state.local_actors.contains_key(name.as_str()),
-                                };
-
-                                if still_valid {
-                                    actor_state
-                                        .known_actors
-                                        .insert(name.clone(), location.clone());
-                                    applied += 1;
-
-                                    // Log the timing information for immediate priority changes
-                                    if location.priority.should_trigger_immediate_gossip() {
-                                        // Calculate time from when delta was sent (network + processing)
-                                        let network_processing_time_nanos =
-                                            received_timestamp - delta.precise_timing_nanos as u128;
-                                        let network_processing_time_ms =
-                                            network_processing_time_nanos as f64 / 1_000_000.0;
-                                        let propagation_time_ms = network_processing_time_ms; // Same as network time for now
-                                        let processing_only_time_ms = 0.0; // No additional processing time beyond network
-
-                                        info!(
-                                            actor_name = %name,
-                                            priority = ?location.priority,
-                                            propagation_time_ms = propagation_time_ms,
-                                            network_processing_time_ms = network_processing_time_ms,
-                                            processing_only_time_ms = processing_only_time_ms,
-                                            "RECEIVED_ACTOR"
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Re-validate and apply actor removals
-                            for (name, removal_clock, removing_node_id) in &pending_removals {
-                                // Re-check if removal is still valid (state may have changed)
-                                if let Some(existing_location) =
-                                    actor_state.known_actors.get(name.as_str())
-                                {
-                                    let still_valid = match removal_clock
-                                        .compare(&existing_location.vector_clock)
-                                    {
-                                        crate::ClockOrdering::After => true,
-                                        crate::ClockOrdering::Concurrent => {
-                                            // Use same deterministic tiebreaker for re-validation
-                                            removing_node_id > &existing_location.node_id
-                                        }
-                                        _ => false,
-                                    };
-
-                                    if still_valid
-                                        && actor_state.known_actors.remove(name.as_str()).is_some()
-                                    {
-                                        applied += 1;
-                                    }
-                                }
-                            }
-
-                            (applied, pending_updates)
-                        }
-                    };
-
-                    if applied_count > 0 {
-                        debug!(
-                            applied_count = applied_count,
-                            sender = %sender_addr,
-                            "applied delta changes in batched update"
-                        );
-                    }
-
-                    // NEW: Send ACK back for immediate registrations
-                    if !immediate_actors.is_empty() {
-                        // Send ACKs for immediate priority actor additions
-                        // Use lock-free send since we're responding on the same connection
-                        for actor_name in immediate_actors {
-                            // Send lightweight ACK immediately
-                            let ack = crate::registry::RegistryMessage::ImmediateAck {
-                                actor_name: actor_name.clone(),
-                                success: true,
-                            };
-
-                            // Serialize and send
-                            if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&ack) {
-                                let pool = &registry.connection_pool;
-                                let buffer = pool.create_message_buffer(&serialized);
-                                // Use send_lock_free to send directly without needing a connection handle
-                                if let Err(e) = pool.send_lock_free(sender_socket_addr, &buffer) {
-                                    warn!("Failed to send ImmediateAck: {}", e);
-                                } else {
-                                    info!("Sent ImmediateAck for actor '{}'", actor_name);
-                                }
+                        // Serialize and send
+                        if let Ok(serialized) = rkyv::to_bytes::<rkyv::rancor::Error>(&ack) {
+                            let pool = &registry.connection_pool;
+                            let buffer = pool.create_message_buffer(&serialized);
+                            // Use send_lock_free to send directly without needing a connection handle
+                            if let Err(e) = pool.send_lock_free(sender_socket_addr, &buffer) {
+                                warn!("Failed to send ImmediateAck: {}", e);
+                            } else {
+                                info!("Sent ImmediateAck for actor '{}'", actor_name);
                             }
                         }
                     }
@@ -8014,6 +7466,7 @@ pub(crate) fn handle_incoming_message(
                                 last_sent_sequence: 0,
                                 consecutive_deltas: 0,
                                 last_failure_time: None,
+                                last_dns_refresh_attempt: None,
                             });
                         }
                     }
@@ -8068,10 +7521,12 @@ pub(crate) fn handle_incoming_message(
                     // The reindex_connection_addr function preserves both addresses,
                     // and disconnect_connection_by_peer_id needs both entries to clean up properly.
 
-                    pool.peer_id_to_addr
-                        .insert(sender_peer_id.clone(), sender_socket_addr);
-                    pool.addr_to_peer_id
-                        .insert(sender_socket_addr, sender_peer_id.clone());
+                    let _ = pool
+                        .peer_id_to_addr
+                        .upsert_sync(sender_peer_id.clone(), sender_socket_addr);
+                    let _ = pool
+                        .addr_to_peer_id
+                        .upsert_sync(sender_socket_addr, sender_peer_id.clone());
 
                     // CRITICAL FIX: Reindex the connection from ephemeral TCP port to bind address
                     // Without this, get_connection(bind_addr) fails because the connection is
@@ -8094,6 +7549,7 @@ pub(crate) fn handle_incoming_message(
                     .merge_full_sync(
                         local_actors.into_iter().collect(),
                         known_actors.into_iter().collect(),
+                        sender_peer_id.clone(),
                         sender_socket_addr,
                         sequence,
                         wall_clock_time,
@@ -8105,13 +7561,9 @@ pub(crate) fn handle_incoming_message(
                 {
                     // Get our current state
                     let (our_local_actors, our_known_actors, our_sequence) = {
-                        let actor_state = registry.actor_state.read().await;
+                        let (local_actors, known_actors) = registry.snapshot_actor_pairs();
                         let gossip_state = registry.gossip_state.lock().await;
-                        (
-                            actor_state.local_actors.clone(),
-                            actor_state.known_actors.clone(),
-                            gossip_state.gossip_sequence,
-                        )
+                        (local_actors, known_actors, gossip_state.gossip_sequence)
                     };
 
                     // Calculate sizes before moving
@@ -8120,8 +7572,8 @@ pub(crate) fn handle_incoming_message(
 
                     // Create a FullSyncResponse message
                     let response = RegistryMessage::FullSyncResponse {
-                        local_actors: our_local_actors.into_iter().collect(),
-                        known_actors: our_known_actors.into_iter().collect(),
+                        local_actors: our_local_actors,
+                        known_actors: our_known_actors,
                         sender_peer_id: registry.peer_id.clone(), // Use peer ID
                         sender_bind_addr: Some(registry.bind_addr.to_string()), // Our listening address
                         sequence: our_sequence,
@@ -8152,35 +7604,37 @@ pub(crate) fn handle_incoming_message(
                         );
                         debug!("FULLSYNC RESPONSE: Pool instance address: {:p}", &*pool);
 
-                        // Log details about each connection
-                        for entry in pool.connections_by_addr.iter() {
-                            let addr = entry.key();
-                            let conn = entry.value();
+                        // Log details about each connection.
+                        pool.connections_by_addr.iter_sync(|addr, conn| {
                             debug!(
                                 "FULLSYNC RESPONSE: Connection to {} - state={:?}",
                                 addr,
                                 conn.get_state()
                             );
-                        }
+                            true
+                        });
 
                         // Create message with length + type prefix
                         let buffer = pool.create_message_buffer(&response_data);
 
                         // Debug: Log what connections we have
+                        let mut available_addrs: Vec<SocketAddr> = Vec::new();
+                        pool.connections_by_addr.iter_sync(|addr, _| {
+                            available_addrs.push(*addr);
+                            true
+                        });
                         debug!(
                             "FULLSYNC RESPONSE DEBUG: Available connections by addr: {:?}",
-                            pool.connections_by_addr
-                                .iter()
-                                .map(|entry| *entry.key())
-                                .collect::<Vec<_>>()
+                            available_addrs
                         );
-                        debug!(
-                            "FULLSYNC RESPONSE DEBUG: Available node mappings: {:?}",
-                            pool.peer_id_to_addr
-                                .iter()
-                                .map(|entry| (entry.key().clone(), *entry.value()))
-                                .collect::<Vec<_>>()
-                        );
+                        debug!("FULLSYNC RESPONSE DEBUG: Available node mappings: {:?}", {
+                            let mut mappings: Vec<(crate::PeerId, SocketAddr)> = Vec::new();
+                            pool.peer_id_to_addr.iter_sync(|peer_id, addr| {
+                                mappings.push((peer_id.clone(), *addr));
+                                true
+                            });
+                            mappings
+                        });
                         debug!(
                             "FULLSYNC RESPONSE DEBUG: Looking for connection to sender_peer_id: {}",
                             sender_peer_id
@@ -8305,6 +7759,7 @@ pub(crate) fn handle_incoming_message(
                     .merge_full_sync(
                         local_actors.into_iter().collect(),
                         known_actors.into_iter().collect(),
+                        sender_peer_id.clone(),
                         sender_socket_addr,
                         sequence,
                         wall_clock_time,
@@ -8320,10 +7775,12 @@ pub(crate) fn handle_incoming_message(
                     // The reindex_connection_addr function preserves both addresses,
                     // and disconnect_connection_by_peer_id needs both entries to clean up properly.
 
-                    pool.peer_id_to_addr
-                        .insert(sender_peer_id.clone(), sender_socket_addr);
-                    pool.addr_to_peer_id
-                        .insert(sender_socket_addr, sender_peer_id.clone());
+                    let _ = pool
+                        .peer_id_to_addr
+                        .upsert_sync(sender_peer_id.clone(), sender_socket_addr);
+                    let _ = pool
+                        .addr_to_peer_id
+                        .upsert_sync(sender_socket_addr, sender_peer_id.clone());
 
                     // CRITICAL FIX: Reindex the connection from ephemeral TCP port to bind address
                     // Mirror the FullSync handler fix - allows sending to advertised address
@@ -8528,22 +7985,14 @@ pub(crate) fn handle_incoming_message(
                     "received immediate ACK for synchronous registration"
                 );
 
-                // Look up the pending ACK sender for this actor
-                let mut pending_acks = registry.pending_acks.lock().await;
-                if let Some(sender) = pending_acks.remove(&actor_name) {
-                    // Send the success status through the oneshot channel
-                    if sender.send(success).is_err() {
-                        warn!(
-                            actor_name = %actor_name,
-                            "Failed to send ACK to waiting registration - receiver dropped"
-                        );
-                    } else {
-                        info!(
-                            actor_name = %actor_name,
-                            success = success,
-                            "✅ Sent ACK to waiting synchronous registration"
-                        );
-                    }
+                // Look up and complete the pending ACK waiter for this actor.
+                if let Some((_, pending)) = registry.pending_acks.remove_sync(&actor_name) {
+                    pending.complete(success);
+                    info!(
+                        actor_name = %actor_name,
+                        success = success,
+                        "✅ Completed ACK for waiting synchronous registration"
+                    );
                 } else {
                     debug!(
                         actor_name = %actor_name,
@@ -8611,12 +8060,8 @@ pub(crate) fn handle_incoming_message(
                     }
                 });
 
-                // Track the discovery task handle (H-004)
-                if let Ok(mut handles) = registry.discovery_task_handles.lock() {
-                    // Clean up finished handles before adding new one
-                    handles.retain(|h| !h.is_finished());
-                    handles.push(discovery_handle);
-                }
+                // Track the discovery task (H-004): keep at most one dial task alive.
+                registry.discovery_task.set(discovery_handle.abort_handle());
 
                 Ok(())
             }
@@ -8801,7 +8246,7 @@ mod tests {
     fn test_streaming_threshold_saturation() {
         // Test that streaming_threshold handles edge cases properly
         let config = BufferConfig::new(256 * 1024).unwrap(); // Minimum buffer (256KB)
-                                                             // Should be 255KB (256KB - 1KB)
+        // Should be 255KB (256KB - 1KB)
         assert_eq!(config.streaming_threshold(), 255 * 1024);
 
         // Test with exactly 1KB buffer would be rejected by validation,
@@ -8848,7 +8293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_registry() {
-        use crate::{registry::GossipRegistry, GossipConfig, KeyPair};
+        use crate::{GossipConfig, KeyPair, registry::GossipRegistry};
         let pool = ConnectionPool::new(10, Duration::from_secs(5));
         let registry = Arc::new(GossipRegistry::new(
             "127.0.0.1:8080".parse().unwrap(),
@@ -8859,7 +8304,7 @@ mod tests {
         ));
 
         pool.set_registry(registry.clone());
-        assert!(pool.registry.lock().is_some());
+        assert!(pool.registry.load().upgrade().is_some());
     }
 
     #[test]
@@ -9058,8 +8503,8 @@ mod tests {
         );
 
         // Create tracker and set the handle
-        let mut tracker = TaskTracker::new();
-        tracker.set_writer(handle);
+        let tracker = TaskTracker::new();
+        tracker.set_writer(handle.abort_handle());
 
         // Drop the tracker - this should abort the task
         drop(tracker);
@@ -9091,13 +8536,13 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         });
 
-        let mut tracker = TaskTracker::new();
+        let tracker = TaskTracker::new();
 
         // Set first handle
-        tracker.set_writer(handle1);
+        tracker.set_writer(handle1.abort_handle());
 
         // Set second handle - first should be aborted
-        tracker.set_writer(handle2);
+        tracker.set_writer(handle2.abort_handle());
 
         // Give task2 time to start
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -9124,7 +8569,9 @@ mod tests {
         )
         .await;
 
-        let err = res.expect("wait_for_response hung").expect_err("expected error");
+        let err = res
+            .expect("wait_for_response hung")
+            .expect_err("expected error");
         assert!(matches!(err, GossipError::Timeout));
     }
 }

@@ -16,12 +16,12 @@ static GLOBAL: CountingAlloc = CountingAlloc;
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        System.alloc(layout)
+        unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        System.dealloc(ptr, layout)
+        unsafe { System.dealloc(ptr, layout) }
     }
 }
 

@@ -1,4 +1,4 @@
-use kameo_remote::{registry::GossipRegistry, GossipConfig, KeyPair, StreamHeader};
+use kameo_remote::{GossipConfig, KeyPair, StreamHeader, registry::GossipRegistry};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[tokio::test]

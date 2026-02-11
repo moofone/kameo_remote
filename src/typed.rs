@@ -205,6 +205,9 @@ pub const fn fnv1a_hash(input: &str) -> u64 {
 /// Encode a typed message for the wire.
 ///
 /// In debug builds, prefixes the payload with the type hash for validation.
+///
+/// Important: the debug prefix is padded to preserve alignment for total zero-copy archived access
+/// on the receiver. (See `PAYLOAD_ALIGNMENT` in `aligned.rs`.)
 pub fn encode_typed<T>(value: &T) -> Result<Bytes>
 where
     T: WireEncode,
@@ -214,8 +217,11 @@ where
 
     #[cfg(debug_assertions)]
     {
-        let mut buf = Vec::with_capacity(8 + payload.len());
+        const DEBUG_PREFIX_LEN: usize = 16;
+        let mut buf = Vec::with_capacity(DEBUG_PREFIX_LEN + payload.len());
         buf.extend_from_slice(&T::TYPE_HASH.to_be_bytes());
+        // Pad to 16 bytes so the archive body stays 16-aligned when the underlying buffer is.
+        buf.extend_from_slice(&[0u8; DEBUG_PREFIX_LEN - 8]);
         buf.extend_from_slice(payload.as_ref());
         Ok(Bytes::from(buf))
     }
@@ -244,11 +250,15 @@ where
 /// Wrap a pooled payload with the debug type hash prefix when enabled.
 pub fn typed_payload_parts<T: WireType>(
     payload: PooledPayload,
-) -> (PooledPayload, Option<[u8; 8]>, usize) {
+) -> (PooledPayload, Option<[u8; 16]>, usize) {
     #[cfg(debug_assertions)]
     {
-        let prefix = T::TYPE_HASH.to_be_bytes();
+        const DEBUG_PREFIX_LEN: usize = 16;
+        let mut prefix = [0u8; DEBUG_PREFIX_LEN];
+        prefix[..8].copy_from_slice(&T::TYPE_HASH.to_be_bytes());
         let total_len = prefix.len() + payload.len();
+        // Note: this widens the prefix compared to the previous 8-byte debug format.
+        // Debug builds are not wire-compatible with older debug builds across this change.
         (payload, Some(prefix), total_len)
     }
 
@@ -262,7 +272,9 @@ pub fn typed_payload_parts<T: WireType>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aligned::{AlignedBytes, AlignedBytesPool};
     use crate::wire_type;
+    use std::sync::Arc;
 
     #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
     struct TestMsg {
@@ -311,8 +323,31 @@ mod tests {
 
         #[cfg(debug_assertions)]
         {
-            assert!(total_len >= 8);
+            assert!(total_len >= 16);
             assert!(prefix.is_some());
+        }
+    }
+
+    #[test]
+    fn archived_unchecked_body_is_aligned_in_debug_prefix_mode() {
+        #[cfg(debug_assertions)]
+        {
+            #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, PartialEq)]
+            struct AlignedTest {
+                v: u128,
+            }
+            wire_type!(AlignedTest, "typed::AlignedTest");
+
+            // Encode (debug prefix included), then copy into an aligned receive buffer to
+            // simulate the real receive path.
+            let payload = encode_typed(&AlignedTest { v: 7 }).unwrap();
+            let pool = Arc::new(AlignedBytesPool::new(1));
+            let aligned = AlignedBytes::from_pooled_slice(payload.as_ref(), Arc::clone(&pool));
+            let bytes: Bytes = aligned.into();
+
+            let archived = decode_typed_archived::<AlignedTest>(bytes).unwrap();
+            let a = unsafe { archived.archived_unchecked() };
+            assert_eq!(a.v, 7);
         }
     }
 }
@@ -357,6 +392,27 @@ where
             rkyv::rancor::Error,
         >(self.as_bytes())?)
     }
+
+    /// Access the archived payload without validation (total zero-copy).
+    ///
+    /// This is the fastest path, but it is unsafe: the caller must guarantee that
+    /// `self.as_bytes()` contains a valid archived `T` at the root position.
+    ///
+    /// Safety is generally achieved by:
+    /// - only accepting bytes produced by `rkyv::to_bytes` on trusted peers, and
+    /// - enforcing alignment at the transport boundary (see `AlignedBytes`).
+    pub unsafe fn archived_unchecked(&self) -> &<T as rkyv::Archive>::Archived {
+        debug_assert_eq!(
+            (self.as_bytes().as_ptr() as usize)
+                % std::mem::align_of::<<T as rkyv::Archive>::Archived>(),
+            0,
+            "misaligned archived root for {} (align={})",
+            T::TYPE_NAME,
+            std::mem::align_of::<<T as rkyv::Archive>::Archived>()
+        );
+        // SAFETY: caller guarantees bytes represent a valid archived `T`.
+        unsafe { rkyv::access_unchecked::<<T as rkyv::Archive>::Archived>(self.as_bytes()) }
+    }
 }
 
 /// Decode a typed message from the wire.
@@ -377,7 +433,8 @@ where
 {
     #[cfg(debug_assertions)]
     {
-        if payload.len() < 8 {
+        const DEBUG_PREFIX_LEN: usize = 16;
+        if payload.len() < DEBUG_PREFIX_LEN {
             return Err(GossipError::InvalidConfig(format!(
                 "typed payload too short for type hash ({})",
                 T::TYPE_NAME
@@ -394,7 +451,7 @@ where
                 hash
             )));
         }
-        let body = &payload[8..];
+        let body = &payload[DEBUG_PREFIX_LEN..];
         let archived = rkyv::access::<T::Archived, rkyv::rancor::Error>(body)?;
         let mut pool = rkyv::de::Pool::new();
         let mut deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
@@ -429,7 +486,8 @@ where
 {
     #[cfg(debug_assertions)]
     {
-        if payload.len() < 8 {
+        const DEBUG_PREFIX_LEN: usize = 16;
+        if payload.len() < DEBUG_PREFIX_LEN {
             return Err(GossipError::InvalidConfig(format!(
                 "typed payload too short for type hash ({})",
                 T::TYPE_NAME
@@ -448,7 +506,7 @@ where
         }
         Ok(ArchivedBytes {
             bytes: payload,
-            offset: 8,
+            offset: DEBUG_PREFIX_LEN,
             _marker: PhantomData,
         })
     }

@@ -2,17 +2,17 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::aligned::{AlignedBuffer, AlignedBytes};
 use bytes::Bytes;
+use std::sync::atomic::Ordering;
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
-    time::{interval, Instant},
+    time::{Instant, interval},
 };
 use tracing::{debug, error, info, instrument, trace, warn};
-use std::sync::atomic::Ordering;
 
 use crate::{
-    registry::{GossipRegistry, GossipResult, GossipTask, RegistryMessage, RegistryStats},
     GossipConfig, GossipError, RegistrationPriority, RemoteActorLocation, Result,
+    registry::{GossipRegistry, GossipResult, GossipTask, RegistryMessage, RegistryStats},
 };
 
 const REGISTRY_MESSAGE_ALIGNMENT: usize = {
@@ -33,9 +33,10 @@ fn decode_registry_message(
     fn decode_from_aligned_bytes(
         bytes: &[u8],
     ) -> std::result::Result<RegistryMessage, rkyv::rancor::Error> {
-        let archived = rkyv::access::<<RegistryMessage as rkyv::Archive>::Archived, rkyv::rancor::Error>(
-            bytes,
-        )?;
+        let archived = rkyv::access::<
+            <RegistryMessage as rkyv::Archive>::Archived,
+            rkyv::rancor::Error,
+        >(bytes)?;
         let mut pool = rkyv::de::Pool::new();
         let deserializer = rkyv::rancor::Strategy::wrap(&mut pool);
         rkyv::Deserialize::deserialize(archived, deserializer)
@@ -63,6 +64,16 @@ pub struct GossipRegistryHandle {
     _server_handle: Option<tokio::task::JoinHandle<()>>,
     _timer_handle: Option<tokio::task::JoinHandle<()>>,
     _monitor_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Cloneable client view for performing peer lookups and sending messages via the underlying
+/// registry/connection pool.
+///
+/// This intentionally does **not** own server/task lifetimes; it is safe to clone and use from
+/// service handlers (e.g. feature-gated relay protocols).
+#[derive(Clone)]
+pub struct GossipClient {
+    registry: Arc<GossipRegistry>,
 }
 
 impl Drop for GossipRegistryHandle {
@@ -291,6 +302,25 @@ impl GossipRegistryHandle {
         ))
     }
 
+    /// Snapshot the currently-known actor directory as owned `(name, location)` pairs.
+    ///
+    /// Semantics (deterministic):
+    /// - Includes both local and remote-known actors.
+    /// - If the same name exists in both maps, the local entry wins.
+    /// - Returned vector is sorted by name for stable debugging/tests.
+    ///
+    /// This is a control-plane API intended for building higher-level directory views.
+    pub fn snapshot_known_actors(&self) -> Vec<(String, RemoteActorLocation)> {
+        self.registry.snapshot_known_actors()
+    }
+
+    /// Get a cloneable client handle for lookups without taking ownership of server/task lifetimes.
+    pub fn client(&self) -> GossipClient {
+        GossipClient {
+            registry: Arc::clone(&self.registry),
+        }
+    }
+
     /// Get registry statistics including vector clock metrics
     pub async fn stats(&self) -> RegistryStats {
         self.registry.get_stats().await
@@ -302,8 +332,9 @@ impl GossipRegistryHandle {
         {
             let pool = &self.registry.connection_pool;
             // Use a placeholder address - will be updated when connect() is called
-            pool.peer_id_to_addr
-                .insert(peer_id.clone(), "0.0.0.0:0".parse().unwrap());
+            let _ = pool
+                .peer_id_to_addr
+                .insert_sync(peer_id.clone(), "0.0.0.0:0".parse().unwrap());
         }
 
         crate::Peer {
@@ -411,19 +442,31 @@ impl GossipRegistryHandle {
     /// This is the recommended way to bootstrap a node with seed peers.
     pub async fn bootstrap_non_blocking(&self, seeds: Vec<SocketAddr>) {
         let seed_count = seeds.len();
+        let registry_weak = Arc::downgrade(&self.registry);
 
         for seed in seeds {
-            let registry = self.registry.clone();
+            let registry_weak = registry_weak.clone();
             tokio::spawn(async move {
-                match registry.get_connection(seed).await {
-                    Ok(_conn) => {
+                let Some(registry) = registry_weak.upgrade() else {
+                    return;
+                };
+                if registry.shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                let connect_timeout = registry.config.connection_timeout;
+                match tokio::time::timeout(connect_timeout, registry.get_connection(seed)).await {
+                    Ok(Ok(_conn)) => {
                         debug!(seed = %seed, "bootstrap connection established");
                         // Mark peer as connected
                         registry.mark_peer_connected(seed).await;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         warn!(seed = %seed, error = %e, "bootstrap peer unavailable");
                         // Note: Don't penalize at startup - peer might be starting up too
+                    }
+                    Err(_) => {
+                        warn!(seed = %seed, "bootstrap peer dial timed out");
                     }
                 }
             });
@@ -439,7 +482,9 @@ impl GossipRegistryHandle {
     pub async fn shutdown(&self) {
         // Signal shutdown first, then abort background tasks so we don't get stuck
         // waiting on locks held by long-running timer/server work.
-        self.registry.shutdown.store(true, std::sync::atomic::Ordering::Release);
+        self.registry
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
 
         // Cancel background tasks.
         if let Some(handle) = self._server_handle.as_ref() {
@@ -479,6 +524,89 @@ impl GossipRegistryHandle {
 
         // Final cleanup after all background tasks are canceled.
         self.registry.shutdown().await;
+    }
+}
+
+impl GossipClient {
+    /// Lookup a peer and return a RemoteActorRef for communicating with it.
+    ///
+    /// This mirrors `GossipRegistryHandle::lookup_peer` but is available on a cloneable handle.
+    pub async fn lookup_peer(&self, peer_id: &crate::PeerId) -> Result<crate::RemoteActorRef> {
+        let conn = self
+            .registry
+            .connection_pool
+            .get_connection_to_peer(peer_id)
+            .await?;
+        let addr = conn.addr;
+
+        let location = crate::RemoteActorLocation::new_with_peer(addr, peer_id.clone());
+        Ok(crate::RemoteActorRef::with_registry(
+            location,
+            Some(conn),
+            Arc::clone(&self.registry),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::KeyPair;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    fn test_cfg() -> GossipConfig {
+        GossipConfig {
+            gossip_interval: Duration::from_millis(25),
+            ask_inflight_limit: 1024,
+            ..Default::default()
+        }
+    }
+
+    async fn new_registry(bind: SocketAddr, seed: &str) -> crate::Result<GossipRegistryHandle> {
+        let keypair = KeyPair::new_for_testing(seed);
+        GossipRegistryHandle::new_with_keypair(bind, keypair, Some(test_cfg())).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshot_known_actors_includes_local_and_known_and_is_sorted() -> crate::Result<()> {
+        let h = new_registry("127.0.0.1:0".parse().unwrap(), "snap").await?;
+        let bind = h.registry.bind_addr;
+
+        h.register("b_local".to_string(), bind).await?;
+
+        // Simulate a remote-gossiped entry (known_actors) without wiring up a full mesh.
+        let remote_loc = RemoteActorLocation::new_with_peer(
+            "127.0.0.1:9999".parse().unwrap(),
+            h.registry.peer_id.clone(),
+        );
+        let _ = h
+            .registry
+            .actor_state
+            .known_actors
+            .upsert_sync("a_known".to_string(), remote_loc);
+
+        // Duplicate name in known + local: local must win.
+        let remote_loc2 = RemoteActorLocation::new_with_peer(
+            "127.0.0.1:7777".parse().unwrap(),
+            h.registry.peer_id.clone(),
+        );
+        let _ = h
+            .registry
+            .actor_state
+            .known_actors
+            .upsert_sync("b_local".to_string(), remote_loc2);
+
+        let snap = h.snapshot_known_actors();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].0.as_str(), "a_known");
+        assert_eq!(snap[1].0.as_str(), "b_local");
+
+        let b = snap.iter().find(|(n, _)| n == "b_local").unwrap();
+        assert_eq!(b.1.address, bind.to_string());
+
+        h.shutdown_and_wait().await;
+        Ok(())
     }
 }
 
@@ -889,7 +1017,10 @@ async fn handle_connection(
         }
     } else {
         // No TLS - panic for now to ensure we're using TLS
-        panic!("⚠️ TLS DISABLED: Server attempted to accept plain TCP connection from {}. TLS is required!", peer_addr);
+        panic!(
+            "⚠️ TLS DISABLED: Server attempted to accept plain TCP connection from {}. TLS is required!",
+            peer_addr
+        );
     }
 }
 
@@ -930,7 +1061,7 @@ async fn handle_tls_connection(
         }
     };
 
-    registry.set_peer_capabilities(peer_addr, capabilities.clone());
+    registry.set_peer_capabilities(peer_addr, capabilities);
     if let Some(node_id) = registry.lookup_node_id(&peer_addr).await {
         registry
             .associate_peer_capabilities_with_node(peer_addr, node_id)
@@ -1144,8 +1275,7 @@ where
     let configured_addr = {
         let pool = &registry.connection_pool;
         pool.peer_id_to_addr
-            .get(&peer_id)
-            .map(|entry| *entry.value())
+            .read_sync(&peer_id, |_, v| *v)
             .filter(|addr| addr.port() != 0 && !addr.ip().is_unspecified())
     };
     let peer_state_addr = resolved_sender_addr
@@ -1215,11 +1345,10 @@ where
         connection.set_state(crate::connection_pool::ConnectionState::Connected);
         connection.update_last_used();
 
-        // Track the writer task handle (H-004)
+        // Track the writer task handle (H-004).
         connection
             .task_tracker
-            .lock()
-            .set_writer(writer_task_handle);
+            .set_writer(writer_task_handle.abort_handle());
 
         // CRITICAL: Get the shared correlation tracker BEFORE wrapping in Arc
         // This ensures the inbound connection uses the same correlation tracker as the outbound connection
@@ -1649,7 +1778,7 @@ pub(crate) async fn send_pooled_response(
     peer_addr: SocketAddr,
     correlation_id: u16,
     payload: crate::typed::PooledPayload,
-    prefix: Option<[u8; 8]>,
+    prefix: Option<[u8; 16]>,
     payload_len: usize,
 ) {
     let pool = &registry.connection_pool;
@@ -1688,7 +1817,7 @@ pub(crate) async fn send_pooled_response_on_connection(
     conn: &crate::connection_pool::LockFreeConnection,
     correlation_id: u16,
     payload: crate::typed::PooledPayload,
-    prefix: Option<[u8; 8]>,
+    prefix: Option<[u8; 16]>,
     payload_len: usize,
 ) {
     if let Some(ref stream_handle) = conn.stream_handle {
@@ -1816,11 +1945,7 @@ pub(crate) fn parse_message_from_pooled_buffer(
             crate::framing::LENGTH_PREFIX_LEN + crate::framing::ASK_RESPONSE_HEADER_LEN;
         return Ok(MessageReadResult::Response {
             correlation_id,
-            payload: AlignedBytes::from_pooled_buffer_range(
-                buffer,
-                payload_offset,
-                payload_len,
-            )?,
+            payload: AlignedBytes::from_pooled_buffer_range(buffer, payload_offset, payload_len)?,
         });
     } else if msg_len >= crate::framing::DIRECT_ASK_HEADER_LEN
         && msg_data[0] == crate::MessageType::DirectAsk as u8
@@ -1839,11 +1964,7 @@ pub(crate) fn parse_message_from_pooled_buffer(
             crate::framing::LENGTH_PREFIX_LEN + crate::framing::DIRECT_ASK_HEADER_LEN;
         return Ok(MessageReadResult::DirectAsk {
             correlation_id,
-            payload: AlignedBytes::from_pooled_buffer_range(
-                buffer,
-                payload_offset,
-                payload_len,
-            )?,
+            payload: AlignedBytes::from_pooled_buffer_range(buffer, payload_offset, payload_len)?,
         });
     } else if msg_len >= crate::framing::DIRECT_RESPONSE_HEADER_LEN
         && msg_data[0] == crate::MessageType::DirectResponse as u8
@@ -1862,11 +1983,7 @@ pub(crate) fn parse_message_from_pooled_buffer(
             crate::framing::LENGTH_PREFIX_LEN + crate::framing::DIRECT_RESPONSE_HEADER_LEN;
         return Ok(MessageReadResult::DirectResponse {
             correlation_id,
-            payload: AlignedBytes::from_pooled_buffer_range(
-                buffer,
-                payload_offset,
-                payload_len,
-            )?,
+            payload: AlignedBytes::from_pooled_buffer_range(buffer, payload_offset, payload_len)?,
         });
     } else {
         // Check if this is a Gossip message with type prefix
@@ -1885,7 +2002,10 @@ pub(crate) fn parse_message_from_pooled_buffer(
                                 Ok(msg) => return Ok(MessageReadResult::Gossip(msg, None)),
                                 Err(err) => {
                                     // Avoid spamming logs with rkyv error strings (can be very noisy in stress tests).
-                                    trace!(payload_len = payload_slice.len(), "Failed to decode gossip payload");
+                                    trace!(
+                                        payload_len = payload_slice.len(),
+                                        "Failed to decode gossip payload"
+                                    );
                                     let _ = err;
                                     return Ok(raw(buffer));
                                 }
@@ -2070,9 +2190,7 @@ where
 
         // Try to deserialize as RegistryMessage first (Ask wrapper for gossip)
         match decode_registry_message(payload.as_ref()) {
-            Ok(msg) => {
-                Ok(MessageReadResult::Gossip(msg, Some(correlation_id)))
-            }
+            Ok(msg) => Ok(MessageReadResult::Gossip(msg, Some(correlation_id))),
             Err(err) => {
                 let _ = err; // Non-gossip asks are expected to fail RegistryMessage decode.
                 Ok(MessageReadResult::AskRaw {
@@ -2150,7 +2268,10 @@ where
                                 Ok(msg) => return Ok(MessageReadResult::Gossip(msg, None)),
                                 Err(err) => {
                                     // Avoid spamming logs with rkyv error strings (can be very noisy in stress tests).
-                                    trace!(payload_len = payload.len(), "Failed to decode gossip payload");
+                                    trace!(
+                                        payload_len = payload.len(),
+                                        "Failed to decode gossip payload"
+                                    );
                                     let _ = err;
                                     return Ok(MessageReadResult::Raw(msg_data));
                                 }
@@ -2260,8 +2381,8 @@ where
 
 #[cfg(test)]
 mod framing_tests {
-    use super::{read_message_from_tls_reader, MessageReadResult};
-    use crate::{framing, registry::RegistryMessage, MessageType};
+    use super::{MessageReadResult, read_message_from_tls_reader};
+    use crate::{MessageType, framing, registry::RegistryMessage};
     use tokio::io::AsyncWriteExt;
 
     async fn read_frame(frame: Vec<u8>) -> MessageReadResult {
@@ -2395,21 +2516,15 @@ mod keepalive_apply_tests {
         let a_keypair = crate::KeyPair::new_for_testing("keepalive-a");
         let b_keypair = crate::KeyPair::new_for_testing("keepalive-b");
 
-        let a = GossipRegistryHandle::new_with_keypair(
-            "127.0.0.1:0".parse().unwrap(),
-            a_keypair,
-            None,
-        )
-        .await
-        .unwrap();
+        let a =
+            GossipRegistryHandle::new_with_keypair("127.0.0.1:0".parse().unwrap(), a_keypair, None)
+                .await
+                .unwrap();
 
-        let b = GossipRegistryHandle::new_with_keypair(
-            "127.0.0.1:0".parse().unwrap(),
-            b_keypair,
-            None,
-        )
-        .await
-        .unwrap();
+        let b =
+            GossipRegistryHandle::new_with_keypair("127.0.0.1:0".parse().unwrap(), b_keypair, None)
+                .await
+                .unwrap();
 
         // Establish a real TCP connection between peers.
         a.add_peer(&b.registry.peer_id)
@@ -2424,7 +2539,10 @@ mod keepalive_apply_tests {
         //
         // If the connection retries or reindexes, it may be applied more than twice.
         let calls = crate::net::test_keepalive_apply_calls();
-        assert!(calls >= 2, "expected >=2 keepalive apply calls, got {calls}");
+        assert!(
+            calls >= 2,
+            "expected >=2 keepalive apply calls, got {calls}"
+        );
     }
 }
 

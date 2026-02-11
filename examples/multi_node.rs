@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

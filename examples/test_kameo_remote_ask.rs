@@ -1,6 +1,6 @@
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
 use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[tokio::main]
 async fn main() {

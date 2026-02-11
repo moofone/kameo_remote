@@ -2,18 +2,19 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use kameo_remote::{
+    GossipConfig, GossipRegistryHandle, MessageType, SecretKey,
     aligned::AlignedBytes,
     framing::ASK_RESPONSE_HEADER_LEN,
     registry::{ActorMessageFuture, ActorMessageHandler, ActorResponse},
-    tls, GossipConfig, GossipRegistryHandle, MessageType, SecretKey,
+    tls,
 };
 use rand::Rng as _;
 use tokio::{
@@ -68,7 +69,9 @@ impl ActorMessageHandler for ExactlyOnceTestHandler {
             // Payload format: [request_id:16][body:N]
             let p = payload.as_ref();
             if p.len() < 16 {
-                return Ok(Some(ActorResponse::Bytes(Bytes::from_static(b"BAD_REQUEST"))));
+                return Ok(Some(ActorResponse::Bytes(Bytes::from_static(
+                    b"BAD_REQUEST",
+                ))));
             }
 
             let request_id = u128::from_be_bytes(p[..16].try_into().unwrap());
@@ -89,7 +92,12 @@ impl ActorMessageHandler for ExactlyOnceTestHandler {
                             request_id = %format!("{request_id:032x}"),
                             "server: reserve pending"
                         );
-                        m.insert(request_id, Entry::Pending { request_payload: body.clone() });
+                        m.insert(
+                            request_id,
+                            Entry::Pending {
+                                request_payload: body.clone(),
+                            },
+                        );
                     }
                     Some(Entry::Pending { request_payload }) => {
                         if request_payload.as_ref() != body.as_ref() {
@@ -189,14 +197,13 @@ async fn connect_tls(
     let server_name = rustls::pki_types::ServerName::try_from(sni).expect("server name");
 
     let tcp = TcpStream::connect(server_addr).await.expect("tcp connect");
-    let mut tls_stream = connector.connect(server_name, tcp).await.expect("tls connect");
+    let mut tls_stream = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("tls connect");
 
     // The server always performs the v3 Hello handshake immediately after TLS.
-    let negotiated_alpn = tls_stream
-        .get_ref()
-        .1
-        .alpn_protocol()
-        .map(|p| p.to_vec());
+    let negotiated_alpn = tls_stream.get_ref().1.alpn_protocol().map(|p| p.to_vec());
     kameo_remote::handshake::perform_hello_handshake(
         &mut tls_stream,
         negotiated_alpn.as_deref(),
@@ -216,7 +223,8 @@ async fn connect_tls(
         sequence: 0,
         wall_clock_time: kameo_remote::current_timestamp(),
     };
-    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&full_sync).expect("serialize full sync");
+    let serialized =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&full_sync).expect("serialize full sync");
     let header = kameo_remote::framing::write_gossip_frame_prefix(serialized.len());
     tls_stream
         .write_all(&header)
@@ -317,9 +325,13 @@ async fn main() {
         ..Default::default()
     };
 
-    let handle = GossipRegistryHandle::new_with_tls("127.0.0.1:0".parse().unwrap(), server_secret, Some(config))
-        .await
-        .expect("start server");
+    let handle = GossipRegistryHandle::new_with_tls(
+        "127.0.0.1:0".parse().unwrap(),
+        server_secret,
+        Some(config),
+    )
+    .await
+    .expect("start server");
     let server_addr = handle.registry.bind_addr;
 
     let handler = Arc::new(ExactlyOnceTestHandler::new());
@@ -328,7 +340,10 @@ async fn main() {
         .set_actor_message_handler(handler.clone())
         .await;
 
-    println!("bad_client_stress: server listening on {server_addr} node_id={}", server_node_id.fmt_short());
+    println!(
+        "bad_client_stress: server listening on {server_addr} node_id={}",
+        server_node_id.fmt_short()
+    );
 
     // Common parameters.
     let actor_id = 0x0000_0000_c0ff_ee00u64;
@@ -353,13 +368,8 @@ async fn main() {
 
     // Retry: reconnect and re-send the exact same request_id + payload.
     let corr1b: u16 = rng.random_range(1..u16::MAX);
-    let frame1b = build_actor_ask_frame(
-        corr1b,
-        actor_id,
-        type_hash,
-        schema_hash,
-        payload1.as_ref(),
-    );
+    let frame1b =
+        build_actor_ask_frame(corr1b, actor_id, type_hash, schema_hash, payload1.as_ref());
     let response1 = {
         let mut tls_stream = connect_tls(server_addr, server_node_id).await;
         write_all(&mut tls_stream, &frame1b).await;
@@ -388,13 +398,7 @@ async fn main() {
     println!("\n[2] tamper (same id, different payload)");
     let corr2: u16 = rng.random_range(1..u16::MAX);
     let tampered = make_payload(request_id_1, b"ECHO:evil");
-    let frame2 = build_actor_ask_frame(
-        corr2,
-        actor_id,
-        type_hash,
-        schema_hash,
-        tampered.as_ref(),
-    );
+    let frame2 = build_actor_ask_frame(corr2, actor_id, type_hash, schema_hash, tampered.as_ref());
     let response2 = {
         let mut tls_stream = connect_tls(server_addr, server_node_id).await;
         write_all(&mut tls_stream, &frame2).await;
@@ -403,7 +407,10 @@ async fn main() {
             .expect("read response")
     };
     if response2.as_ref() != b"INTEGRITY_ERROR" {
-        eprintln!("FAIL: expected INTEGRITY_ERROR, got {:?}", String::from_utf8_lossy(&response2));
+        eprintln!(
+            "FAIL: expected INTEGRITY_ERROR, got {:?}",
+            String::from_utf8_lossy(&response2)
+        );
         std::process::exit(1);
     }
     println!("PASS: tamper rejected");
@@ -433,11 +440,13 @@ async fn main() {
     let mut ok_seen = None::<usize>;
     for attempt in 0..10 {
         let corr = rng.random_range(1..u16::MAX);
-        let frame = build_actor_ask_frame(corr, actor_id, type_hash, schema_hash, payload3.as_ref());
+        let frame =
+            build_actor_ask_frame(corr, actor_id, type_hash, schema_hash, payload3.as_ref());
 
         let mut tls_stream = connect_tls(server_addr, server_node_id).await;
         write_all(&mut tls_stream, &frame).await;
-        let response = read_response_payload(&mut tls_stream, corr, Duration::from_millis(300)).await;
+        let response =
+            read_response_payload(&mut tls_stream, corr, Duration::from_millis(300)).await;
 
         match response {
             Ok(p) if p.as_ref() == b"PENDING" => {
@@ -447,7 +456,11 @@ async fn main() {
             }
             Ok(p) => {
                 let s = String::from_utf8_lossy(&p);
-                if let Some(applied) = s.trim().strip_prefix("OK applied=").and_then(|x| x.parse::<usize>().ok()) {
+                if let Some(applied) = s
+                    .trim()
+                    .strip_prefix("OK applied=")
+                    .and_then(|x| x.parse::<usize>().ok())
+                {
                     ok_seen = Some(applied);
                     break;
                 }
@@ -480,8 +493,10 @@ async fn main() {
     let payload4 = make_payload(request_id_4, b"ECHO:race");
     let corr_a: u16 = rng.random_range(1..u16::MAX);
     let corr_b: u16 = rng.random_range(1..u16::MAX);
-    let frame_a = build_actor_ask_frame(corr_a, actor_id, type_hash, schema_hash, payload4.as_ref());
-    let frame_b = build_actor_ask_frame(corr_b, actor_id, type_hash, schema_hash, payload4.as_ref());
+    let frame_a =
+        build_actor_ask_frame(corr_a, actor_id, type_hash, schema_hash, payload4.as_ref());
+    let frame_b =
+        build_actor_ask_frame(corr_b, actor_id, type_hash, schema_hash, payload4.as_ref());
 
     let (ra, rb) = tokio::join!(
         async {
@@ -500,8 +515,14 @@ async fn main() {
     let rb = rb.expect("resp b");
     let sa = String::from_utf8_lossy(&ra);
     let sb = String::from_utf8_lossy(&rb);
-    let aa = sa.trim().strip_prefix("OK applied=").and_then(|x| x.parse::<usize>().ok());
-    let ab = sb.trim().strip_prefix("OK applied=").and_then(|x| x.parse::<usize>().ok());
+    let aa = sa
+        .trim()
+        .strip_prefix("OK applied=")
+        .and_then(|x| x.parse::<usize>().ok());
+    let ab = sb
+        .trim()
+        .strip_prefix("OK applied=")
+        .and_then(|x| x.parse::<usize>().ok());
     if aa.is_none() || ab.is_none() {
         eprintln!("FAIL: concurrent responses not OK: a={sa} b={sb}");
         std::process::exit(1);

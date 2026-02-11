@@ -3,7 +3,7 @@
 //! Multi-node test scenarios for gossip-based peer discovery.
 //! These tests verify the peer discovery functionality implemented in Phases 1-5.
 
-use kameo_remote::{registry::PeerInfoGossip, GossipConfig, GossipRegistryHandle, SecretKey};
+use kameo_remote::{GossipConfig, GossipRegistryHandle, SecretKey, registry::PeerInfoGossip};
 mod common;
 use common::wait_for_active_peers;
 use std::future::Future;
@@ -24,9 +24,10 @@ static PEER_DISCOVERY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn init_crypto() {
     CRYPTO_INIT.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("Failed to install crypto provider");
+        // `rustls` only allows installing a default crypto provider once per process.
+        // The library code may have already installed it by the time this runs, so
+        // make init idempotent to avoid flakes.
+        kameo_remote::tls::ensure_crypto_provider();
     });
 }
 
@@ -169,12 +170,11 @@ fn test_local_connection_wins() -> Result<(), DynError> {
         node_b.registry.add_peer(addr_a).await;
         node_b.bootstrap_non_blocking(vec![addr_a]).await;
 
-        // Wait for connection
-        sleep(Duration::from_secs(1)).await;
-
-        // B has direct connection to A
-        let stats_b = node_b.stats().await;
-        assert!(stats_b.active_peers >= 1, "B should be connected to A");
+        // Wait for connection (avoid timing flakiness under contention)
+        assert!(
+            wait_for_active_peers(&node_b, 1, Duration::from_secs(10)).await,
+            "B should be connected to A"
+        );
 
         // Even if mark_peer_failed is called, local connection should win
         // (This is tested at the unit level, but the integration test verifies

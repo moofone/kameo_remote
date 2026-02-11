@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use rkyv::{Archive, Deserialize, Serialize};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rkyv::util::AlignedVec;
+use rkyv::{Archive, Deserialize, Serialize};
 
 #[derive(Archive, Serialize, Deserialize)]
 struct BenchPayload {
@@ -22,17 +22,15 @@ fn bench_archived_access(c: &mut Criterion) {
     let mut latency = c.benchmark_group("kameo_remote_archived_access_latency");
     latency.bench_function("validated", |b| {
         b.iter(|| {
-            let archived =
-                rkyv::access::<rkyv::Archived<BenchPayload>, rkyv::rancor::Error>(bytes)
-                    .expect("validated access");
+            let archived = rkyv::access::<rkyv::Archived<BenchPayload>, rkyv::rancor::Error>(bytes)
+                .expect("validated access");
             black_box(archived);
         });
     });
 
     latency.bench_function("trusted", |b| {
         b.iter(|| {
-            let archived =
-                unsafe { rkyv::access_unchecked::<rkyv::Archived<BenchPayload>>(bytes) };
+            let archived = unsafe { rkyv::access_unchecked::<rkyv::Archived<BenchPayload>>(bytes) };
             black_box(archived);
         });
     });

@@ -4,15 +4,15 @@ use bytes::{Buf, Bytes};
 use tracing::{info, warn};
 
 use crate::{
+    GossipError, Result,
     handle::{
-        handle_raw_ask_request, handle_response_message, send_inline_response,
+        MessageReadResult, handle_raw_ask_request, handle_response_message, send_inline_response,
         send_inline_response_aligned, send_inline_response_on_connection,
         send_inline_response_on_connection_aligned, send_pooled_response,
         send_pooled_response_on_connection, send_streaming_response,
-        send_streaming_response_on_connection, MessageReadResult,
+        send_streaming_response_on_connection,
     },
     registry::{ActorResponse, GossipRegistry, RegistryMessage},
-    GossipError, Result,
 };
 
 /// Per-connection streaming state for managing partial streams
@@ -630,8 +630,12 @@ async fn handle_assembled_message(
                     prefix,
                     payload_len,
                 } => {
-                    if should_stream_response(registry, response_connection, payload_len, response_mode)
-                    {
+                    if should_stream_response(
+                        registry,
+                        response_connection,
+                        payload_len,
+                        response_mode,
+                    ) {
                         // Fallback to copying for oversize pooled responses so the caller doesn't
                         // time out on a valid response.
                         let mut buf = bytes::BytesMut::with_capacity(payload_len);
@@ -656,11 +660,24 @@ async fn handle_assembled_message(
                             send_streaming_response(registry, peer_addr, corr_id, bytes).await;
                         }
                     } else if let Some(conn) = response_connection {
-                        send_pooled_response_on_connection(conn, corr_id, payload, prefix, payload_len)
-                            .await;
+                        send_pooled_response_on_connection(
+                            conn,
+                            corr_id,
+                            payload,
+                            prefix,
+                            payload_len,
+                        )
+                        .await;
                     } else {
-                        send_pooled_response(registry, peer_addr, corr_id, payload, prefix, payload_len)
-                            .await;
+                        send_pooled_response(
+                            registry,
+                            peer_addr,
+                            corr_id,
+                            payload,
+                            prefix,
+                            payload_len,
+                        )
+                        .await;
                     }
                 }
             }
@@ -687,9 +704,11 @@ mod tests {
             actor_id: 0,
         };
 
-        assert!(state
-            .start_stream_with_correlation(header, 1, pool, None)
-            .is_err());
+        assert!(
+            state
+                .start_stream_with_correlation(header, 1, pool, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -725,10 +744,12 @@ mod tests {
             actor_id: 7,
         };
 
-        assert!(state
-            .add_chunk_with_correlation(chunk0, Bytes::from_static(b"abcd"), None)
-            .unwrap()
-            .is_none());
+        assert!(
+            state
+                .add_chunk_with_correlation(chunk0, Bytes::from_static(b"abcd"), None)
+                .unwrap()
+                .is_none()
+        );
         let assembled = state
             .add_chunk_with_correlation(chunk1, Bytes::from_static(b"efgh"), None)
             .unwrap()
@@ -768,9 +789,7 @@ mod tests {
             ..Default::default()
         };
         let registry = Arc::new(GossipRegistry::new("127.0.0.1:0".parse().unwrap(), config));
-        registry
-            .connection_pool
-            .set_registry(registry.clone());
+        registry.connection_pool.set_registry(registry.clone());
 
         let hits = Arc::new(AtomicUsize::new(0));
         let handler = Arc::new(TestHandler { hits: hits.clone() });

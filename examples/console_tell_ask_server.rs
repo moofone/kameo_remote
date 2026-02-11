@@ -1,9 +1,9 @@
 use anyhow::Result;
+use futures::future::BoxFuture;
 use kameo_remote::registry::{
     ActorMessageFuture, ActorMessageHandler, ActorMessageHandlerSync, PeerDisconnectHandler,
 };
 use kameo_remote::{GossipConfig, GossipRegistryHandle, SecretKey};
-use futures::future::BoxFuture;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ const ACTOR_ID: u64 = 0xC0FF_EE00;
 ///   cargo run --example console_tell_ask_server
 ///
 /// Then in another terminal:
-///   cargo run --example console_tell_ask_client /tmp/kameo_tls/console_tell_ask_server.pub
+///   cargo run --example console_tell_ask_client -- /tmp/kameo_tls/console_tell_ask_server.pub
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -61,7 +61,10 @@ async fn main() -> Result<()> {
         ACTOR_ID
     );
     println!("Run the client in another terminal:");
-    println!("  cargo run --example console_tell_ask_client {}", pub_path);
+    println!(
+        "  cargo run --example console_tell_ask_client -- {}",
+        pub_path
+    );
     println!("Press Ctrl+C to stop\n");
 
     let _ = tokio::signal::ctrl_c().await;

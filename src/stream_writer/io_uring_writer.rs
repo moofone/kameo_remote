@@ -4,9 +4,9 @@
 
 use super::{StreamWriter, WriteCommand};
 use crate::connection_pool::TCP_BUFFER_SIZE; // Use shared constant!
-use async_trait::async_trait;
-use io_uring::{cqueue, opcode, squeue, types, IoUring};
-use std::io::Result;
+use crate::stream_writer::BoxFuture;
+use io_uring::{IoUring, cqueue, opcode, squeue, types};
+use std::io;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio_uring::net::TcpStream;
@@ -68,47 +68,51 @@ impl IoUringStreamWriter {
     }
 }
 
-#[async_trait]
 impl StreamWriter for IoUringStreamWriter {
-    async fn write_batch(&mut self, commands: &[WriteCommand]) -> Result<usize> {
-        let mut total_written = 0;
+    fn write_batch<'a>(
+        &'a mut self,
+        commands: &'a [WriteCommand],
+    ) -> BoxFuture<'a, io::Result<usize>> {
+        Box::pin(async move {
+            let mut total_written = 0;
 
-        for cmd in commands {
-            // Get a free buffer
-            let buf_id = self.free_buffers.pop().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::WouldBlock, "No free buffers available")
-            })?;
+            for cmd in commands {
+                // Get a free buffer
+                let buf_id = self.free_buffers.pop().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::WouldBlock, "No free buffers available")
+                })?;
 
-            // Copy data to registered buffer
-            let len = cmd.data.len().min(BUFFER_SIZE);
-            self.registered_buffers[buf_id][..len].copy_from_slice(&cmd.data[..len]);
+                // Copy data to registered buffer
+                let len = cmd.data.len().min(BUFFER_SIZE);
+                self.registered_buffers[buf_id][..len].copy_from_slice(&cmd.data[..len]);
 
-            // Create send operation with registered buffer
-            let sqe = opcode::Send::new(
-                self.tcp_fd,
-                self.registered_buffers[buf_id].as_ptr(),
-                len as u32,
-            )
-            .build()
-            .user_data(buf_id as u64);
+                // Create send operation with registered buffer
+                let sqe = opcode::Send::new(
+                    self.tcp_fd,
+                    self.registered_buffers[buf_id].as_ptr(),
+                    len as u32,
+                )
+                .build()
+                .user_data(buf_id as u64);
 
-            self.pending_ops.push(sqe);
-            total_written += len;
+                self.pending_ops.push(sqe);
+                total_written += len;
 
-            // Submit if we've reached the batch threshold
-            if self.pending_ops.len() >= BATCH_THRESHOLD {
-                self.submit_pending().await?;
+                // Submit if we've reached the batch threshold
+                if self.pending_ops.len() >= BATCH_THRESHOLD {
+                    self.submit_pending().await?;
+                }
             }
-        }
 
-        // Submit any remaining operations
-        self.submit_pending().await?;
+            // Submit any remaining operations
+            self.submit_pending().await?;
 
-        Ok(total_written)
+            Ok(total_written)
+        })
     }
 
-    async fn flush(&mut self) -> Result<()> {
-        self.submit_pending().await
+    fn flush<'a>(&'a mut self) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move { self.submit_pending().await })
     }
 
     fn supports_zero_copy(&self) -> bool {
@@ -124,10 +128,12 @@ impl StreamWriter for IoUringStreamWriter {
         Some(&mut self.registered_buffers[buf_id][..size])
     }
 
-    async fn submit_zero_copy(&mut self, len: usize) -> Result<()> {
-        // In a real implementation, we'd track which buffer was given out
-        // For now, we'll submit the pending operations
-        self.submit_pending().await
+    fn submit_zero_copy<'a>(&'a mut self, _len: usize) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            // In a real implementation, we'd track which buffer was given out
+            // For now, we'll submit the pending operations
+            self.submit_pending().await
+        })
     }
 }
 

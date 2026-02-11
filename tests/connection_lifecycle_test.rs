@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::net::SocketAddr;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
 

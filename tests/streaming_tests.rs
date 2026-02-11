@@ -9,14 +9,14 @@
 
 use bytes::Bytes;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
 use kameo_remote::{GossipConfig, GossipRegistryHandle, KeyPair};
@@ -27,8 +27,7 @@ fn init_tracing() {
     if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
         let _ = tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer().with_filter(
-                EnvFilter::from_default_env()
-                    .add_directive("kameo_remote=debug".parse().unwrap()),
+                EnvFilter::from_default_env().add_directive("kameo_remote=debug".parse().unwrap()),
             ))
             .try_init();
     }

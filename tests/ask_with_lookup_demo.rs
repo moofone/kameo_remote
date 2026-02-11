@@ -417,52 +417,9 @@ fn test_ask_with_lookup_and_performance() {
         );
 
         // ===========================================
-        // PART 4: DELEGATED REPLY SENDER TEST
+        // PART 4: ERROR HANDLING
         // ===========================================
-        println!("\n📊 PART 4: DELEGATED REPLY SENDER");
-        println!("=================================");
-
-        println!("\n🔸 Test 4A: ask_with_reply_sender()");
-
-        // Send request and get delegated reply sender
-        let request = "SELECT COUNT(*) FROM users".as_bytes();
-        let reply_sender = db_actor
-            .connection
-            .as_ref()
-            .expect("Actor should be connected")
-            .ask_with_reply_sender(request)
-            .await
-            .unwrap();
-
-        println!("   - Request sent, got DelegatedReplySender");
-        println!("   - Reply sender: {:?}", reply_sender);
-
-        // In a real implementation, another task would send the response
-        // For now, we'll use the mock response
-        let mock_response = reply_sender.create_mock_reply();
-        println!(
-            "   - Mock response: \"{}\"",
-            String::from_utf8_lossy(mock_response.as_ref())
-        );
-
-        // Test with timeout
-        println!("\n🔸 Test 4B: ask_with_timeout_and_reply()");
-        let timeout = Duration::from_millis(100);
-        let reply_with_timeout = db_actor
-            .connection
-            .as_ref()
-            .expect("Actor should be connected")
-            .ask_with_timeout_and_reply(request, timeout)
-            .await
-            .unwrap();
-
-        println!("   - Request sent with {}ms timeout", timeout.as_millis());
-        println!("   - Reply sender: {:?}", reply_with_timeout);
-
-        // ===========================================
-        // PART 5: ERROR HANDLING
-        // ===========================================
-        println!("\n📊 PART 5: ERROR HANDLING");
+        println!("\n📊 PART 4: ERROR HANDLING");
         println!("========================");
 
         // Test asking a non-existent actor

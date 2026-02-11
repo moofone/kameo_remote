@@ -67,15 +67,15 @@ impl ReplyTo {
     pub async fn reply_with<T>(self, value: &T) -> Result<()>
     where
         T: for<'a> rkyv::Serialize<
-            rkyv::rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
+                rkyv::rancor::Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'a>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rkyv::rancor::Error,
                 >,
-                rkyv::rancor::Error,
             >,
-        >,
     {
         let response =
             rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(GossipError::Serialization)?;
@@ -120,15 +120,15 @@ impl TimeoutReplyTo {
     pub async fn reply_with<T>(self, value: &T) -> Result<()>
     where
         T: for<'a> rkyv::Serialize<
-            rkyv::rancor::Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'a>,
-                    rkyv::ser::sharing::Share,
+                rkyv::rancor::Strategy<
+                    rkyv::ser::Serializer<
+                        rkyv::util::AlignedVec,
+                        rkyv::ser::allocator::ArenaHandle<'a>,
+                        rkyv::ser::sharing::Share,
+                    >,
+                    rkyv::rancor::Error,
                 >,
-                rkyv::rancor::Error,
             >,
-        >,
     {
         if Instant::now() > self.deadline {
             return Err(GossipError::Timeout);
