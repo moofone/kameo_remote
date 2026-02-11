@@ -1,4 +1,4 @@
-use kameo_remote::{registry::GossipRegistry, GossipConfig, KeyPair};
+use kameo_remote::{GossipConfig, KeyPair, registry::GossipRegistry};
 use std::net::SocketAddr;
 use std::time::Duration;
 

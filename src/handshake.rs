@@ -3,11 +3,11 @@
 //! This module implements the Hello handshake that establishes peer capabilities
 //! at connection time for TLS-only v3 peers.
 
-use crate::{tls, GossipError, Result};
+use crate::{GossipError, Result, tls};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use std::{collections::HashSet, io};
+use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::debug;
 
 const HELLO_MAX_SIZE: usize = 1024;
@@ -24,6 +24,14 @@ pub const CURRENT_PROTOCOL_VERSION: u16 = PROTOCOL_VERSION_V3;
 pub enum Feature {
     /// Peer list gossip for automatic peer discovery
     PeerListGossip,
+}
+
+impl Feature {
+    const fn bit(self) -> u64 {
+        match self {
+            Feature::PeerListGossip => 1u64 << 0,
+        }
+    }
 }
 
 /// Hello message sent during connection establishment
@@ -60,39 +68,39 @@ impl Default for Hello {
 }
 
 /// Negotiated peer capabilities after Hello exchange
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerCapabilities {
     /// Negotiated protocol version (min of both peers)
     pub version: u16,
     /// Features both peers support (intersection)
-    pub features: HashSet<Feature>,
+    pub features: u64,
 }
 
 impl PeerCapabilities {
+    fn features_mask(features: &[Feature]) -> u64 {
+        let mut mask = 0u64;
+        for feature in features {
+            mask |= feature.bit();
+        }
+        mask
+    }
+
     /// Create capabilities from a Hello exchange
     /// Takes the intersection of features and minimum version
     pub fn from_hello_exchange(local: &Hello, remote: &Hello) -> Self {
         let version = local.protocol_version.min(remote.protocol_version);
-
-        // Compute feature intersection
-        let local_features: HashSet<_> = local.features.iter().copied().collect();
-        let remote_features: HashSet<_> = remote.features.iter().copied().collect();
-        let features: HashSet<_> = local_features
-            .intersection(&remote_features)
-            .copied()
-            .collect();
-
+        let features = Self::features_mask(&local.features) & Self::features_mask(&remote.features);
         Self { version, features }
     }
 
     /// Check if we can send peer list gossip to this peer
     pub fn can_send_peer_list(&self) -> bool {
-        self.version >= PROTOCOL_VERSION_V3 && self.features.contains(&Feature::PeerListGossip)
+        self.version >= PROTOCOL_VERSION_V3 && self.supports_feature(Feature::PeerListGossip)
     }
 
     /// Check if a specific feature is supported
     pub fn supports_feature(&self, feature: Feature) -> bool {
-        self.features.contains(&feature)
+        (self.features & feature.bit()) != 0
     }
 }
 
@@ -109,7 +117,7 @@ where
                 return Err(GossipError::Network(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "unexpected EOF during Hello handshake",
-                )))
+                )));
             }
             Ok(Ok(n)) => n,
             Ok(Err(err)) => return Err(GossipError::Network(err)),
@@ -230,7 +238,7 @@ mod tests {
         let caps = PeerCapabilities::from_hello_exchange(&local, &remote);
 
         assert_eq!(caps.version, PROTOCOL_VERSION_V3);
-        assert!(caps.features.contains(&Feature::PeerListGossip));
+        assert!(caps.supports_feature(Feature::PeerListGossip));
         assert!(caps.can_send_peer_list());
     }
 
@@ -245,7 +253,7 @@ mod tests {
         let caps = PeerCapabilities::from_hello_exchange(&local, &remote);
 
         assert_eq!(caps.version, PROTOCOL_VERSION_V3);
-        assert!(caps.features.is_empty()); // No common features
+        assert_eq!(caps.features, 0); // No common features
         assert!(!caps.can_send_peer_list()); // Needs both version and feature
     }
 

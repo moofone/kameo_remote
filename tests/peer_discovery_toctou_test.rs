@@ -13,9 +13,10 @@ static CRYPTO_INIT: Once = Once::new();
 
 fn init_crypto() {
     CRYPTO_INIT.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("Failed to install crypto provider");
+        // `rustls` only allows installing a default crypto provider once per process.
+        // The library code may have already installed it by the time this runs, so
+        // make init idempotent to avoid flakes.
+        kameo_remote::tls::ensure_crypto_provider();
     });
 }
 

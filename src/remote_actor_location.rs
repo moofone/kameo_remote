@@ -1,4 +1,4 @@
-use crate::{current_timestamp, NodeId, RegistrationPriority, VectorClock};
+use crate::{NodeId, RegistrationPriority, VectorClock, current_timestamp};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::net::SocketAddr;
 

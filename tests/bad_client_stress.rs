@@ -13,19 +13,21 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use kameo_remote::{GossipRegistryHandle, SecretKey};
 use kameo_remote::registry::RegistryMessage;
+use kameo_remote::{GossipRegistryHandle, SecretKey};
 
 async fn connect_tls(
     server_addr: SocketAddr,
     server_node_id: kameo_remote::NodeId,
-) -> (tokio_rustls::client::TlsStream<TcpStream>, kameo_remote::PeerId) {
+) -> (
+    tokio_rustls::client::TlsStream<TcpStream>,
+    kameo_remote::PeerId,
+) {
     let client_secret = SecretKey::generate();
     let client_peer_id = client_secret.to_keypair().peer_id();
     let tls_cfg = kameo_remote::tls::TlsConfig::new(client_secret).expect("tls config");
     let server_name = kameo_remote::tls::name::encode(&server_node_id);
-    let server_name =
-        rustls::pki_types::ServerName::try_from(server_name).expect("server name");
+    let server_name = rustls::pki_types::ServerName::try_from(server_name).expect("server name");
 
     let tcp = TcpStream::connect(server_addr).await.expect("tcp connect");
     tcp.set_nodelay(true).expect("nodelay");
@@ -38,11 +40,7 @@ async fn connect_tls(
 
     // The server expects the Hello handshake immediately after TLS.
     // Without it, it closes the connection before it will read framed messages.
-    let negotiated_alpn = tls
-        .get_ref()
-        .1
-        .alpn_protocol()
-        .map(|p| p.to_vec());
+    let negotiated_alpn = tls.get_ref().1.alpn_protocol().map(|p| p.to_vec());
     kameo_remote::handshake::perform_hello_handshake(&mut tls, negotiated_alpn.as_deref(), false)
         .await
         .expect("hello handshake");
@@ -66,17 +64,20 @@ async fn send_fullsync<S: tokio::io::AsyncWrite + Unpin>(
         wall_clock_time: kameo_remote::current_timestamp(),
     };
 
-    let data = rkyv::to_bytes::<rkyv::rancor::Error>(&msg)
-        .expect("serialize fullsync");
+    let data = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).expect("serialize fullsync");
     let header = kameo_remote::framing::write_gossip_frame_prefix(data.len());
-    stream.write_all(&header).await.expect("write fullsync header");
-    stream.write_all(data.as_ref()).await.expect("write fullsync payload");
+    stream
+        .write_all(&header)
+        .await
+        .expect("write fullsync header");
+    stream
+        .write_all(data.as_ref())
+        .await
+        .expect("write fullsync payload");
     stream.flush().await.expect("flush fullsync");
 }
 
-async fn read_length_prefixed_frame<S: tokio::io::AsyncRead + Unpin>(
-    stream: &mut S,
-) -> Vec<u8> {
+async fn read_length_prefixed_frame<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
     let mut len_bytes = [0u8; 4];
     stream.read_exact(&mut len_bytes).await.expect("read len");
     let len = u32::from_be_bytes(len_bytes) as usize;
@@ -98,8 +99,7 @@ async fn read_until_direct_response<S: tokio::io::AsyncRead + Unpin>(
         let remaining = deadline - now;
         let frame = tokio::time::timeout(remaining, read_length_prefixed_frame(stream))
             .await
-            .expect("timeout")
-            ;
+            .expect("timeout");
         let frame = frame;
         if frame.first().copied() == Some(kameo_remote::MessageType::DirectResponse as u8) {
             let got_corr = u16::from_be_bytes([frame[1], frame[2]]);
@@ -116,13 +116,10 @@ async fn direct_ask_roundtrip_with_tcp_fragmentation() {
     kameo_remote::tls::ensure_crypto_provider();
 
     let server_secret = SecretKey::generate();
-    let handle = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse().unwrap(),
-        server_secret.clone(),
-        None,
-    )
-    .await
-    .expect("start server");
+    let handle =
+        GossipRegistryHandle::new("127.0.0.1:0".parse().unwrap(), server_secret.clone(), None)
+            .await
+            .expect("start server");
     let server_addr = handle.registry.bind_addr;
     let server_node_id = server_secret.public();
 
@@ -157,13 +154,10 @@ async fn truncated_frame_does_not_crash_server() {
     kameo_remote::tls::ensure_crypto_provider();
 
     let server_secret = SecretKey::generate();
-    let handle = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse().unwrap(),
-        server_secret.clone(),
-        None,
-    )
-    .await
-    .expect("start server");
+    let handle =
+        GossipRegistryHandle::new("127.0.0.1:0".parse().unwrap(), server_secret.clone(), None)
+            .await
+            .expect("start server");
     let server_addr = handle.registry.bind_addr;
     let server_node_id = server_secret.public();
 
@@ -197,13 +191,10 @@ async fn unknown_message_type_is_ignored_and_server_continues() {
     kameo_remote::tls::ensure_crypto_provider();
 
     let server_secret = SecretKey::generate();
-    let handle = GossipRegistryHandle::new(
-        "127.0.0.1:0".parse().unwrap(),
-        server_secret.clone(),
-        None,
-    )
-    .await
-    .expect("start server");
+    let handle =
+        GossipRegistryHandle::new("127.0.0.1:0".parse().unwrap(), server_secret.clone(), None)
+            .await
+            .expect("start server");
     let server_addr = handle.registry.bind_addr;
     let server_node_id = server_secret.public();
 

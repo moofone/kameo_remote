@@ -377,18 +377,22 @@ async fn test_vector_clock_in_actor_location() {
     location2.vector_clock.increment(location2.node_id);
 
     // location2 should be "after" location1
-    assert!(location1
-        .vector_clock
-        .happens_before(&location2.vector_clock));
+    assert!(
+        location1
+            .vector_clock
+            .happens_before(&location2.vector_clock)
+    );
 
     // Merge and verify
     location1.vector_clock.merge(&location2.vector_clock);
     location1.vector_clock.increment(location1.node_id);
 
     // Now location1 should be after location2
-    assert!(location2
-        .vector_clock
-        .happens_before(&location1.vector_clock));
+    assert!(
+        location2
+            .vector_clock
+            .happens_before(&location1.vector_clock)
+    );
 }
 
 #[test]
@@ -410,9 +414,11 @@ fn test_vector_clock_conflict_resolution() {
     location2.vector_clock.increment(location2.node_id);
 
     // They should be concurrent
-    assert!(location1
-        .vector_clock
-        .is_concurrent(&location2.vector_clock));
+    assert!(
+        location1
+            .vector_clock
+            .is_concurrent(&location2.vector_clock)
+    );
 
     // In case of concurrent updates, we use node_id as tiebreaker
     // The one with higher node_id should win

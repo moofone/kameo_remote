@@ -1,8 +1,8 @@
 use kameo_remote::registry::*;
 use kameo_remote::{GossipConfig, RemoteActorLocation};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Helper function to create a test registry
@@ -62,10 +62,9 @@ async fn test_register_actor_sync_multiple_peers_first_ack_wins() {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
 
-            let mut pending_acks = registry.pending_acks.lock().await;
-            if let Some(sender) = pending_acks.remove(&actor_name) {
+            if let Some((_, pending)) = registry.pending_acks.remove_sync(&actor_name) {
                 ack_count.fetch_add(1, Ordering::SeqCst);
-                let _ = sender.send(true); // First ACK
+                pending.complete(true); // First ACK
             }
         })
     };
@@ -78,10 +77,9 @@ async fn test_register_actor_sync_multiple_peers_first_ack_wins() {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let mut pending_acks = registry.pending_acks.lock().await;
-            if let Some(sender) = pending_acks.remove(&actor_name) {
+            if let Some((_, pending)) = registry.pending_acks.remove_sync(&actor_name) {
                 ack_count.fetch_add(1, Ordering::SeqCst);
-                let _ = sender.send(true); // This should win
+                pending.complete(true); // This should win
             }
         })
     };
@@ -94,11 +92,10 @@ async fn test_register_actor_sync_multiple_peers_first_ack_wins() {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
 
-            let mut pending_acks = registry.pending_acks.lock().await;
             // This should find nothing because peer2 already won
-            if let Some(sender) = pending_acks.remove(&actor_name) {
+            if let Some((_, pending)) = registry.pending_acks.remove_sync(&actor_name) {
                 ack_count.fetch_add(1, Ordering::SeqCst);
-                let _ = sender.send(true);
+                pending.complete(true);
             }
         })
     };
@@ -122,8 +119,7 @@ async fn test_register_actor_sync_multiple_peers_first_ack_wins() {
     assert_eq!(ack_count.load(Ordering::SeqCst), 1);
 
     // Verify pending_acks was cleaned up
-    let pending_acks = registry.pending_acks.lock().await;
-    assert!(!pending_acks.contains_key(&actor_name));
+    assert!(!registry.pending_acks.contains_sync(&actor_name));
 
     // Verify the actor was registered
     let stats = registry.get_stats().await;
@@ -156,9 +152,8 @@ async fn test_register_actor_sync_multiple_peers_some_reject() {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            let mut pending_acks = registry.pending_acks.lock().await;
-            if let Some(sender) = pending_acks.remove(&actor_name) {
-                let _ = sender.send(false); // Reject
+            if let Some((_, pending)) = registry.pending_acks.remove_sync(&actor_name) {
+                pending.complete(false); // Reject
             }
         })
     };
@@ -182,8 +177,7 @@ async fn test_register_actor_sync_multiple_peers_some_reject() {
     assert!(elapsed <= Duration::from_millis(80));
 
     // Verify pending_acks was cleaned up
-    let pending_acks = registry.pending_acks.lock().await;
-    assert!(!pending_acks.contains_key(&actor_name));
+    assert!(!registry.pending_acks.contains_sync(&actor_name));
 }
 
 #[tokio::test]
@@ -203,9 +197,8 @@ async fn test_register_actor_sync_race_condition_cleanup() {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(200)).await; // Right at timeout
 
-        let mut pending_acks = registry_clone.pending_acks.lock().await;
-        if let Some(sender) = pending_acks.remove(&actor_name_clone) {
-            let _ = sender.send(true); // This might arrive too late
+        if let Some((_, pending)) = registry_clone.pending_acks.remove_sync(&actor_name_clone) {
+            pending.complete(true); // This might arrive too late
         }
     });
 
@@ -221,8 +214,7 @@ async fn test_register_actor_sync_race_condition_cleanup() {
     assert!(result.is_ok());
 
     // Verify cleanup happened (no leaked channels)
-    let pending_acks = registry.pending_acks.lock().await;
-    assert!(!pending_acks.contains_key(&actor_name));
+    assert!(!registry.pending_acks.contains_sync(&actor_name));
 
     // Actor should be registered
     let stats = registry.get_stats().await;

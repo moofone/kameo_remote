@@ -243,7 +243,10 @@ fn test_key_mismatch_connection_rejection() {
         let correct_peer = client_registry.add_peer(&server_peer_id).await;
         match timeout(Duration::from_secs(5), correct_peer.connect(&server_addr)).await {
             Ok(Ok(())) => println!("      ✅ Connection with correct PeerId succeeded"),
-            Ok(Err(e)) => println!("      ⚠️  Connection with correct PeerId failed: {} (this might be expected if auth is implemented)", e),
+            Ok(Err(e)) => println!(
+                "      ⚠️  Connection with correct PeerId failed: {} (this might be expected if auth is implemented)",
+                e
+            ),
             Err(_) => println!("      ⏰ Connection with correct PeerId timed out"),
         }
 
@@ -255,7 +258,9 @@ fn test_key_mismatch_connection_rejection() {
         let wrong_peer = client_registry.add_peer(&wrong_peer_id).await;
         match timeout(Duration::from_secs(5), wrong_peer.connect(&server_addr)).await {
             Ok(Ok(())) => {
-                println!("      ⚠️  WARNING: Connection with wrong PeerId succeeded (this is a security issue - PeerId validation not enforced!)");
+                println!(
+                    "      ⚠️  WARNING: Connection with wrong PeerId succeeded (this is a security issue - PeerId validation not enforced!)"
+                );
                 // TODO: This should fail! PeerId mismatch should be rejected during TLS handshake
                 // For now, we just log this as a known security issue
             }

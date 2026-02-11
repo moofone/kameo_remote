@@ -5,8 +5,11 @@
 //! - Linux 5.1+: io_uring for zero-copy I/O
 //! - Other platforms: Standard tokio async I/O
 
-use async_trait::async_trait;
-use std::io::Result;
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A write command containing data to be sent
 #[derive(Debug, Clone)]
@@ -16,18 +19,20 @@ pub struct WriteCommand {
 }
 
 /// Platform-agnostic trait for high-performance stream writing
-#[async_trait]
 pub trait StreamWriter: Send + Sync {
     /// Write a batch of commands to the stream
     ///
     /// Implementations should optimize for batching and minimize syscalls.
     /// Returns the number of bytes written.
-    async fn write_batch(&mut self, commands: &[WriteCommand]) -> Result<usize>;
+    fn write_batch<'a>(
+        &'a mut self,
+        commands: &'a [WriteCommand],
+    ) -> BoxFuture<'a, io::Result<usize>>;
 
     /// Flush any buffered data to the stream
     ///
     /// Ensures all pending writes are completed.
-    async fn flush(&mut self) -> Result<()>;
+    fn flush<'a>(&'a mut self) -> BoxFuture<'a, io::Result<()>>;
 
     /// Check if the writer supports zero-copy operations
     fn supports_zero_copy(&self) -> bool {
@@ -44,11 +49,13 @@ pub trait StreamWriter: Send + Sync {
     /// Submit a zero-copy write operation
     ///
     /// The buffer must have been obtained from `get_zero_copy_buffer`.
-    async fn submit_zero_copy(&mut self, _len: usize) -> Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Zero-copy not supported on this platform",
-        ))
+    fn submit_zero_copy<'a>(&'a mut self, _len: usize) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Zero-copy not supported on this platform",
+            ))
+        })
     }
 }
 

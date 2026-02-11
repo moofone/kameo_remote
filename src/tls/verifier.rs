@@ -1,6 +1,6 @@
 use crate::{NodeId, PublicKey};
-use rustls::pki_types::CertificateDer;
 use rustls::Error;
+use rustls::pki_types::CertificateDer;
 
 /// Extract NodeId from a raw public key certificate
 ///

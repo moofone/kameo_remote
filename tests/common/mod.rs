@@ -11,9 +11,10 @@ static CRYPTO_INIT: Once = Once::new();
 
 fn init_crypto() {
     CRYPTO_INIT.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("Failed to install crypto provider");
+        // `rustls` only allows installing a default crypto provider once per process.
+        // The library code may have already installed it by the time this runs, so
+        // make init idempotent to avoid test flakes.
+        kameo_remote::tls::ensure_crypto_provider();
     });
 }
 
@@ -36,15 +37,20 @@ pub async fn create_tls_node(config: GossipConfig) -> Result<GossipRegistryHandl
     let mut backoff = Duration::from_millis(25);
 
     loop {
-        match GossipRegistryHandle::new_with_tls(bind_addr, secret_key.clone(), Some(config.clone()))
-            .await
+        match GossipRegistryHandle::new_with_tls(
+            bind_addr,
+            secret_key.clone(),
+            Some(config.clone()),
+        )
+        .await
         {
             Ok(node) => return Ok(node),
             Err(e) => {
                 let is_eperm = matches!(&e, kameo_remote::GossipError::Network(io) if io.raw_os_error() == Some(1));
                 if is_eperm && Instant::now() < deadline {
                     sleep(backoff).await;
-                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(1_000));
+                    backoff =
+                        std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(1_000));
                     continue;
                 }
                 return Err(Box::new(e));

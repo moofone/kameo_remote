@@ -1,6 +1,8 @@
 mod common;
 
-use common::{connect_bidirectional, create_tls_node, force_disconnect, wait_for_condition, DynError};
+use common::{
+    DynError, connect_bidirectional, create_tls_node, force_disconnect, wait_for_condition,
+};
 use kameo_remote::{GossipConfig, RegistrationPriority};
 use std::future::Future;
 use std::time::Duration;
@@ -111,7 +113,10 @@ fn test_partition_blocks_propagation_until_heal_without_lookup_dials() -> Result
             has_actor(&node_a, "actor.before")
         })
         .await;
-        assert!(ok, "baseline propagation failed (A must learn actor.before)");
+        assert!(
+            ok,
+            "baseline propagation failed (A must learn actor.before)"
+        );
 
         // Partition B<->C and register a new actor on C.
         force_disconnect(&node_b, &node_c).await;
@@ -126,8 +131,10 @@ fn test_partition_blocks_propagation_until_heal_without_lookup_dials() -> Result
             .await?;
 
         // While partition is active, A must not learn about actor.partitioned.
-        assert_absent_for(Duration::from_secs(3), || has_actor(&node_a, "actor.partitioned"))
-            .await?;
+        assert_absent_for(Duration::from_secs(3), || {
+            has_actor(&node_a, "actor.partitioned")
+        })
+        .await?;
 
         // Heal and ensure propagation completes.
         connect_bidirectional(&node_b, &node_c).await?;

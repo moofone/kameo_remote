@@ -49,7 +49,12 @@ pub(crate) fn is_safe_to_dial(
 }
 
 #[inline]
-fn is_safe_ipv6(ipv6: &Ipv6Addr, allow_private: bool, allow_loopback: bool, allow_link_local: bool) -> bool {
+fn is_safe_ipv6(
+    ipv6: &Ipv6Addr,
+    allow_private: bool,
+    allow_loopback: bool,
+    allow_link_local: bool,
+) -> bool {
     if ipv6.is_loopback() && !allow_loopback {
         return false;
     }
@@ -69,4 +74,3 @@ fn is_safe_ipv6(ipv6: &Ipv6Addr, allow_private: bool, allow_loopback: bool, allo
 
     true
 }
-

@@ -219,7 +219,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "- We expected a different public key: {}",
                         claimed_server_node_id.fmt_short()
                     );
-                    println!("- TLS handshake correctly detected the mismatch and rejected the connection");
+                    println!(
+                        "- TLS handshake correctly detected the mismatch and rejected the connection"
+                    );
                     println!();
                     println!("This prevents man-in-the-middle attacks where an attacker");
                     println!("tries to impersonate the server with their own key.");

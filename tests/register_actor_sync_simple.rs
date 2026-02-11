@@ -88,9 +88,8 @@ async fn test_register_actor_sync_with_healthy_peers() {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Simulate receiving an ImmediateAck
-        let mut pending_acks = registry_clone.pending_acks.lock().await;
-        if let Some(sender) = pending_acks.remove(&actor_name_clone) {
-            let _ = sender.send(true); // Send success ACK
+        if let Some((_, pending)) = registry_clone.pending_acks.remove_sync(&actor_name_clone) {
+            pending.complete(true); // Send success ACK
         }
     });
 
@@ -144,8 +143,7 @@ async fn test_register_actor_sync_timeout() {
     assert_eq!(stats.local_actors, 1);
 
     // Verify pending ACK was cleaned up
-    let pending_acks = registry.pending_acks.lock().await;
-    assert!(!pending_acks.contains_key(&actor_name));
+    assert!(!registry.pending_acks.contains_sync(&actor_name));
 }
 
 #[tokio::test]
@@ -167,9 +165,8 @@ async fn test_register_actor_sync_peer_rejects() {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Simulate receiving an ImmediateAck with success=false
-        let mut pending_acks = registry_clone.pending_acks.lock().await;
-        if let Some(sender) = pending_acks.remove(&actor_name_clone) {
-            let _ = sender.send(false); // Send rejection ACK
+        if let Some((_, pending)) = registry_clone.pending_acks.remove_sync(&actor_name_clone) {
+            pending.complete(false); // Send rejection ACK
         }
     });
 
@@ -214,7 +211,7 @@ async fn test_register_actor_sync_only_failed_peers() {
 
 #[tokio::test]
 async fn test_register_actor_sync_channel_closed() {
-    // Test: Handle case where ACK channel is closed unexpectedly
+    // Test: Handle case where the pending ACK is canceled unexpectedly
     let registry = create_test_registry("127.0.0.1:8080".parse().unwrap());
     let peer_addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
 
@@ -224,16 +221,15 @@ async fn test_register_actor_sync_channel_closed() {
     let actor_name = "test_actor".to_string();
     let actor_location = create_test_actor_location("127.0.0.1:9001".parse().unwrap());
 
-    // Simulate channel being closed by removing and dropping the sender
+    // Simulate cancellation by removing and canceling the pending ACK.
     let registry_clone = Arc::new(registry.clone());
     let actor_name_clone = actor_name.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Remove the sender without calling send (simulates channel close)
-        let mut pending_acks = registry_clone.pending_acks.lock().await;
-        let _dropped_sender = pending_acks.remove(&actor_name_clone);
-        // sender is dropped here, closing the channel
+        if let Some((_, pending)) = registry_clone.pending_acks.remove_sync(&actor_name_clone) {
+            pending.cancel();
+        }
     });
 
     let result = registry

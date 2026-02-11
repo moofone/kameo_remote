@@ -156,7 +156,10 @@ mod tests {
         assert!(time >= Duration::from_secs(7), "keepalive_time={time:?}");
 
         let interval = sock.keepalive_interval().unwrap();
-        assert!(interval >= Duration::from_secs(9), "keepalive_interval={interval:?}");
+        assert!(
+            interval >= Duration::from_secs(9),
+            "keepalive_interval={interval:?}"
+        );
 
         // Not supported on all targets; this test module is gated to targets
         // where socket2 exposes the getter.

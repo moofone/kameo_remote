@@ -26,8 +26,7 @@ fn registry_delta_rkyv_roundtrip() {
     };
 
     let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&delta).unwrap(); // ALLOW_RKYV_TO_BYTES
-    let deserialized =
-        rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
+    let deserialized = rkyv::from_bytes::<RegistryDelta, rkyv::rancor::Error>(&serialized).unwrap(); // ALLOW_RKYV_FROM_BYTES
 
     assert_eq!(deserialized.since_sequence, 0);
     assert_eq!(deserialized.current_sequence, 1);
@@ -67,4 +66,3 @@ fn registry_message_rkyv_roundtrip_delta_gossip() {
         other => panic!("unexpected message variant: {other:?}"),
     }
 }
-

@@ -69,7 +69,7 @@ async fn main() {
         let (peer_status, configured_peers, connected_peers) = {
             let gossip_state = handle.registry.gossip_state.lock().await;
             let pool = &handle.registry.connection_pool;
-            let actor_state = handle.registry.actor_state.read().await;
+            let actor_state = handle.registry.actor_state.as_ref();
             let mut status = Vec::new();
             let mut configured_count = 0;
             let mut connected_count = 0;
@@ -77,13 +77,13 @@ async fn main() {
                 pool.get_connected_peers().into_iter().collect();
 
             // Check all configured peers (from peer_id_to_addr)
-            for entry in pool.peer_id_to_addr.iter() {
-                let peer_id = entry.key();
-                let addr = entry.value();
+            pool.peer_id_to_addr.iter_sync(|peer_id, addr| {
+                let peer_id = peer_id.clone();
+                let addr = *addr;
                 configured_count += 1;
 
                 // Check if we have an active connection to this node
-                let has_connection = connected_set.contains(addr);
+                let has_connection = connected_set.contains(&addr);
                 if has_connection {
                     connected_count += 1;
                 }
@@ -92,7 +92,7 @@ async fn main() {
                 let mut peer_actors: Vec<String> = Vec::new();
 
                 // Check known actors
-                for (name, location) in &actor_state.known_actors {
+                actor_state.known_actors.iter_sync(|name, location| {
                     if let Ok(actor_addr) = location.address.parse::<SocketAddr>() {
                         // Match by port since actors use different ports (9001, 9002, 9003)
                         match (addr.port(), actor_addr.port()) {
@@ -102,10 +102,11 @@ async fn main() {
                             _ => {}
                         }
                     }
-                }
+                    true
+                });
 
                 // Also check local actors
-                for (name, location) in &actor_state.local_actors {
+                actor_state.local_actors.iter_sync(|name, location| {
                     if let Ok(actor_addr) = location.address.parse::<SocketAddr>() {
                         match (addr.port(), actor_addr.port()) {
                             (8001, 9001) => peer_actors.push(name.clone()),
@@ -114,10 +115,11 @@ async fn main() {
                             _ => {}
                         }
                     }
-                }
+                    true
+                });
 
                 // Check failure status from gossip_state if available
-                let failure_info = gossip_state.peers.get(addr);
+                let failure_info = gossip_state.peers.get(&addr);
                 let is_failed = failure_info
                     .map(|info| info.failures >= handle.registry.config.max_peer_failures)
                     .unwrap_or(false);
@@ -131,13 +133,19 @@ async fn main() {
                     "NOT_CONNECTED".to_string()
                 };
                 status.push(format!("  {} ({}) - {}", peer_id, addr, status_str));
-            }
+                true
+            });
             (status, configured_count, connected_count)
         };
 
         println!(
             "Node C - Configured peers: {}, Connected: {}, Active: {}, Failed: {}, Known actors: {}, Local actors: {}",
-            configured_peers, connected_peers, stats.active_peers, stats.failed_peers, stats.known_actors, stats.local_actors
+            configured_peers,
+            connected_peers,
+            stats.active_peers,
+            stats.failed_peers,
+            stats.known_actors,
+            stats.local_actors
         );
         println!("Peer Status:");
         for peer in peer_status {

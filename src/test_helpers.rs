@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::Notify;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 struct RawCapture {
     messages: Mutex<Vec<Bytes>>,

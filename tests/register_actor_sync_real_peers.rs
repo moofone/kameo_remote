@@ -538,10 +538,16 @@ fn test_register_actor_sync_real_peer_timeout() {
 
         // Actor should still be registered locally
         // Check registry directly since actor might not be listening yet
-        let actor_state = handle1.registry.actor_state.read().await;
-        let is_registered = actor_state.local_actors.contains_key(&actor_name)
-            || actor_state.known_actors.contains_key(&actor_name);
-        drop(actor_state);
+        let is_registered = handle1
+            .registry
+            .actor_state
+            .local_actors
+            .contains_sync(actor_name.as_str())
+            || handle1
+                .registry
+                .actor_state
+                .known_actors
+                .contains_sync(actor_name.as_str());
         assert!(is_registered, "Actor should be registered despite timeout");
 
         println!("✅ Timeout behavior validated - graceful fallback works");

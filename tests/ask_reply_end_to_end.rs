@@ -1,14 +1,14 @@
 mod common;
 
 use common::{create_tls_node, wait_for_condition};
-use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
 use kameo_remote::GossipConfig;
+use kameo_remote::registry::{ActorMessageFuture, ActorMessageHandler};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 const TEST_ACTOR_ID: u64 = 7;
 const TEST_TYPE_HASH: u32 = 0xA57A_A5C0;
@@ -109,10 +109,12 @@ fn test_end_to_end_ask_reply() {
         // on subsequent networking syscalls. Only enable it when explicitly requested.
         if std::env::var("KAMEO_TEST_LOG").ok().as_deref() == Some("1") {
             let _ = tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer().with_filter(
-                    EnvFilter::from_default_env()
-                        .add_directive("kameo_remote=info".parse().unwrap()),
-                ))
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        EnvFilter::from_default_env()
+                            .add_directive("kameo_remote=info".parse().unwrap()),
+                    ),
+                )
                 .try_init();
         }
 
@@ -275,9 +277,7 @@ fn test_end_to_end_ask_reply() {
         info!("=== Test 4: Performance test ===");
         {
             let conn = handle_a.lookup_peer(&peer_b_id).await.unwrap();
-            let conn = conn
-                .connection_ref()
-                .expect("connection should be ready");
+            let conn = conn.connection_ref().expect("connection should be ready");
 
             let num_requests = 100;
             let start = std::time::Instant::now();
@@ -322,7 +322,12 @@ fn test_end_to_end_ask_reply() {
             let request = bytes::Bytes::from_static(b"ping");
 
             let response = conn
-                .ask_actor_frame(TEST_ACTOR_ID, TEST_TYPE_HASH, request, Duration::from_secs(30))
+                .ask_actor_frame(
+                    TEST_ACTOR_ID,
+                    TEST_TYPE_HASH,
+                    request,
+                    Duration::from_secs(30),
+                )
                 .await
                 .unwrap();
 

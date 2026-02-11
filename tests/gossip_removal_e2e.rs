@@ -1,7 +1,7 @@
 mod common;
 
 use common::{
-    connect_bidirectional, create_tls_node, wait_for_actor, wait_for_condition, DynError,
+    DynError, connect_bidirectional, create_tls_node, wait_for_actor, wait_for_condition,
 };
 use kameo_remote::{GossipConfig, RegistrationPriority};
 use std::time::Duration;

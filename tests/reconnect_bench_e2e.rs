@@ -133,23 +133,33 @@ async fn reconnect_continues_ask_bench_after_server_restart() {
     let server_handler = Arc::new(EchoAskHandler::new());
 
     // Start server on an ephemeral port, then restart on the same port with the same identity.
-    let server = start_server_at("127.0.0.1:0".parse().unwrap(), server_secret.clone(), server_handler.clone()).await;
+    let server = start_server_at(
+        "127.0.0.1:0".parse().unwrap(),
+        server_secret.clone(),
+        server_handler.clone(),
+    )
+    .await;
     let server_addr = server.registry.bind_addr;
 
     // Client.
     let client_secret = SecretKey::generate();
-    let client = Arc::new(GossipRegistryHandle::new_with_tls(
-        "127.0.0.1:0".parse().unwrap(),
-        client_secret,
-        Some(GossipConfig {
-            gossip_interval: Duration::from_secs(3600),
-            ..Default::default()
-        }),
-    )
-    .await
-    .expect("start client"));
+    let client = Arc::new(
+        GossipRegistryHandle::new_with_tls(
+            "127.0.0.1:0".parse().unwrap(),
+            client_secret,
+            Some(GossipConfig {
+                gossip_interval: Duration::from_secs(3600),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("start client"),
+    );
 
-    client.registry.configure_peer(server_peer_id.clone(), server_addr).await;
+    client
+        .registry
+        .configure_peer(server_peer_id.clone(), server_addr)
+        .await;
     let initial_remote = client
         .lookup_peer(&server_peer_id)
         .await

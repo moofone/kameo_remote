@@ -201,10 +201,15 @@ impl RemoteActorRef {
         conn.ask_with_timeout_bytes(request, timeout).await
     }
 
-    /// Send a request and delegate the response handling via ReplyTo
+    /// Send a request and return a deferred handle that can be awaited later.
+    ///
+    /// This is the correct way to delegate "waiting for the response" to another task.
     ///
     /// ZERO-LOCK: Uses cached connection directly with no mutex overhead.
-    pub async fn ask_with_reply_to(&self, request: &[u8]) -> crate::Result<crate::ReplyTo> {
+    pub async fn ask_deferred(
+        &self,
+        request: &[u8],
+    ) -> crate::Result<crate::connection_pool::PendingAsk> {
         // Check if registry has been shut down
         if let Some(registry) = self.registry.upgrade() {
             if registry.shutdown.load(Ordering::Relaxed) {
@@ -221,7 +226,7 @@ impl RemoteActorRef {
             ))
         })?;
 
-        conn.ask_with_reply_to(request).await
+        conn.ask_deferred(request).await
     }
 
     /// Send a typed fire-and-forget message

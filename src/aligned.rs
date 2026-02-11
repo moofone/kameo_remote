@@ -1,5 +1,5 @@
-use std::ops::Deref;
 use crossbeam_queue::ArrayQueue;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -200,13 +200,12 @@ impl AlignedBytesPool {
     pub fn new(pool_size: usize) -> Self {
         let queue = ArrayQueue::new(pool_size);
         for _ in 0..pool_size {
-            let _ = queue.push(AlignedBuffer::with_capacity(DEFAULT_ALIGNED_BUFFER_CAPACITY));
+            let _ = queue.push(AlignedBuffer::with_capacity(
+                DEFAULT_ALIGNED_BUFFER_CAPACITY,
+            ));
         }
 
-        Self {
-            queue,
-            pool_size,
-        }
+        Self { queue, pool_size }
     }
 
     /// CRITICAL_PATH: acquire aligned buffer without extra allocations.

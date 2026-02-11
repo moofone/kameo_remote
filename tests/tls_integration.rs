@@ -697,9 +697,9 @@ fn test_instant_gossip_with_long_interval() {
         let location = registry_b.lookup("early_actor").await;
 
         assert!(
-        location.is_some(),
-        "B should discover A's actor through instant initial FullSync handshake, not periodic gossip (interval is 20s!)"
-    );
+            location.is_some(),
+            "B should discover A's actor through instant initial FullSync handshake, not periodic gossip (interval is 20s!)"
+        );
 
         tracing::info!("✅ SUCCESS: B discovered A's actor through instant startup gossip!");
         tracing::info!(
